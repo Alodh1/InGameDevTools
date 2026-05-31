@@ -1,4 +1,3 @@
-#if DEBUG
 using InGameDevTools.Utils;
 using ImGuiNET;
 using Newtonsoft.Json;
@@ -1011,10 +1010,8 @@ public sealed partial class DebugWindowManager
         {
             try
             {
-                string sourceRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "ModsNeedUpdate");
-                string exportRoot = Path.Combine(sourceRoot, "_ingamedevtools_exports");
                 string relativePath = Path.Combine("assets", document.Domain, document.AssetPath.Replace('/', Path.DirectorySeparatorChar));
-                string outputPath = Path.Combine(exportRoot, relativePath);
+                string outputPath = GetToolAuthoredAssetPath("recipes", relativePath);
 
                 if (File.Exists(outputPath) && !_overwriteExport)
                 {
@@ -1174,7 +1171,8 @@ public sealed partial class DebugWindowManager
             return new(
                 () => target.ReplaceAll(original),
                 backupPath,
-                () => SerializeToken(entry.Document.Root));
+                () => SerializeToken(entry.Document.Root),
+                "recipes");
         }
 
         private void ApplyRecipeToTarget(RecipeLiveListTarget target, RecipeEntry entry)
@@ -1919,4 +1917,3 @@ public sealed partial class DebugWindowManager
         }
     }
 }
-#endif

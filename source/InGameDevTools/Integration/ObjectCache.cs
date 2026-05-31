@@ -9,7 +9,7 @@ public sealed class ObjectCache<TKey, TValue> : IDisposable
 {
     private readonly Dictionary<TKey, TValue> _mapping = [];
     private readonly Dictionary<TKey, long> _lastAccess = [];
-    private readonly ReaderWriterLock _lock = new();
+    private readonly ReaderWriterLockSlim _lock = new();
     private ICoreAPI? _api;
     private readonly int _cleanUpPeriodMs;
     private readonly long _cleanUpTimer = 0;
@@ -31,27 +31,45 @@ public sealed class ObjectCache<TKey, TValue> : IDisposable
 
     public void Add(TKey key, TValue value)
     {
-        bool threadSafe = _threadSafe;
-        if (threadSafe) _lock.AcquireWriterLock(5000);
-        _addCountBetweenCleanUps++;
-        _mapping[key] = value;
-        _lastAccess[key] = CurrentTime();
-        if (threadSafe) _lock.ReleaseWriterLock();
+        EnterWriteLock();
+        try
+        {
+            _addCountBetweenCleanUps++;
+            _mapping[key] = value;
+            _lastAccess[key] = CurrentTime();
+        }
+        finally
+        {
+            ExitWriteLock();
+        }
     }
 
     public bool Get(TKey key, [NotNullWhen(true)] out TValue? value)
     {
-        bool threadSafe = _threadSafe;
-        if (threadSafe) _lock.AcquireWriterLock(5000);
-
-        _getCountBetweenCleanUps++;
-        bool success = _mapping.TryGetValue(key, out value);
-        if (success)
+        EnterReadLock();
+        bool success;
+        try
         {
-            _lastAccess[key] = CurrentTime();
+            success = _mapping.TryGetValue(key, out value);
+        }
+        finally
+        {
+            ExitReadLock();
         }
 
-        if (threadSafe) _lock.ReleaseWriterLock();
+        EnterWriteLock();
+        try
+        {
+            _getCountBetweenCleanUps++;
+            if (success && _mapping.ContainsKey(key))
+            {
+                _lastAccess[key] = CurrentTime();
+            }
+        }
+        finally
+        {
+            ExitWriteLock();
+        }
 
         return success;
     }
@@ -59,9 +77,7 @@ public sealed class ObjectCache<TKey, TValue> : IDisposable
     public void Clean()
     {
         long currentTime = CurrentTime();
-        bool threadSafe = _threadSafe;
-
-        if (threadSafe) _lock.AcquireWriterLock(5000);
+        EnterWriteLock();
 
         try
         {
@@ -92,27 +108,62 @@ public sealed class ObjectCache<TKey, TValue> : IDisposable
         {
             LoggerUtil.Error(_api, this, $"({_loggedCacheName}) Error on cache cleanup:\n{exception}");
         }
-
-        if (threadSafe) _lock.ReleaseWriterLock();
+        finally
+        {
+            ExitWriteLock();
+        }
     }
 
     public void Clear()
     {
-        if (_threadSafe) _lock.AcquireWriterLock(5000);
-        _mapping.Clear();
-        _lastAccess.Clear();
-        if (_threadSafe) _lock.ReleaseWriterLock();
+        EnterWriteLock();
+        try
+        {
+            _mapping.Clear();
+            _lastAccess.Clear();
+        }
+        finally
+        {
+            ExitWriteLock();
+        }
     }
 
     public void Dispose()
     {
-        if (_threadSafe) _lock.AcquireWriterLock(5000);
-        _mapping.Clear();
-        _lastAccess.Clear();
-        _api?.World.UnregisterGameTickListener(_cleanUpTimer);
-        _api = null;
-        if (_threadSafe) _lock.ReleaseWriterLock();
+        EnterWriteLock();
+        try
+        {
+            _mapping.Clear();
+            _lastAccess.Clear();
+            _api?.World.UnregisterGameTickListener(_cleanUpTimer);
+            _api = null;
+        }
+        finally
+        {
+            ExitWriteLock();
+            _lock.Dispose();
+        }
     }
 
     private long CurrentTime() => _api?.World.ElapsedMilliseconds ?? 0;
+
+    private void EnterReadLock()
+    {
+        if (_threadSafe) _lock.EnterReadLock();
+    }
+
+    private void ExitReadLock()
+    {
+        if (_threadSafe) _lock.ExitReadLock();
+    }
+
+    private void EnterWriteLock()
+    {
+        if (_threadSafe) _lock.EnterWriteLock();
+    }
+
+    private void ExitWriteLock()
+    {
+        if (_threadSafe) _lock.ExitWriteLock();
+    }
 }

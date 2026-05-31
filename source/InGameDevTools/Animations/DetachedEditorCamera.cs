@@ -1,4 +1,3 @@
-#if DEBUG
 using ImGuiNET;
 using System.Reflection;
 using Vintagestory.API.Client;
@@ -406,4 +405,3 @@ internal sealed class DetachedEditorCamera : IRenderer
         }
     }
 }
-#endif

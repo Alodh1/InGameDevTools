@@ -1,5 +1,6 @@
 using InGameDevTools.Animations;
 using InGameDevTools.Integration.Transpilers;
+using InGameDevTools.Utils;
 using HarmonyLib;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -13,7 +14,8 @@ namespace InGameDevTools.Integration;
 internal static class AnimationPatches
 {
     public static event Action<Entity, float>? OnBeforeFrame;
-    public static Settings ClientSettings { get; set; } = new();
+    public static bool DisableAllAnimations { get; set; }
+    public static bool DisableThirdPersonAnimations { get; set; }
     public static Dictionary<long, ThirdPersonAnimationsBehavior> AnimationBehaviors { get; } = new();
     public static FirstPersonAnimationsBehavior? FirstPersonAnimationBehavior { get; set; }
     public static long OwnerEntityId { get; set; }
@@ -27,25 +29,34 @@ internal static class AnimationPatches
         Animators = new(api, "in-game devtools animators to players cache", 10000, 5 * 60 * 1000, threadSafe: true);
         Harmony harmony = new(harmonyId);
 
-        harmony.Patch(
+        PatchIfFound(
+            api,
+            harmony,
             typeof(EntityShapeRenderer).GetMethod("BeforeRender", AccessTools.all),
+            "EntityShapeRenderer.BeforeRender",
             prefix: new HarmonyMethod(AccessTools.Method(typeof(AnimationPatches), nameof(BeforeRender))));
 
-        harmony.Patch(
+        PatchIfFound(
+            api,
+            harmony,
             typeof(EntityPlayer).GetMethod(nameof(EntityPlayer.OnSelfBeforeRender), AccessTools.all),
+            "EntityPlayer.OnSelfBeforeRender",
             postfix: new HarmonyMethod(AccessTools.Method(typeof(AnimationPatches), nameof(OnSelfBeforeRender))));
 
-        harmony.Patch(
+        PatchIfFound(
+            api,
+            harmony,
             typeof(Vintagestory.API.Common.AnimationManager).GetMethod("OnClientFrame", AccessTools.all),
+            "AnimationManager.OnClientFrame",
             postfix: new HarmonyMethod(AccessTools.Method(typeof(AnimationPatches), nameof(AnimationManagerOnClientFrame))));
     }
 
     public static void Unpatch(string harmonyId)
     {
         Harmony harmony = new(harmonyId);
-        harmony.Unpatch(typeof(EntityShapeRenderer).GetMethod("BeforeRender", AccessTools.all), HarmonyPatchType.Prefix, harmonyId);
-        harmony.Unpatch(typeof(EntityPlayer).GetMethod(nameof(EntityPlayer.OnSelfBeforeRender), AccessTools.all), HarmonyPatchType.Postfix, harmonyId);
-        harmony.Unpatch(typeof(Vintagestory.API.Common.AnimationManager).GetMethod("OnClientFrame", AccessTools.all), HarmonyPatchType.Postfix, harmonyId);
+        UnpatchIfFound(harmony, typeof(EntityShapeRenderer).GetMethod("BeforeRender", AccessTools.all), HarmonyPatchType.Prefix, harmonyId);
+        UnpatchIfFound(harmony, typeof(EntityPlayer).GetMethod(nameof(EntityPlayer.OnSelfBeforeRender), AccessTools.all), HarmonyPatchType.Postfix, harmonyId);
+        UnpatchIfFound(harmony, typeof(Vintagestory.API.Common.AnimationManager).GetMethod("OnClientFrame", AccessTools.all), HarmonyPatchType.Postfix, harmonyId);
 
         Animators?.Dispose();
         Animators = null;
@@ -55,10 +66,27 @@ internal static class AnimationPatches
         OwnerEntityId = 0;
     }
 
+    private static void PatchIfFound(ICoreAPI api, Harmony harmony, MethodBase? target, string description, HarmonyMethod? prefix = null, HarmonyMethod? postfix = null)
+    {
+        if (target == null)
+        {
+            LoggerUtil.Warn(api, typeof(AnimationPatches), $"Patch target not found: {description}. The game version may have changed; skipping this patch.");
+            return;
+        }
+
+        harmony.Patch(target, prefix: prefix, postfix: postfix);
+    }
+
+    private static void UnpatchIfFound(Harmony harmony, MethodBase? target, HarmonyPatchType patchType, string harmonyId)
+    {
+        if (target == null) return;
+        harmony.Unpatch(target, patchType, harmonyId);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void OnFrameInvoke(ClientAnimator? animator, ElementPose pose)
     {
-        if (ClientSettings.DisableAllAnimations || animator == null) return;
+        if (DisableAllAnimations || animator == null) return;
 
         EntityPlayer? entity = null;
         if (pose is ExtendedElementPose { Player: not null } extendedPose)
@@ -82,7 +110,7 @@ internal static class AnimationPatches
             return;
         }
 
-        if (!ClientSettings.DisableThirdPersonAnimations &&
+        if (!DisableThirdPersonAnimations &&
             AnimationBehaviors.TryGetValue(entity.EntityId, out ThirdPersonAnimationsBehavior? behavior))
         {
             behavior.OnFrame(entity, pose, animator);
@@ -91,13 +119,13 @@ internal static class AnimationPatches
 
     private static void BeforeRender(EntityShapeRenderer __instance, float dt)
     {
-        if (ClientSettings.DisableAllAnimations) return;
+        if (DisableAllAnimations) return;
         OnBeforeFrame?.Invoke(__instance.entity, dt);
     }
 
     private static void OnSelfBeforeRender(EntityPlayer __instance, float dt)
     {
-        if (ClientSettings.DisableAllAnimations) return;
+        if (DisableAllAnimations) return;
         OnBeforeFrame?.Invoke(__instance, dt);
     }
 

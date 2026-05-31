@@ -1,4 +1,3 @@
-#if DEBUG
 using System.Collections.Generic;
 
 namespace InGameDevTools.Animations;
@@ -185,4 +184,3 @@ internal sealed class AnimationEditorHistory
         }
     }
 }
-#endif

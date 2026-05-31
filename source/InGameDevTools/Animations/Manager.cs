@@ -20,7 +20,6 @@ public sealed class AnimationsManager
         _instance = this;
 
         _api = api;
-        _colliders.Clear();
     }
     public void Load()
     {
@@ -95,33 +94,54 @@ public sealed class AnimationsManager
     public static void RegisterCollider(string item, string type, Action<LineSegmentCollider> setter, System.Func<LineSegmentCollider> getter) => DebugWindowManager.RegisterCollider(item, type, setter, getter);
 
     private readonly ICoreClientAPI _api;
-    private static Dictionary<string, Dictionary<string, (Action<LineSegmentCollider> setter, System.Func<LineSegmentCollider> getter)>> _colliders = new();
     internal static AnimationsManager _instance;
 
     private Animation? GetAnimationRecursive(string code, IEnumerable<string> tags)
     {
-        foreach (string tag in tags)
+        foreach (string candidate in BuildAnimationCandidates(code, tags))
         {
-            string newCode = code + "-" + tag;
-
-            Animation? result = GetAnimationRecursive(newCode, tags.Except([tag]));
-
-            if (result != null) return result;
-        }
-
-        foreach (string tag in tags)
-        {
-            Animation? result = GetAnimationRecursive(code, tags.Except([tag]));
-
-            if (result != null) return result;
-        }
-
-        if (Animations.TryGetValue(code, out Animation finalResult))
-        {
-            return finalResult;
+            if (Animations.TryGetValue(candidate, out Animation? animation))
+            {
+                return animation;
+            }
         }
 
         return null;
+    }
+
+    private static IEnumerable<string> BuildAnimationCandidates(string code, IEnumerable<string> tags)
+    {
+        string[] tagArray = tags
+            .Where(tag => !string.IsNullOrWhiteSpace(tag))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        HashSet<string> emitted = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string candidate in BuildTaggedCandidates(code, tagArray))
+        {
+            if (emitted.Add(candidate)) yield return candidate;
+        }
+
+        if (emitted.Add(code)) yield return code;
+    }
+
+    private static IEnumerable<string> BuildTaggedCandidates(string prefix, string[] remainingTags)
+    {
+        for (int index = 0; index < remainingTags.Length; index++)
+        {
+            string tag = remainingTags[index];
+            string candidate = $"{prefix}-{tag}";
+            string[] nextRemaining = remainingTags
+                .Where((_, candidateIndex) => candidateIndex != index)
+                .ToArray();
+
+            foreach (string nested in BuildTaggedCandidates(candidate, nextRemaining))
+            {
+                yield return nested;
+            }
+
+            yield return candidate;
+        }
     }
 
     private IEnumerable<LoadedAnimation> FromAsset(IAsset asset)
@@ -154,7 +174,7 @@ public sealed class AnimationsManager
 
                 string animationCode = code.Contains(':') ? code : $"{domain}:{code}";
 
-                result.Add(new(animationCode, animation, new(domain, code)));
+                result.Add(new(animationCode, animation, new(domain, code, AssetPath: asset.Location.Path)));
             }
             catch (Exception exception)
             {

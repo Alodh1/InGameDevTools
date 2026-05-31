@@ -36,9 +36,10 @@ public sealed class InGameDevToolsModSystem : ModSystem
     {
         RegisterStandaloneClasses(api);
 
+        PlayerRenderingPatches.Api = api;
         new Harmony(TranspilerHarmonyId).PatchAll(typeof(ExtendedElementPose).Assembly);
         AnimationPatches.Patch(AnimationHarmonyId, api);
-        DetachedEditorCameraPatches.Patch(DetachedCameraHarmonyId);
+        DetachedEditorCameraPatches.Patch(DetachedCameraHarmonyId, api);
     }
 
     public override void StartClientSide(ICoreClientAPI api)
@@ -83,20 +84,20 @@ public sealed class InGameDevToolsModSystem : ModSystem
 
     public override void Dispose()
     {
+        _debugWindowManager?.Dispose();
+
         if (_api != null)
         {
             _api.Event.PlayerEntitySpawn -= EnsurePlayerAnimationBehaviors;
             _api.Event.LevelFinalize -= EnsurePlayerAnimationBehaviors;
-            if (_ensureBehaviorsListener != -1)
-            {
-                _api.Event.UnregisterGameTickListener(_ensureBehaviorsListener);
-            }
+            StopEnsureBehaviorsListener();
         }
 
         new Harmony(TranspilerHarmonyId).UnpatchAll(TranspilerHarmonyId);
         AnimationPatches.Unpatch(AnimationHarmonyId);
         DetachedEditorCameraPatches.Unpatch(DetachedCameraHarmonyId);
         ParticleRuntimePatches.Unpatch(ParticleRuntimeHarmonyId);
+        PlayerRenderingPatches.Api = null;
         ExtendedElementPose.NameHashCache?.Dispose();
         ExtendedElementPose.NameHashCache = null;
 
@@ -116,30 +117,40 @@ public sealed class InGameDevToolsModSystem : ModSystem
 
     private void EnsurePlayerAnimationBehaviors()
     {
-        StandaloneDevtoolsRuntime.EnsurePlayerAnimationBehaviors(_api);
+        if (StandaloneDevtoolsRuntime.EnsurePlayerAnimationBehaviors(_api))
+        {
+            StopEnsureBehaviorsListener();
+        }
+    }
+
+    private void StopEnsureBehaviorsListener()
+    {
+        if (_api == null || _ensureBehaviorsListener == -1) return;
+
+        _api.Event.UnregisterGameTickListener(_ensureBehaviorsListener);
+        _ensureBehaviorsListener = -1;
     }
 
     private static void RegisterStandaloneClasses(ICoreAPI api)
     {
-        TryRegister(() => api.RegisterEntityBehaviorClass("InGameDevTools:FirstPersonAnimations", typeof(FirstPersonAnimationsBehavior)));
-        TryRegister(() => api.RegisterEntityBehaviorClass("InGameDevTools:ThirdPersonAnimations", typeof(ThirdPersonAnimationsBehavior)));
-        TryRegister(() => api.RegisterEntityBehaviorClass("InGameDevTools:EntityColliders", typeof(InGameDevTools.Colliders.CollidersEntityBehavior)));
-        TryRegister(() => api.RegisterCollectibleBehaviorClass("InGameDevTools:Animatable", typeof(Animatable)));
-        TryRegister(() => api.RegisterCollectibleBehaviorClass("InGameDevTools:AnimatableAttachable", typeof(AnimatableAttachable)));
-        TryRegister(() => api.RegisterCollectibleBehaviorClass("AnimationsLib:Animatable", typeof(Animatable)));
-        TryRegister(() => api.RegisterCollectibleBehaviorClass("AnimationsLib:AnimatableAttachable", typeof(AnimatableAttachable)));
+        TryRegister(api, "entity behavior InGameDevTools:FirstPersonAnimations", () => api.RegisterEntityBehaviorClass("InGameDevTools:FirstPersonAnimations", typeof(FirstPersonAnimationsBehavior)));
+        TryRegister(api, "entity behavior InGameDevTools:ThirdPersonAnimations", () => api.RegisterEntityBehaviorClass("InGameDevTools:ThirdPersonAnimations", typeof(ThirdPersonAnimationsBehavior)));
+        TryRegister(api, "entity behavior InGameDevTools:EntityColliders", () => api.RegisterEntityBehaviorClass("InGameDevTools:EntityColliders", typeof(InGameDevTools.Colliders.CollidersEntityBehavior)));
+        TryRegister(api, "collectible behavior InGameDevTools:Animatable", () => api.RegisterCollectibleBehaviorClass("InGameDevTools:Animatable", typeof(Animatable)));
+        TryRegister(api, "collectible behavior InGameDevTools:AnimatableAttachable", () => api.RegisterCollectibleBehaviorClass("InGameDevTools:AnimatableAttachable", typeof(AnimatableAttachable)));
+        TryRegister(api, "collectible behavior AnimationsLib:Animatable", () => api.RegisterCollectibleBehaviorClass("AnimationsLib:Animatable", typeof(Animatable)));
+        TryRegister(api, "collectible behavior AnimationsLib:AnimatableAttachable", () => api.RegisterCollectibleBehaviorClass("AnimationsLib:AnimatableAttachable", typeof(AnimatableAttachable)));
     }
 
-    private static void TryRegister(Action register)
+    private static void TryRegister(ICoreAPI api, string target, Action register)
     {
         try
         {
             register();
         }
-        catch
+        catch (Exception exception)
         {
-            // Another mod may already own the legacy class code. The standalone editor can
-            // still attach its local preview behaviors directly to the player.
+            LoggerUtil.Verbose(api, typeof(InGameDevToolsModSystem), $"Could not register {target}: {exception}");
         }
     }
 }
@@ -153,12 +164,12 @@ public sealed class DevToolsConfig
 
 internal static class StandaloneDevtoolsRuntime
 {
-    public static void EnsurePlayerAnimationBehaviors(ICoreClientAPI? api)
+    public static bool EnsurePlayerAnimationBehaviors(ICoreClientAPI? api)
     {
         try
         {
             EntityPlayer? playerEntity = api?.World?.Player?.Entity;
-            if (playerEntity == null) return;
+            if (playerEntity == null) return false;
 
             JsonObject emptyAttributes = new(new JObject());
 
@@ -177,10 +188,14 @@ internal static class StandaloneDevtoolsRuntime
                 thirdPerson.Initialize(playerEntity.Properties, emptyAttributes);
                 thirdPerson.AfterInitialized(false);
             }
+
+            return playerEntity.GetBehavior<FirstPersonAnimationsBehavior>() != null &&
+                playerEntity.GetBehavior<ThirdPersonAnimationsBehavior>() != null;
         }
         catch (Exception exception)
         {
             LoggerUtil.Warn(api, typeof(StandaloneDevtoolsRuntime), $"Could not attach standalone animation preview behaviors: {exception}");
+            return false;
         }
     }
 }

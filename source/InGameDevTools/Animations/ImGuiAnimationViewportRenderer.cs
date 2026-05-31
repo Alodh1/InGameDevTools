@@ -1,4 +1,3 @@
-#if DEBUG
 using Vintagestory.API.Client;
 using Vintagestory.API.Config;
 using Vintagestory.API.MathTools;
@@ -94,4 +93,3 @@ internal sealed class ImGuiAnimationViewportRenderer : IRenderer
         _api.Event.UnregisterRenderer(this, EnumRenderStage.Ortho);
     }
 }
-#endif

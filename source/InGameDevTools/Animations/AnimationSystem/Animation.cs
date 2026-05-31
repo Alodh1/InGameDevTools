@@ -108,7 +108,6 @@ public sealed class Animation
         return new(playerFrame, itemFrame);
     }
     public bool Finished(TimeSpan currentDuration) => currentDuration >= TotalDuration;
-#if DEBUG
     public void Edit(string title)
     {
         if (ImGui.Button($"Sort frames##{title}"))
@@ -175,7 +174,6 @@ public sealed class Animation
         if (ItemAnimationEnd > TotalDuration) ItemAnimationEnd = TotalDuration;
         if (ItemAnimationStart > ItemAnimationEnd) ItemAnimationStart = ItemAnimationEnd;
     }
-#endif
     public override string ToString() => AnimationJson.FromAnimation(this).ToString();
     public PlayerItemFrame StillPlayerFrame(int playerFrame, float frameProgress)
     {
@@ -354,7 +352,6 @@ public sealed class Animation
         }
     }
 
-#if DEBUG
     private void EditPlayerAnimation(string title)
     {
         if (_playerFrameIndex >= PlayerKeyFrames.Count) _playerFrameIndex = PlayerKeyFrames.Count - 1;
@@ -503,7 +500,6 @@ public sealed class Animation
             CallbackFrames[_callbackFrameIndex] = CallbackFrames[_callbackFrameIndex].Edit(title, TotalDuration);
         }
     }
-#endif
 }
 
 public sealed class AnimationJson

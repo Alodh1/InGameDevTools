@@ -1,4 +1,3 @@
-#if DEBUG
 using ImGuiNET;
 using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
@@ -214,4 +213,3 @@ internal static class ImGuiLayoutHelper
         return value;
     }
 }
-#endif

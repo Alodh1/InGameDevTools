@@ -1,4 +1,3 @@
-#if DEBUG
 using ImGuiNET;
 
 namespace InGameDevTools.Animations;
@@ -267,9 +266,8 @@ public sealed partial class DebugWindowManager
 
             try
             {
-                string sourceRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "ModsNeedUpdate");
-                string backupRoot = Path.Combine(sourceRoot, "_ingamedevtools_exports", "live-backups", _backupSessionId);
-                string outputPath = Path.Combine(backupRoot, entry.Snapshot.BackupRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                string relativePath = Path.Combine("live-backups", _backupSessionId, entry.Snapshot.BackupRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                string outputPath = GetToolAuthoredAssetPath(entry.Snapshot.AssetType, relativePath);
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
                 File.WriteAllText(outputPath, entry.Snapshot.BackupJson());
                 entry.BackupWritten = true;
@@ -292,9 +290,8 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    public sealed record LivePatchSnapshot(Action Revert, string? BackupRelativePath, Func<string>? BackupJson)
+    public sealed record LivePatchSnapshot(Action Revert, string? BackupRelativePath, Func<string>? BackupJson, string AssetType = "backups")
     {
         public static LivePatchSnapshot Empty { get; } = new(() => { }, null, null);
     }
 }
-#endif

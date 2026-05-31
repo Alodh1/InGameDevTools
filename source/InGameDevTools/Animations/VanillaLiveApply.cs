@@ -1,4 +1,3 @@
-#if DEBUG
 using System.Collections;
 using ImGuiNET;
 using Newtonsoft.Json;
@@ -166,7 +165,8 @@ public sealed partial class DebugWindowManager
                 }
             },
             backupPath,
-            () => SerializeVanillaAnimationsBackup(snapshots.FirstOrDefault()?.Animations ?? []));
+            () => SerializeVanillaAnimationsBackup(snapshots.FirstOrDefault()?.Animations ?? []),
+            "animations");
     }
 
     private DebugWindowManager.LivePatchSnapshot CaptureVanillaMetadataLiveSnapshot(VanillaAnimationDocument document)
@@ -183,7 +183,8 @@ public sealed partial class DebugWindowManager
                 RefreshLoadedEntityAnimators(document.EntityType, out _);
             },
             backupPath,
-            () => SerializeVanillaMetadataBackup(original));
+            () => SerializeVanillaMetadataBackup(original),
+            "animations");
     }
 
     private void ApplyVanillaLiveDocument(VanillaAnimationDocument document)
@@ -404,4 +405,3 @@ public sealed partial class DebugWindowManager
 
     private sealed record VanillaShapeRuntimeSnapshot(Shape Shape, VanillaAnimation[] Animations);
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG
 using ImGuiNET;
 using InGameDevTools.Utils;
 using Newtonsoft.Json.Linq;
@@ -365,7 +364,7 @@ public sealed partial class DebugWindowManager
             if (slot.CanSaveToSource)
             {
                 ImGui.SameLine();
-                if (ImGui.Button("Save to source##transform-source-save"))
+                if (ImGui.Button("Save authored file##transform-source-save"))
                 {
                     SourceSaveResult result = TrySaveTransformToSource(asset.Collectible, slot.AttributeCode, transform, slot.TypedKey);
                     if (result.Request != null)
@@ -523,7 +522,8 @@ public sealed partial class DebugWindowManager
         return new(
             () => asset.Collectible.Attributes = original == null ? null : new JsonObject(original.DeepClone()),
             Path.Combine("assets", asset.Domain, "runtime-transforms", asset.Collectible.Code.Path.Replace('/', '_') + ".json"),
-            () => (original ?? new JObject()).ToString(Newtonsoft.Json.Formatting.Indented));
+            () => (original ?? new JObject()).ToString(Newtonsoft.Json.Formatting.Indented),
+            "transforms");
     }
 
     private void BuildTransformPreviewMeshes(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform)
@@ -804,4 +804,3 @@ public sealed partial class DebugWindowManager
         public bool CanSaveToSource => true;
     }
 }
-#endif

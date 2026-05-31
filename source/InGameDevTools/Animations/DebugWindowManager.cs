@@ -19,27 +19,27 @@ using VSImGui.API;
 
 namespace InGameDevTools.Animations;
 
-public sealed partial class DebugWindowManager
+public sealed partial class DebugWindowManager : IDisposable
 {
     public static bool PlayAnimationsInThirdPerson { get; set; } = false;
-    public static bool RenderDebugColliders { get; set; } = false;
 
     public DebugWindowManager(ICoreClientAPI api, ParticleEffectsManager particleEffectsManager)
     {
         _api = api;
         _particleEffectsManager = particleEffectsManager;
-#if DEBUG
-        bool standaloneDevToolsLoaded = api.ModLoader.Mods.Any(mod => mod.Info.ModID == "ingamedevtools");
-        api.ModLoader.GetModSystem<ImGuiModSystem>().Draw += DrawEditor;
+        _imguiModSystem = api.ModLoader.GetModSystem<ImGuiModSystem>();
+        if (_imguiModSystem == null)
+        {
+            LoggerUtil.Error(api, this, "VSImGui not found; dev tools UI disabled.");
+        }
+        else
+        {
+            _imguiModSystem.Draw += DrawEditor;
+            _drawSubscribed = true;
+        }
         _transformGizmoRenderer = new TransformGizmoRenderer(api, this);
         _imguiAnimationViewportRenderer = new ImGuiAnimationViewportRenderer(api);
         _detachedEditorCamera = new DetachedEditorCamera(api);
-        if (!standaloneDevToolsLoaded)
-        {
-            api.Input.RegisterHotKey("inGameDevTools_editor", "Show dev tools", GlKeys.L, ctrlPressed: true);
-            api.Input.SetHotKeyHandler("inGameDevTools_editor", _ => ToggleDevTools());
-        }
-#endif
         _instance = this;
 
         _colliders.Clear();
@@ -48,13 +48,22 @@ public sealed partial class DebugWindowManager
     public void Load(ICoreClientAPI api)
     {
         _behavior = api.World.Player.Entity.GetBehavior<FirstPersonAnimationsBehavior>();
-#if DEBUG
+        _sourceAssetIndex = BuildSourceAssetIndex(api);
         RegisterCollectibleTransformAttributes(api);
-#endif
+    }
+
+    public void Dispose()
+    {
+        if (!_drawSubscribed || _imguiModSystem == null) return;
+
+        _imguiModSystem.Draw -= DrawEditor;
+        _drawSubscribed = false;
     }
 
     public static void RegisterTransformByCode(ModelTransform transform, string code)
     {
+        if (_instance == null) return;
+
         _instance.RegisterTransform(transform, code);
     }
     public void RegisterTransform(ModelTransform transform, string code)
@@ -210,21 +219,16 @@ public sealed partial class DebugWindowManager
 
     private static SourceSaveResult TrySaveTransformToSource(CollectibleObject collectible, string attributeCode, ModelTransform transform, string? typedKey = null)
     {
-        string? sourceFile = FindCollectibleSourceFile(collectible);
-        if (sourceFile == null)
-        {
-            return SourceSaveResult.Fail($"Source not found for {collectible.Code}.");
-        }
-
         try
         {
-            string oldText = File.ReadAllText(sourceFile);
-            if (SourceHasComments(oldText))
-            {
-                return SourceSaveResult.Fail("Source has comments; cannot safely rewrite. Strip comments first or edit by hand.");
-            }
-
-            JObject json = JObject.Parse(oldText);
+            IAsset? sourceAsset = FindCollectibleSourceAsset(collectible);
+            string domain = sourceAsset?.Location.Domain ?? collectible.Code?.Domain ?? "game";
+            string kind = collectible is Block ? "blocktypes" : "itemtypes";
+            string assetPath = sourceAsset?.Location.Path ?? $"{kind}/{EnsureJsonFilePath(collectible.Code?.Path ?? "unknown")}";
+            string outputPath = GetToolAuthoredAssetPath("transforms", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
+            string sourceText = ReadAssetText(sourceAsset);
+            string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : sourceText;
+            JObject json = TryParseJsonObject(oldText) ?? TryParseJsonObject(sourceText) ?? CreateCollectibleAuthoringDocument(collectible);
             JObject attributes = json["attributes"] as JObject ?? new JObject();
 
             if (typedKey == null)
@@ -241,203 +245,288 @@ public sealed partial class DebugWindowManager
             json["attributes"] = attributes;
             string newText = JsonUtil.ToPrettyString(json);
             SourceSaveRequest request = new(
-                sourceFile,
+                outputPath,
                 oldText,
                 newText,
-                $"Saved {attributeCode} to {sourceFile}.",
-                () => AtomicWriteWithBackup(sourceFile, newText));
+                $"Saved authored {attributeCode} to {outputPath}.",
+                () => WriteAuthoredFile(outputPath, newText));
             return SourceSaveResult.Preview(request);
         }
         catch (Exception exception)
         {
-            return SourceSaveResult.Fail($"Save failed for {sourceFile}: {exception.Message}");
+            return SourceSaveResult.Fail($"Save failed for {collectible.Code}: {exception.Message}");
         }
     }
 
-    private static string? FindCollectibleSourceFile(CollectibleObject collectible)
+    private static IAsset? FindCollectibleSourceAsset(CollectibleObject collectible)
     {
-        string? sourceRoot = GetSourceRoot();
-        if (!Directory.Exists(sourceRoot)) return null;
+        if (collectible.Code == null) return null;
 
         string domain = collectible.Code.Domain;
         string kind = collectible is Block ? "blocktypes" : "itemtypes";
         string path = collectible.Code.Path;
 
-        IEnumerable<string> candidates = Directory.EnumerateFiles(sourceRoot, "*.json", SearchOption.AllDirectories)
-            .Where(file =>
-            {
-                string normalized = file.Replace('\\', '/');
-                return normalized.Contains($"/resources/assets/{domain}/{kind}/", StringComparison.OrdinalIgnoreCase) ||
-                    normalized.Contains($"/assets/{domain}/{kind}/", StringComparison.OrdinalIgnoreCase);
-            });
+        if (_instance._sourceAssetIndex == null ||
+            !_instance._sourceAssetIndex.CollectiblesByDomainKind.TryGetValue(BuildCollectibleSourceKey(domain, kind), out List<CollectibleSourceAsset>? candidates))
+        {
+            return null;
+        }
 
-        string? bestFile = null;
+        IAsset? bestAsset = null;
         int bestScore = -1;
 
-        foreach (string file in candidates)
+        foreach (CollectibleSourceAsset candidate in candidates)
         {
-            try
+            string code = candidate.Code;
+            int score = -1;
+            if (string.Equals(code, path, StringComparison.OrdinalIgnoreCase))
             {
-                JObject json = JObject.Parse(File.ReadAllText(file));
-                string? code = json["code"]?.ToString();
-                if (string.IsNullOrEmpty(code)) continue;
-                if (code.Contains(':')) code = code[(code.IndexOf(':') + 1)..];
-
-                int score = -1;
-                if (string.Equals(code, path, StringComparison.OrdinalIgnoreCase))
-                {
-                    score = 10000 + code.Length;
-                }
-                else if (path.StartsWith(code + "-", StringComparison.OrdinalIgnoreCase))
-                {
-                    score = 1000 + code.Length;
-                }
-                else if (Path.GetFileNameWithoutExtension(file).Equals(code, StringComparison.OrdinalIgnoreCase) &&
-                    path.Contains(code, StringComparison.OrdinalIgnoreCase))
-                {
-                    score = 100 + code.Length;
-                }
-
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    bestFile = file;
-                }
+                score = 10000 + code.Length;
             }
-            catch
+            else if (path.StartsWith(code + "-", StringComparison.OrdinalIgnoreCase))
             {
-                // Non-strict JSON/HJSON sources cannot be safely rewritten here.
+                score = 1000 + code.Length;
+            }
+            else if (Path.GetFileNameWithoutExtension(candidate.Asset.Location.Path).Equals(code, StringComparison.OrdinalIgnoreCase) &&
+                path.Contains(code, StringComparison.OrdinalIgnoreCase))
+            {
+                score = 100 + code.Length;
+            }
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestAsset = candidate.Asset;
             }
         }
 
-        return bestFile;
+        return bestAsset;
     }
 
     private static SourceSaveResult TrySaveAnimationToSource(string animationCode, Animation animation)
     {
-        if (!AnimationsManager._instance.AnimationSources.TryGetValue(animationCode, out AnimationSource? source))
+        try
         {
-            return SourceSaveResult.Fail($"Source not tracked for {animationCode}.");
+            AnimationsManager._instance.AnimationSources.TryGetValue(animationCode, out AnimationSource? source);
+            IAsset? sourceAsset = source == null ? null : FindAnimationSourceAsset(source);
+            string domain = sourceAsset?.Location.Domain ?? source?.Domain ?? GetDomainFromAssetCode(animationCode);
+            string sourceKey = source?.Kind == AnimationSourceKind.ConfigAnimation
+                ? source.SourceKey
+                : animationCode;
+            string assetPath = sourceAsset?.Location.Path ?? Path.Combine("config", "animations", EnsureJsonFilePath(SanitizePathSegment(sourceKey.Replace(':', '_'))));
+            string outputPath = GetToolAuthoredAssetPath("animations", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
+            string sourceText = ReadAssetText(sourceAsset);
+            string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : sourceText;
+            JObject json = TryParseJsonObject(oldText) ?? TryParseJsonObject(sourceText) ?? new JObject();
+
+            json[sourceKey] = JToken.Parse(AnimationJson.FromAnimation(animation).ToString());
+            string newText = JsonUtil.ToPrettyString(json);
+            SourceSaveRequest request = new(
+                outputPath,
+                oldText,
+                newText,
+                $"Saved authored animation {animationCode} to {outputPath}.",
+                () => WriteAuthoredFile(outputPath, newText));
+            return SourceSaveResult.Preview(request);
+        }
+        catch (Exception exception)
+        {
+            return SourceSaveResult.Fail($"Save failed for {animationCode}: {exception.Message}");
+        }
+    }
+
+    private static IAsset? FindAnimationSourceAsset(AnimationSource source)
+    {
+        if (source.Kind != AnimationSourceKind.ConfigAnimation)
+        {
+            return null;
         }
 
-        if (source.Kind == AnimationSourceKind.ShapeAnimation)
+        if (!string.IsNullOrWhiteSpace(source.AssetPath))
         {
-            return SourceSaveResult.Fail("This animation was imported from a shape file. Export it as config animation JSON before saving it back to source.");
+            IAsset? asset = _instance._api.Assets.TryGet(new AssetLocation(source.Domain, source.AssetPath), true);
+            if (asset != null) return asset;
         }
 
-        string? sourceRoot = GetSourceRoot();
-        if (sourceRoot == null || !Directory.Exists(sourceRoot))
+        if (_instance._sourceAssetIndex?.ConfigAnimationsByKey.TryGetValue(BuildAnimationSourceKey(source.Domain, source.SourceKey), out IAsset? indexedAsset) == true)
         {
-            return SourceSaveResult.Fail("ModsNeedUpdate source root not found.");
+            return indexedAsset;
         }
 
-        IEnumerable<string> candidates = Directory.EnumerateFiles(sourceRoot, "*.json", SearchOption.AllDirectories)
-            .Where(file =>
+        return null;
+    }
+
+    private static SourceAssetIndex BuildSourceAssetIndex(ICoreClientAPI api)
+    {
+        SourceAssetIndex index = new();
+
+        foreach (IAsset asset in api.Assets.AllAssets.Values)
+        {
+            if (asset?.Location == null) continue;
+
+            string assetPath = asset.Location.Path.Replace('\\', '/');
+            if (!assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
+
+            if (assetPath.StartsWith("blocktypes/", StringComparison.OrdinalIgnoreCase) ||
+                assetPath.StartsWith("itemtypes/", StringComparison.OrdinalIgnoreCase))
             {
-                string normalized = file.Replace('\\', '/');
-                return normalized.Contains($"/resources/assets/{source.Domain}/config/animations/", StringComparison.OrdinalIgnoreCase) ||
-                    normalized.Contains($"/assets/{source.Domain}/config/animations/", StringComparison.OrdinalIgnoreCase);
-            });
+                AddCollectibleSourceAsset(index, asset, assetPath);
+                continue;
+            }
 
-        foreach (string file in candidates)
+            if (assetPath.StartsWith("config/animations/", StringComparison.OrdinalIgnoreCase))
+            {
+                AddConfigAnimationSourceAsset(index, asset);
+            }
+        }
+
+        return index;
+    }
+
+    private static void AddCollectibleSourceAsset(SourceAssetIndex index, IAsset asset, string assetPath)
+    {
+        JObject? json = TryParseJsonObject(ReadAssetText(asset));
+        string? code = json?["code"]?.ToString();
+        if (string.IsNullOrWhiteSpace(code)) return;
+        if (code.Contains(':')) code = code[(code.IndexOf(':') + 1)..];
+
+        string kind = assetPath.StartsWith("blocktypes/", StringComparison.OrdinalIgnoreCase) ? "blocktypes" : "itemtypes";
+        string key = BuildCollectibleSourceKey(asset.Location.Domain, kind);
+        if (!index.CollectiblesByDomainKind.TryGetValue(key, out List<CollectibleSourceAsset>? assets))
+        {
+            assets = [];
+            index.CollectiblesByDomainKind[key] = assets;
+        }
+
+        assets.Add(new(asset, code));
+    }
+
+    private static void AddConfigAnimationSourceAsset(SourceAssetIndex index, IAsset asset)
+    {
+        if (TryParseJsonObject(ReadAssetText(asset)) is not JObject json) return;
+
+        foreach (JProperty property in json.Properties())
+        {
+            index.ConfigAnimationsByKey[BuildAnimationSourceKey(asset.Location.Domain, property.Name)] = asset;
+        }
+    }
+
+    private static string BuildCollectibleSourceKey(string domain, string kind) => $"{domain}:{kind}";
+
+    private static string BuildAnimationSourceKey(string domain, string sourceKey) => $"{domain}:{sourceKey}";
+
+    private sealed class SourceAssetIndex
+    {
+        public Dictionary<string, List<CollectibleSourceAsset>> CollectiblesByDomainKind { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, IAsset> ConfigAnimationsByKey { get; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private sealed record CollectibleSourceAsset(IAsset Asset, string Code);
+
+    private static JObject CreateCollectibleAuthoringDocument(CollectibleObject collectible)
+    {
+        JObject json = new();
+        if (collectible.Code != null)
+        {
+            json["code"] = collectible.Code.ToString();
+        }
+
+        return json;
+    }
+
+    private static JObject? TryParseJsonObject(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        try
+        {
+            return JObject.Parse(text);
+        }
+        catch
         {
             try
             {
-                string oldText = File.ReadAllText(file);
-                if (SourceHasComments(oldText))
-                {
-                    if (oldText.Contains(source.SourceKey, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return SourceSaveResult.Fail("Source has comments; cannot safely rewrite. Strip comments first or edit by hand.");
-                    }
-
-                    continue;
-                }
-
-                JObject json = JObject.Parse(oldText);
-                if (!json.ContainsKey(source.SourceKey)) continue;
-
-                json[source.SourceKey] = JToken.Parse(AnimationJson.FromAnimation(animation).ToString());
-                string newText = JsonUtil.ToPrettyString(json);
-                SourceSaveRequest request = new(
-                    file,
-                    oldText,
-                    newText,
-                    $"Saved {animationCode} to {file}.",
-                    () => AtomicWriteWithBackup(file, newText));
-                return SourceSaveResult.Preview(request);
+                return JsonObject.FromJson(text).Token as JObject;
             }
             catch
             {
-                // Non-strict JSON/HJSON animation files cannot be safely rewritten here.
+                return null;
             }
         }
-
-        return SourceSaveResult.Fail($"Source JSON not found for {animationCode}.");
     }
 
-    private static bool SourceHasComments(string text)
+    private static string ReadAssetText(IAsset? asset)
     {
-        if (text.Contains("/*", StringComparison.Ordinal)) return true;
+        if (asset == null) return "";
 
-        using StringReader reader = new(text);
-        string? line;
-        while ((line = reader.ReadLine()) != null)
-        {
-            string trimmed = line.TrimStart();
-            if (trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed.StartsWith("#", StringComparison.Ordinal)) return true;
-        }
-
-        return false;
-    }
-
-    private static string AtomicWriteWithBackup(string sourceFile, string newText)
-    {
-        string tmpPath = sourceFile + ".tmp";
         try
         {
-            CreateSourceBackup(sourceFile);
-
-            using (FileStream stream = new(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
-            using (StreamWriter writer = new(stream))
-            {
-                writer.Write(newText);
-                writer.Flush();
-                stream.Flush(flushToDisk: true);
-            }
-
-            File.Move(tmpPath, sourceFile, overwrite: true);
+            return asset.ToText();
+        }
+        catch
+        {
             return "";
         }
-        finally
-        {
-            if (File.Exists(tmpPath))
-            {
-                File.Delete(tmpPath);
-            }
-        }
     }
 
-    private static void CreateSourceBackup(string sourceFile)
+    private static string WriteAuthoredFile(string outputPath, string text)
     {
-        string backup = sourceFile + ".bak";
-        DateTime now = DateTime.Now;
-        if (File.Exists(backup))
-        {
-            DateTime last = File.GetLastWriteTime(backup);
-            if (last.Year == now.Year && last.Month == now.Month && last.Day == now.Day && last.Hour == now.Hour && last.Minute == now.Minute)
-            {
-                return;
-            }
-        }
-
-        File.Copy(sourceFile, backup, overwrite: true);
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        File.WriteAllText(outputPath, text);
+        return "";
     }
 
-    private static string? GetSourceRoot()
+    private static string EnsureJsonFilePath(string path)
     {
-        string sourceRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "ModsNeedUpdate");
-        return Directory.Exists(sourceRoot) ? sourceRoot : null;
+        string normalized = path.Replace('\\', '/');
+        return normalized.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ? normalized : normalized + ".json";
+    }
+
+    private static string GetDomainFromAssetCode(string code)
+    {
+        int separator = code.IndexOf(':');
+        return separator > 0 ? code[..separator] : "game";
+    }
+
+    internal static string GetToolAuthoredAssetPath(string assetType, string relativePath)
+    {
+        string root = GetToolAuthoredAssetRoot(assetType);
+        string normalizedRelativePath = relativePath
+            .Replace('/', Path.DirectorySeparatorChar)
+            .Replace('\\', Path.DirectorySeparatorChar)
+            .TrimStart(Path.DirectorySeparatorChar);
+        string outputPath = Path.GetFullPath(Path.Combine(root, normalizedRelativePath));
+
+        if (!outputPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(outputPath, root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"Invalid InGameDevTools output path: {relativePath}");
+        }
+
+        return outputPath;
+    }
+
+    internal static string GetToolAuthoredAssetRoot(string assetType)
+    {
+        string root = Path.GetFullPath(Path.Combine(GetVintageStoryDataDirectory(), "InGameDevTools", SanitizePathSegment(assetType)));
+        Directory.CreateDirectory(root);
+        return root;
+    }
+
+    private static string GetVintageStoryDataDirectory()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VintagestoryData");
+    }
+
+    private static string SanitizePathSegment(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "misc";
+
+        char[] invalid = Path.GetInvalidFileNameChars();
+        char[] sanitized = value
+            .Select(character => invalid.Contains(character) ? '_' : character)
+            .ToArray();
+        return new string(sanitized);
     }
 
     private static string GetAnimationSourceText(string animationCode)
@@ -484,6 +573,7 @@ public sealed partial class DebugWindowManager
     }
 
     private bool _showAnimationEditor = false;
+    private bool _devToolsCollapsed;
     private bool _selectVanillaAnimationsTabOnNextDraw = true;
     private int _selectedAnimationIndex = 0;
     private int _selectedAnimationIndexFiltered = 0;
@@ -491,16 +581,20 @@ public sealed partial class DebugWindowManager
     private readonly ICoreClientAPI _api;
     private string _itemAnimation = "";
     private string _animationKey = "";
-    private readonly FieldInfo _mainCameraInfo = typeof(ClientMain).GetField("MainCamera", BindingFlags.NonPublic | BindingFlags.Instance);
-    private readonly FieldInfo _cameraFov = typeof(Camera).GetField("Fov", BindingFlags.NonPublic | BindingFlags.Instance);
+    private readonly FieldInfo? _mainCameraInfo = typeof(ClientMain).GetField("MainCamera", BindingFlags.NonPublic | BindingFlags.Instance);
+    private readonly FieldInfo? _cameraFov = typeof(Camera).GetField("Fov", BindingFlags.NonPublic | BindingFlags.Instance);
     private string _playerAnimationKey = "";
     private float _animationSpeed = 1;
     private ParticleEffectsManager _particleEffectsManager;
-    private AnimationJson _animationBuffer;
+    private AnimationJson? _animationBuffer;
     internal static DebugWindowManager _instance;
+    private readonly ImGuiModSystem? _imguiModSystem;
+    private bool _drawSubscribed;
+    private SourceAssetIndex? _sourceAssetIndex;
+    private bool _fovReflectionWarningLogged;
 
     private string _animationsFilter = "";
-    private string _filter = "";
+    private string _legacyTransformFilter = "";
     private string _collidersItemsFilter = "";
     private int _transformIndex = 0;
     private int _colliderItemIndex = 0;
@@ -510,7 +604,6 @@ public sealed partial class DebugWindowManager
     private readonly Dictionary<string, EditableTransform> _transforms = new();
     private static Dictionary<string, Dictionary<string, (Action<LineSegmentCollider> setter, System.Func<LineSegmentCollider> getter)>> _colliders = new();
     internal static LineSegmentCollider? _currentCollider = null;
-#if DEBUG
     private enum DevToolsTab
     {
         Animations,
@@ -563,7 +656,6 @@ public sealed partial class DebugWindowManager
     internal bool IncludeGizmoInIncrement { get; private set; } = true;
     internal float TransformGizmoIncrement { get; private set; } = 0.1f;
     internal static bool DebugPoseFreezeActive { get; private set; }
-#endif
     private static readonly string[] DirectTransformAttributeCodes = new[]
     {
         "groundStorageTransform",
@@ -597,13 +689,13 @@ public sealed partial class DebugWindowManager
         "inForgeTransformByType"
     };
 
-#if DEBUG
     private bool ToggleDevTools()
     {
         bool wasOpen = _showAnimationEditor;
         _showAnimationEditor = !_showAnimationEditor;
         if (_showAnimationEditor && !wasOpen)
         {
+            _devToolsCollapsed = false;
             _selectVanillaAnimationsTabOnNextDraw = true;
         }
 
@@ -618,6 +710,7 @@ public sealed partial class DebugWindowManager
     public bool OpenExternalDevTools()
     {
         _showAnimationEditor = true;
+        _devToolsCollapsed = false;
         _selectVanillaAnimationsTabOnNextDraw = true;
         return true;
     }
@@ -626,7 +719,7 @@ public sealed partial class DebugWindowManager
 
     public string GetExternalDevToolsStatus()
     {
-        string state = _showAnimationEditor ? "open" : "closed";
+        string state = _showAnimationEditor ? _devToolsCollapsed ? "collapsed" : "open" : "closed";
         return $"In-game devtools ImGui editor {state}.";
     }
 
@@ -649,61 +742,68 @@ public sealed partial class DebugWindowManager
             displaySize = new NVector2(_api.Render.FrameWidth, _api.Render.FrameHeight);
         }
 
+        ImGuiWindowFlags windowFlags = ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings;
+        if (_devToolsCollapsed)
+        {
+            DrawCollapsedDevToolsWindow(displaySize, windowFlags);
+            _detachedEditorCamera?.Update(deltaSeconds, editorOpen: false);
+            return _showAnimationEditor ? CallbackGUIStatus.DontGrabMouse : CallbackGUIStatus.Closed;
+        }
+
         ImGui.SetNextWindowPos(NVector2.Zero, ImGuiCond.Always);
         ImGui.SetNextWindowSize(displaySize, ImGuiCond.Always);
         ImGui.SetNextWindowBgAlpha(0.96f);
-        ImGuiWindowFlags windowFlags = ImGuiWindowFlags.NoMove |
-            ImGuiWindowFlags.NoResize |
-            ImGuiWindowFlags.NoCollapse |
-            ImGuiWindowFlags.NoSavedSettings;
+        windowFlags |= ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize;
         if (_vanillaViewportPoppedOut)
         {
             windowFlags |= ImGuiWindowFlags.NoBringToFrontOnFocus;
         }
 
-        if (ImGui.Begin("Dev tools", ref _showAnimationEditor, windowFlags))
+        bool windowVisible = ImGui.Begin("Dev tools", ref _showAnimationEditor, windowFlags);
+        if (windowVisible)
         {
             ImGui.SetWindowFontScale(1f);
             DrawDevToolsToolbar();
             ImGui.SetWindowFontScale(_devToolsUiScale);
 
-            ImGui.BeginTabBar($"##main_tab_bar");
-            ImGuiTabItemFlags vanillaTabFlags = _selectVanillaAnimationsTabOnNextDraw ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
-            bool vanillaTabOpen = true;
-            if (ImGui.BeginTabItem("Animations##tab", ref vanillaTabOpen, vanillaTabFlags))
+            if (ImGui.BeginTabBar($"##main_tab_bar"))
             {
-                _activeDevToolsTab = DevToolsTab.Animations;
-                _selectVanillaAnimationsTabOnNextDraw = false;
-                VanillaAnimationsTab(deltaSeconds);
-                ImGui.EndTabItem();
+                ImGuiTabItemFlags vanillaTabFlags = _selectVanillaAnimationsTabOnNextDraw ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+                bool vanillaTabOpen = true;
+                if (ImGui.BeginTabItem("Animations##tab", ref vanillaTabOpen, vanillaTabFlags))
+                {
+                    _activeDevToolsTab = DevToolsTab.Animations;
+                    _selectVanillaAnimationsTabOnNextDraw = false;
+                    VanillaAnimationsTab(deltaSeconds);
+                    ImGui.EndTabItem();
+                }
+                bool recipeTabOpen = true;
+                if (ImGui.BeginTabItem("Recipe Editor##tab", ref recipeTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.RecipeEditor;
+                    RecipeEditorTab(deltaSeconds);
+                    ImGui.EndTabItem();
+                }
+                bool particlesTabOpen = true;
+                if (ImGui.BeginTabItem("Particles##tab", ref particlesTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.Particles;
+                    _particleEffectsManager.DrawEditor("devtools-particles", deltaSeconds, _devToolsUiScale, _liveApplyManager);
+                    ImGui.EndTabItem();
+                }
+                bool transformsTabOpen = true;
+                if (ImGui.BeginTabItem("Transforms##tab", ref transformsTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.Transforms;
+                    TransformsEditorTab(deltaSeconds);
+                    ImGui.EndTabItem();
+                }
+                ImGui.EndTabBar();
             }
-            bool recipeTabOpen = true;
-            if (ImGui.BeginTabItem("Recipe Editor##tab", ref recipeTabOpen))
-            {
-                _activeDevToolsTab = DevToolsTab.RecipeEditor;
-                RecipeEditorTab(deltaSeconds);
-                ImGui.EndTabItem();
-            }
-            bool particlesTabOpen = true;
-            if (ImGui.BeginTabItem("Particles##tab", ref particlesTabOpen))
-            {
-                _activeDevToolsTab = DevToolsTab.Particles;
-                _particleEffectsManager.DrawEditor("devtools-particles", deltaSeconds, _devToolsUiScale, _liveApplyManager);
-                ImGui.EndTabItem();
-            }
-            bool transformsTabOpen = true;
-            if (ImGui.BeginTabItem("Transforms##tab", ref transformsTabOpen))
-            {
-                _activeDevToolsTab = DevToolsTab.Transforms;
-                TransformsEditorTab(deltaSeconds);
-                ImGui.EndTabItem();
-            }
-            ImGui.EndTabBar();
             ImGui.SetWindowFontScale(1f);
             DrawSourceSavePopup();
-
-            ImGui.End();
         }
+        ImGui.End();
 
         DrawVanillaPoppedOutViewport();
 
@@ -714,6 +814,12 @@ public sealed partial class DebugWindowManager
 
     private void DrawDevToolsToolbar()
     {
+        if (ImGui.Button("Collapse editor##devtools-collapse"))
+        {
+            _devToolsCollapsed = true;
+        }
+        ImGui.SameLine();
+
         ImGui.SetNextItemWidth(120f);
         ImGui.SliderFloat("UI scale##devtools-global-scale", ref _devToolsUiScale, 0.75f, 1.75f, "%.2f");
         _devToolsUiScale = Math.Clamp(_devToolsUiScale, 0.75f, 1.75f);
@@ -761,6 +867,33 @@ public sealed partial class DebugWindowManager
         ImGui.Separator();
     }
 
+    private void DrawCollapsedDevToolsWindow(NVector2 displaySize, ImGuiWindowFlags baseFlags)
+    {
+        NVector2 windowPos = new(Math.Min(12f, Math.Max(0f, displaySize.X - 220f)), 12f);
+        ImGui.SetNextWindowPos(windowPos, ImGuiCond.Always);
+        ImGui.SetNextWindowBgAlpha(0.82f);
+        ImGuiWindowFlags windowFlags = baseFlags |
+            ImGuiWindowFlags.AlwaysAutoResize |
+            ImGuiWindowFlags.NoResize |
+            ImGuiWindowFlags.NoSavedSettings;
+
+        if (ImGui.Begin("Dev tools", ref _showAnimationEditor, windowFlags))
+        {
+            if (ImGui.Button("Expand editor##devtools-expand"))
+            {
+                _devToolsCollapsed = false;
+            }
+            ImGui.SameLine();
+            ImGui.TextUnformatted(GetCollapsedDevToolsStatusText());
+        }
+        ImGui.End();
+    }
+
+    private string GetCollapsedDevToolsStatusText()
+    {
+        return _liveApplyManager.AutoApply ? "Runtime apply on" : "Runtime apply off";
+    }
+
     private void ApplyDirtyLiveChangesForActiveTab(bool force = false)
     {
         if (!_liveApplyManager.AutoApply) return;
@@ -801,27 +934,32 @@ public sealed partial class DebugWindowManager
 
     private void CollidersTab()
     {
-        bool debugColliders = RenderDebugColliders;
-        ImGui.Checkbox("Render weapon colliders", ref debugColliders);
-        RenderDebugColliders = debugColliders;
-
         ImGui.InputText("Items filter##colliders", ref _collidersItemsFilter, 200);
         VSImGui.EditorsUtils.FilterElements(_collidersItemsFilter, _colliders.Keys, out IEnumerable<string> filteredItems, out _);
-        if (_colliderItemIndex > filteredItems.Count())
+        string[] filteredItemsArray = filteredItems.ToArray();
+        if (filteredItemsArray.Length == 0)
         {
             _colliderItemIndex = 0;
+            return;
         }
-        if (filteredItems.Count() == 0) return;
 
-        ImGui.ListBox("Items##colliders", ref _colliderItemIndex, filteredItems.ToArray(), filteredItems.Count());
-        string selectedItem = filteredItems.ToArray()[_colliderItemIndex];
+        _colliderItemIndex = Math.Clamp(_colliderItemIndex, 0, filteredItemsArray.Length - 1);
+        ImGui.ListBox("Items##colliders", ref _colliderItemIndex, filteredItemsArray, filteredItemsArray.Length);
+        _colliderItemIndex = Math.Clamp(_colliderItemIndex, 0, filteredItemsArray.Length - 1);
+        string selectedItem = filteredItemsArray[_colliderItemIndex];
 
         Dictionary<string, (Action<LineSegmentCollider> setter, Func<LineSegmentCollider> getter)> selectedColliders = _colliders[selectedItem];
         string[] collidersTypes = selectedColliders.Select(entry => entry.Key).ToArray();
 
-        ImGui.ListBox("Colliders##colliders", ref _colliderIndex, collidersTypes, collidersTypes.Length);
+        if (collidersTypes.Length <= 0)
+        {
+            _colliderIndex = 0;
+            return;
+        }
 
-        if (collidersTypes.Length <= 0) return;
+        _colliderIndex = Math.Clamp(_colliderIndex, 0, collidersTypes.Length - 1);
+        ImGui.ListBox("Colliders##colliders", ref _colliderIndex, collidersTypes, collidersTypes.Length);
+        _colliderIndex = Math.Clamp(_colliderIndex, 0, collidersTypes.Length - 1);
 
         (Action<LineSegmentCollider> setter, Func<LineSegmentCollider> getter) = selectedColliders[collidersTypes[_colliderIndex]];
         System.Numerics.Vector3 position = getter().Position.ToSystem();
@@ -847,13 +985,6 @@ public sealed partial class DebugWindowManager
         ImGui.Text($"JSON: {json}");
     }
 
-    private static void DebugTab()
-    {
-        bool collidersRender = CollidersEntityBehavior.RenderColliders;
-        ImGui.Checkbox("Render entities colliders", ref collidersRender);
-        CollidersEntityBehavior.RenderColliders = collidersRender;
-    }
-
     private void QueueSourceSave(SourceSaveResult result, Action<string> setStatus)
     {
         if (result.Request == null)
@@ -869,7 +1000,7 @@ public sealed partial class DebugWindowManager
 
     private void DrawSourceSavePopup()
     {
-        const string popupId = "Save to source preview";
+        const string popupId = "Save authored file preview";
         if (_openSourceSavePopup)
         {
             ImGui.OpenPopup(popupId);
@@ -886,7 +1017,7 @@ public sealed partial class DebugWindowManager
         SourceSaveRequest? request = _pendingSourceSaveRequest;
         if (request == null)
         {
-            ImGui.TextUnformatted("No source save is pending.");
+            ImGui.TextUnformatted("No authored file save is pending.");
             if (ImGui.Button("Close"))
             {
                 ImGui.CloseCurrentPopup();
@@ -982,6 +1113,17 @@ public sealed partial class DebugWindowManager
 
     private void EditFov()
     {
+        if (_mainCameraInfo == null || _cameraFov == null)
+        {
+            if (!_fovReflectionWarningLogged)
+            {
+                LoggerUtil.Warn(_api, this, "FOV editor disabled; camera reflection fields were not found.");
+                _fovReflectionWarningLogged = true;
+            }
+
+            return;
+        }
+
         ClientMain? client = _api.World as ClientMain;
         if (client == null) return;
 
@@ -1063,12 +1205,34 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.Button("Save buffer to file", new NVector2(-1, 0)))
         {
-            _api.StoreModConfig(_animationBuffer, "co-animation-export.json");
+            if (_animationBuffer == null)
+            {
+                _transformSaveStatus = "No animation buffer to save.";
+            }
+            else
+            {
+                string outputPath = GetToolAuthoredAssetPath("animations", Path.Combine("buffers", "co-animation-export.json"));
+                Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+                File.WriteAllText(outputPath, _animationBuffer.ToString());
+                _transformSaveStatus = $"Saved animation buffer to {outputPath}.";
+            }
         }
 
         if (ImGui.Button("Load buffer from file", new NVector2(-1, 0)))
         {
-            _animationBuffer = _api.LoadModConfig<AnimationJson>("co-animation-export.json");
+            string inputPath = GetToolAuthoredAssetPath("animations", Path.Combine("buffers", "co-animation-export.json"));
+            if (File.Exists(inputPath))
+            {
+                _animationBuffer = JsonObject.FromJson(File.ReadAllText(inputPath)).AsObject<AnimationJson>();
+                _transformSaveStatus = $"Loaded animation buffer from {inputPath}.";
+            }
+            else
+            {
+                _animationBuffer = _api.LoadModConfig<AnimationJson>("co-animation-export.json");
+                _transformSaveStatus = _animationBuffer == null
+                    ? $"Animation buffer file not found at {inputPath}."
+                    : "Loaded animation buffer from legacy mod config.";
+            }
         }
 
         ImGui.SeparatorText("Preview options");
@@ -1083,14 +1247,16 @@ public sealed partial class DebugWindowManager
         ImGui.Checkbox("Third person animations", ref tpAnimations);
         PlayAnimationsInThirdPerson = tpAnimations;
 
-        if (ImGui.Button("Render fp model in tp", new NVector2(-1, 0)))
+        bool disableRuntimeAnimations = AnimationPatches.DisableAllAnimations;
+        if (ImGui.Checkbox("Disable runtime animations", ref disableRuntimeAnimations))
         {
-            _api.World.Player.Entity.ActiveHandItemSlot.Itemstack?.Collectible?.GetCollectibleBehavior<AnimatableAttachable>(true)?.SetSwitchModels(_api.World.Player.Entity.EntityId, true);
+            AnimationPatches.DisableAllAnimations = disableRuntimeAnimations;
         }
 
-        if (ImGui.Button("Switch back", new NVector2(-1, 0)))
+        bool disableThirdPersonRuntimeAnimations = AnimationPatches.DisableThirdPersonAnimations;
+        if (ImGui.Checkbox("Disable third person runtime animations", ref disableThirdPersonRuntimeAnimations))
         {
-            _api.World.Player.Entity.ActiveHandItemSlot.Itemstack?.Collectible?.GetCollectibleBehavior<AnimatableAttachable>(true)?.SetSwitchModels(_api.World.Player.Entity.EntityId, false);
+            AnimationPatches.DisableThirdPersonAnimations = disableThirdPersonRuntimeAnimations;
         }
 
         if (ImGui.CollapsingHeader("Add animation"))
@@ -1122,7 +1288,7 @@ public sealed partial class DebugWindowManager
             ImGui.SetClipboardText(AnimationsManager._instance.Animations[selectedAnimationCode].ToString());
         }
         ImGui.SameLine();
-        if (ImGui.Button("Save to source##animation") && AnimationsManager._instance.Animations.Count > 0)
+        if (ImGui.Button("Save authored file##animation") && AnimationsManager._instance.Animations.Count > 0)
         {
             QueueSourceSave(TrySaveAnimationToSource(selectedAnimationCode, AnimationsManager._instance.Animations[selectedAnimationCode]), status => _transformSaveStatus = status);
         }
@@ -2732,8 +2898,8 @@ public sealed partial class DebugWindowManager
         DrawHeldTransformRegistration();
         ImGui.Separator();
 
-        ImGui.InputTextWithHint("Filter##" + "transforms", "supports wildcards", ref _filter, 200);
-        EditorsUtils.FilterElements(_filter, _transforms.Keys, out IEnumerable<string> filtered, out IEnumerable<int> indexes);
+        ImGui.InputTextWithHint("Filter##" + "transforms", "supports wildcards", ref _legacyTransformFilter, 200);
+        EditorsUtils.FilterElements(_legacyTransformFilter, _transforms.Keys, out IEnumerable<string> filtered, out IEnumerable<int> indexes);
 
         string[] filteredTransforms = filtered.ToArray();
         if (_transformIndex >= filteredTransforms.Length)
@@ -2757,7 +2923,7 @@ public sealed partial class DebugWindowManager
             ImGui.SetClipboardText(JsonUtil.ToPrettyString(transform));
         }
         ImGui.SameLine();
-        if (editableTransform.SaveToSource != null && ImGui.Button("Save to source##transform"))
+        if (editableTransform.SaveToSource != null && ImGui.Button("Save authored file##transform"))
         {
             editableTransform.Apply?.Invoke(transform);
             QueueSourceSave(editableTransform.SaveToSource(transform), status => _transformSaveStatus = status);
@@ -2877,7 +3043,7 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SameLine();
-        if (_currentDisplaySaveToSource != null && ImGui.Button("Save to source##GenericDisplayTab"))
+        if (_currentDisplaySaveToSource != null && ImGui.Button("Save authored file##GenericDisplayTab"))
         {
             _currentDisplayApply?.Invoke(transform);
             QueueSourceSave(_currentDisplaySaveToSource(transform), status => _displaySaveStatus = status);
@@ -3241,5 +3407,4 @@ public sealed partial class DebugWindowManager
         }
         if (!canCreate) ImGui.EndDisabled();
     }
-#endif
 }

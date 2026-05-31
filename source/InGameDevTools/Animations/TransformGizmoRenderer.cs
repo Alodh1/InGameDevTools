@@ -1,4 +1,3 @@
-#if DEBUG
 using ImGuiNET;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
@@ -1182,4 +1181,3 @@ internal sealed class TransformGizmoRenderer : IRenderer
         }
     }
 }
-#endif

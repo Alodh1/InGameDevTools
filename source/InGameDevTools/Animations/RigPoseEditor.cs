@@ -1,4 +1,3 @@
-#if DEBUG
 using InGameDevTools.Integration.Transpilers;
 using ImGuiNET;
 using NVector3 = System.Numerics.Vector3;
@@ -96,7 +95,7 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SameLine();
-        ImGui.TextDisabled("Edits the selected player keyframe. Use Save to source above to persist.");
+        ImGui.TextDisabled("Edits the selected player keyframe. Use Save authored file above to persist.");
 
         if (!_rigPoseEditorEnabled)
         {
@@ -1625,4 +1624,3 @@ public sealed partial class DebugWindowManager
         }
     }
 }
-#endif

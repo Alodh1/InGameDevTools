@@ -1,4 +1,3 @@
-#if DEBUG
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using Vintagestory.API.Client;
@@ -410,4 +409,3 @@ internal readonly struct DevToolsPreviewCamera
         return float.IsFinite(screen.X) && float.IsFinite(screen.Y);
     }
 }
-#endif

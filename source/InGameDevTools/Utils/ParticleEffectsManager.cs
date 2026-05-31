@@ -49,9 +49,7 @@ public class ParticleEffectsManager
     public void LoadAssets()
     {
         _particleEffects.Clear();
-#if DEBUG
         ClearPreviewReferenceModelCache();
-#endif
         _scanDiagnostics = new ParticleAssetScanDiagnostics();
         LoadNamedParticleEffectAssets(_api);
         LoadRuntimeParticleAssets(_api);
@@ -94,9 +92,7 @@ public class ParticleEffectsManager
 
     private void LoadEmbeddedParticleAssets(ICoreAPI api)
     {
-#if DEBUG
         ClearPreviewReferenceModelCache();
-#endif
 
         Dictionary<string, IAsset> assetsByLocation = new(StringComparer.OrdinalIgnoreCase);
         foreach (IAsset asset in api.Assets.AllAssets.Values)
@@ -182,9 +178,7 @@ public class ParticleEffectsManager
 
     private void LoadRuntimeParticleAssets(ICoreAPI api)
     {
-#if DEBUG
         ClearPreviewReferenceModelCache();
-#endif
 
         foreach (Block block in api.World.Blocks)
         {
@@ -499,7 +493,6 @@ public class ParticleEffectsManager
         SpawnParticleEffect(packet, null);
     }
 
-#if DEBUG
     public void Draw(string id)
     {
         DrawEditor(id, 0, 1f);
@@ -1054,7 +1047,8 @@ public class ParticleEffectsManager
                 }
             },
             backupPath,
-            () => SerializeParticleBackup(originals.Count > 0 ? originals[0].Particles : null));
+            () => SerializeParticleBackup(originals.Count > 0 ? originals[0].Particles : null),
+            "particles");
     }
 
     private DebugWindowManager.LivePatchSnapshot CaptureParticleLiveSnapshot(string targetKey, CollectibleObject collectible)
@@ -1066,7 +1060,8 @@ public class ParticleEffectsManager
         return new(
             () => collectible.ParticleProperties = CloneParticleArray(original),
             backupPath,
-            () => SerializeParticleBackup(original));
+            () => SerializeParticleBackup(original),
+            "particles");
     }
 
     private static void ApplyParticlePropertiesToCollectible(CollectibleObject collectible, int index, AdvancedParticleProperties edited)
@@ -1267,7 +1262,6 @@ public class ParticleEffectsManager
 
         return value.Replace(':', '_').Replace('/', '_').Replace('\\', '_').Replace('#', '_');
     }
-#endif
 
     private string _particleFilter = "";
     private bool _previewLoop = true;
@@ -1319,10 +1313,8 @@ public class ParticleEffectsManager
     private readonly IClientNetworkChannel? _clientChannel;
     private const string _networkChannelId = "InGameDevTools:particle-effects";
 
-#if DEBUG
     private string _particleDomainFilter = "";
     private readonly ImGuiThreePanelLayoutState _layout = new(0.22f, 0.42f);
-#endif
 
     private enum ParticleEffectSourceKind
     {
@@ -1340,20 +1332,16 @@ public class ParticleEffectsManager
             Source = source;
             SourceKind = sourceKind;
             Properties = properties;
-#if DEBUG
             Domain = ImGuiLayoutHelper.GetDomainFromAssetCode(key);
             DisplayKey = ImGuiLayoutHelper.CompactAssetCode(key);
             SearchText = $"{key} {source} {SourceKindLabel}";
-#endif
         }
 
         public string Key { get; }
         public string Source { get; }
-#if DEBUG
         public string Domain { get; }
         public string DisplayKey { get; }
         public string SearchText { get; }
-#endif
         public ParticleEffectSourceKind SourceKind { get; }
         public AdvancedParticleProperties Properties { get; private set; }
         public string SourceKindLabel => SourceKind switch
@@ -1397,7 +1385,6 @@ public class ParticleEffectsManager
         }
     }
 
-#if DEBUG
     private void DrawPreviewPanel(string id, string key, IReadOnlyList<ParticleEffectEntry> emitters, AdvancedParticleProperties? selectedParticleProperties, float deltaSeconds)
     {
         if (!string.Equals(_previewEffectKey, key, StringComparison.OrdinalIgnoreCase))
@@ -3043,7 +3030,6 @@ public class ParticleEffectsManager
         public float RandomVelocitySequence;
         public float RandomVelocityDirection = 1f;
     }
-#endif
 
     private void SpawnDebugParticles(string code, float offset, Vector3 velocity, float intensity)
     {
@@ -3136,7 +3122,6 @@ public class ParticleEffectsManager
     }
 }
 
-#if DEBUG
 public static class ParticleEditor
 {
     public static void Draw(string id, AdvancedParticleProperties particleProperties)
@@ -3544,4 +3529,3 @@ public static class ParticleEditor
         NatFloatEditor(id, $"{name}.Z", ref vector[2]);
     }
 }
-#endif
