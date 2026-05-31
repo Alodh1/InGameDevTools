@@ -1,5 +1,6 @@
 using ImGuiNET;
 using InGameDevTools.Animations;
+using InGameDevTools.Integration;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using OpenTK.Mathematics;
@@ -854,6 +855,7 @@ public class ParticleEffectsManager
             {
                 liveApplyManager.LastStatus = liveApplyManager.Revert(scopeKey);
                 _particleLiveAppliedHashes.Remove(scopeKey);
+                ClearParticleRuntimeOverrides(scopeKey);
             }
         }
 
@@ -883,6 +885,8 @@ public class ParticleEffectsManager
     public void ClearParticleLiveApplyState()
     {
         _particleLiveAppliedHashes.Clear();
+        _particleLiveOverrideKeysByScope.Clear();
+        ParticleRuntimePatches.ClearOverrides();
     }
 
     private string ApplySelectedParticleLive(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, DebugWindowManager.DevToolsLiveApplyManager liveApplyManager, bool force = false)
@@ -928,11 +932,42 @@ public class ParticleEffectsManager
                 foreach (ParticleRuntimeTarget target in runtimeTargets.Values)
                 {
                     ApplyParticlePropertiesToCollectible(target.Collectible, target.Index, target.Entry.Properties);
+                    TrackParticleRuntimeOverride(scopeKey, target);
                 }
             },
             $"Applied ParticleProperties[{emitterIndex}] to {runtimeTargets.Count} {family.DisplayKey} variant(s).");
         _particleLiveAppliedHashes[scopeKey] = desiredHash;
         return status;
+    }
+
+    private void TrackParticleRuntimeOverride(string scopeKey, ParticleRuntimeTarget target)
+    {
+        string? overrideKey = ParticleRuntimePatches.SetOverride(target.Collectible, target.Index, target.Entry.Properties);
+        if (string.IsNullOrWhiteSpace(overrideKey)) return;
+
+        foreach (HashSet<string> keys in _particleLiveOverrideKeysByScope.Values)
+        {
+            keys.Remove(overrideKey);
+        }
+
+        if (!_particleLiveOverrideKeysByScope.TryGetValue(scopeKey, out HashSet<string>? scopeKeys))
+        {
+            _particleLiveOverrideKeysByScope[scopeKey] = scopeKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        scopeKeys.Add(overrideKey);
+    }
+
+    private void ClearParticleRuntimeOverrides(string scopeKey)
+    {
+        if (!_particleLiveOverrideKeysByScope.TryGetValue(scopeKey, out HashSet<string>? overrideKeys)) return;
+
+        foreach (string overrideKey in overrideKeys)
+        {
+            ParticleRuntimePatches.RemoveOverride(overrideKey);
+        }
+
+        _particleLiveOverrideKeysByScope.Remove(scopeKey);
     }
 
     private static string BuildParticleDesiredRuntimeHash(IEnumerable<ParticleRuntimeTarget> targets)
@@ -1161,7 +1196,18 @@ public class ParticleEffectsManager
 
     private static AdvancedParticleProperties[]? CloneParticleArray(AdvancedParticleProperties[]? particles)
     {
-        return particles?.Select(particle => particle?.Clone()).Where(particle => particle != null).Cast<AdvancedParticleProperties>().ToArray();
+        if (particles == null) return null;
+
+        AdvancedParticleProperties[] clones = new AdvancedParticleProperties[particles.Length];
+        for (int index = 0; index < particles.Length; index++)
+        {
+            if (particles[index] != null)
+            {
+                clones[index] = particles[index].Clone();
+            }
+        }
+
+        return clones;
     }
 
     private static string SerializeParticleBackup(AdvancedParticleProperties[]? particles)
@@ -1244,6 +1290,7 @@ public class ParticleEffectsManager
     private readonly List<ParticlePreviewParticle> _previewParticles = [];
     private readonly Dictionary<string, ParticlePreviewPlacement> _previewPlacementCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _particleLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HashSet<string>> _particleLiveOverrideKeysByScope = new(StringComparer.OrdinalIgnoreCase);
     private DevToolsPreview3DRenderer? _previewRenderer3D;
     private readonly Random _previewRandom = new(42);
     private readonly ICoreAPI _api;

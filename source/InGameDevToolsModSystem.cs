@@ -17,6 +17,7 @@ public sealed class InGameDevToolsModSystem : ModSystem
     private const string TranspilerHarmonyId = "InGameDevTools:Transpilers";
     private const string AnimationHarmonyId = "InGameDevTools:Animation";
     private const string DetachedCameraHarmonyId = "InGameDevTools:DetachedCamera";
+    private const string ParticleRuntimeHarmonyId = "InGameDevTools:ParticleRuntime";
 
     private ICoreClientAPI? _api;
     private ParticleEffectsManager? _particleEffectsManager;
@@ -71,6 +72,7 @@ public sealed class InGameDevToolsModSystem : ModSystem
     public override void AssetsFinalize(ICoreAPI api)
     {
         _particleEffectsManager?.LoadAssets();
+        ParticleRuntimePatches.Patch(ParticleRuntimeHarmonyId, api);
         _animationsManager?.Load();
         if (api is ICoreClientAPI clientApi)
         {
@@ -94,6 +96,7 @@ public sealed class InGameDevToolsModSystem : ModSystem
         new Harmony(TranspilerHarmonyId).UnpatchAll(TranspilerHarmonyId);
         AnimationPatches.Unpatch(AnimationHarmonyId);
         DetachedEditorCameraPatches.Unpatch(DetachedCameraHarmonyId);
+        ParticleRuntimePatches.Unpatch(ParticleRuntimeHarmonyId);
         ExtendedElementPose.NameHashCache?.Dispose();
         ExtendedElementPose.NameHashCache = null;
 
