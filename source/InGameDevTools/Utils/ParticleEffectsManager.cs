@@ -841,6 +841,11 @@ public class ParticleEffectsManager
         List<ParticleEffectEntry> targets = GetParticleLiveTargets(family, variant, emitterIndex).ToList();
         bool available = targets.Count > 0 && targets.All(entry => GetParticleLiveTargetKey(entry, out CollectibleObject? collectible, out int index).Length > 0 && collectible != null && index >= 0);
         string scopeKey = GetParticleLiveScopeKey(family, variant, emitterIndex);
+        if (available && liveApplyManager.AutoApply)
+        {
+            ApplySelectedParticleLive(family, variant, emitterIndex, liveApplyManager);
+        }
+
         ImGui.SeparatorText("Runtime");
         ImGui.TextDisabled(available ? (liveApplyManager.AutoApply ? "Runtime apply enabled" : "Runtime apply disabled") : "Live target unavailable");
         if (available && liveApplyManager.CanRevert(scopeKey))
@@ -890,14 +895,6 @@ public class ParticleEffectsManager
         }
 
         string scopeKey = GetParticleLiveScopeKey(family, variant, emitterIndex);
-        string hash = string.Join("\n---\n", targets.Select(entry => $"{entry.Key}\n{ParticlePropertiesToToken(entry.Properties)}"));
-        if (!force &&
-            _particleLiveAppliedHashes.TryGetValue(scopeKey, out string? appliedHash) &&
-            string.Equals(appliedHash, hash, StringComparison.Ordinal))
-        {
-            return liveApplyManager.LastStatus;
-        }
-
         Dictionary<string, ParticleRuntimeTarget> runtimeTargets = new(StringComparer.OrdinalIgnoreCase);
         foreach (ParticleEffectEntry entry in targets)
         {
@@ -909,6 +906,16 @@ public class ParticleEffectsManager
         if (runtimeTargets.Count == 0)
         {
             liveApplyManager.LastStatus = "Live target unavailable for selected particle group.";
+            return liveApplyManager.LastStatus;
+        }
+
+        string desiredHash = BuildParticleDesiredRuntimeHash(runtimeTargets.Values);
+        string currentRuntimeHash = BuildParticleCurrentRuntimeHash(runtimeTargets.Values);
+        if (!force &&
+            _particleLiveAppliedHashes.TryGetValue(scopeKey, out string? appliedHash) &&
+            string.Equals(appliedHash, desiredHash, StringComparison.Ordinal) &&
+            string.Equals(currentRuntimeHash, desiredHash, StringComparison.Ordinal))
+        {
             return liveApplyManager.LastStatus;
         }
 
@@ -924,8 +931,37 @@ public class ParticleEffectsManager
                 }
             },
             $"Applied ParticleProperties[{emitterIndex}] to {runtimeTargets.Count} {family.DisplayKey} variant(s).");
-        _particleLiveAppliedHashes[scopeKey] = hash;
+        _particleLiveAppliedHashes[scopeKey] = desiredHash;
         return status;
+    }
+
+    private static string BuildParticleDesiredRuntimeHash(IEnumerable<ParticleRuntimeTarget> targets)
+    {
+        return string.Join("\n---\n", targets
+            .OrderBy(target => target.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(target => $"{target.Key}[{target.Index}]\n{ParticlePropertiesToToken(target.Entry.Properties)}"));
+    }
+
+    private static string BuildParticleCurrentRuntimeHash(IEnumerable<ParticleRuntimeTarget> targets)
+    {
+        return string.Join("\n---\n", targets
+            .OrderBy(target => target.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(target => $"{target.Key}[{target.Index}]\n{ParticleRuntimePropertyToken(target.Collectible, target.Index)}"));
+    }
+
+    private static JToken ParticleRuntimePropertyToken(CollectibleObject collectible, int index)
+    {
+        if (collectible.ParticleProperties == null ||
+            index < 0 ||
+            index >= collectible.ParticleProperties.Length ||
+            collectible.ParticleProperties[index] == null)
+        {
+            return JValue.CreateNull();
+        }
+
+        AdvancedParticleProperties clone = collectible.ParticleProperties[index].Clone();
+        NormalizeParticleProperties(clone);
+        return ParticlePropertiesToToken(clone);
     }
 
     private IEnumerable<ParticleEffectEntry> GetParticleLiveTargets(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex)
