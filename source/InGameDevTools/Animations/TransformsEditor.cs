@@ -35,6 +35,7 @@ public sealed partial class DebugWindowManager
     private string _transformReferenceFilter = "";
     private string _transformReferenceBlockCode = "";
     private int _transformReferenceBlockIndex;
+    private readonly Dictionary<string, string> _transformLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
     private float _transformPreviewYaw = -0.55f;
     private float _transformPreviewPitch = 0.35f;
     private float _transformPreviewDistance = 4.5f;
@@ -348,7 +349,6 @@ public sealed partial class DebugWindowManager
                 value =>
                 {
                     MarkTransformDirty(asset, slot);
-                    if (_liveApplyManager.AutoApply) ApplyTransformLive(asset, slot, value);
                 });
 
             if (ImGui.Button("Reset default##transform-reset"))
@@ -452,19 +452,31 @@ public sealed partial class DebugWindowManager
     private void DrawTransformLiveControls(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform)
     {
         string liveKey = $"transform:{asset.Key}";
-        _liveApplyManager.DrawTargetControls(
+        _liveApplyManager.DrawRuntimeStatus(
             $"transform-live-{slot.Key}",
             liveKey,
             asset.Label,
             true,
-            () => ApplyTransformLive(asset, slot, transform),
-            () => _liveApplyManager.Revert(liveKey));
+            () =>
+            {
+                ClearTransformAppliedHashesForAsset(asset);
+                return _liveApplyManager.Revert(liveKey);
+            });
     }
 
-    private string ApplyTransformLive(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform)
+    private string ApplyTransformLive(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform, bool force = false)
     {
         string liveKey = $"transform:{asset.Key}";
-        return _liveApplyManager.Apply(
+        string hashKey = $"transform:{slot.Key}";
+        string hash = JsonUtil.ToString(transform);
+        if (!force &&
+            _transformLiveAppliedHashes.TryGetValue(hashKey, out string? appliedHash) &&
+            string.Equals(appliedHash, hash, StringComparison.Ordinal))
+        {
+            return _liveApplyManager.LastStatus;
+        }
+
+        string status = _liveApplyManager.Apply(
             liveKey,
             asset.Label,
             () => CaptureTransformLiveSnapshot(asset),
@@ -474,6 +486,35 @@ public sealed partial class DebugWindowManager
                 else ApplyTypedTransformAttribute(asset.Collectible, slot.AttributeCode, slot.TypedKey, transform);
             },
             $"Live applied {slot.DisplayName} for {asset.Label}.");
+        _transformLiveAppliedHashes[hashKey] = hash;
+        return status;
+    }
+
+    private void ApplySelectedTransformLive(bool force = false)
+    {
+        TransformAssetEntry? asset = SelectedTransformAsset;
+        TransformSlotSelection? slot = GetSelectedTransformSlot(asset);
+        if (asset == null || slot == null)
+        {
+            _liveApplyManager.LastStatus = "No selected transform to apply.";
+            return;
+        }
+
+        ApplyTransformLive(asset, slot, GetTransformDraft(asset, slot), force);
+    }
+
+    private void ClearTransformLiveApplyState()
+    {
+        _transformLiveAppliedHashes.Clear();
+    }
+
+    private void ClearTransformAppliedHashesForAsset(TransformAssetEntry asset)
+    {
+        string prefix = $"transform:{asset.Key}|";
+        foreach (string key in _transformLiveAppliedHashes.Keys.Where(key => key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            _transformLiveAppliedHashes.Remove(key);
+        }
     }
 
     private LivePatchSnapshot CaptureTransformLiveSnapshot(TransformAssetEntry asset)
@@ -534,14 +575,22 @@ public sealed partial class DebugWindowManager
             }
 
             mesh.ModelTransform(transform);
-            DevToolsPreviewBounds transformedBounds = DevToolsPreviewMeshFactory.CalculateBounds(mesh);
-            if (_transformReferenceMesh != null && transformedBounds.IsValid)
+            bool runtimePlaced = TryApplyRuntimeTransformPlacement(slot.AttributeCode, mesh, out Vector3 runtimeAnchor);
+            if (runtimePlaced)
             {
-                Vector3 meshAnchor = GetTransformMeshAnchor(context, transformedBounds);
-                Vector3 offset = _transformPreviewAnchor - meshAnchor;
-                if (offset.LengthSquared > 0.000001f)
+                _transformPreviewAnchor = runtimeAnchor;
+            }
+            else
+            {
+                DevToolsPreviewBounds transformedBounds = DevToolsPreviewMeshFactory.CalculateBounds(mesh);
+                if (_transformReferenceMesh != null && transformedBounds.IsValid)
                 {
-                    mesh.Translate(offset.X, offset.Y, offset.Z);
+                    Vector3 meshAnchor = GetTransformMeshAnchor(context, transformedBounds);
+                    Vector3 offset = _transformPreviewAnchor - meshAnchor;
+                    if (offset.LengthSquared > 0.000001f)
+                    {
+                        mesh.Translate(offset.X, offset.Y, offset.Z);
+                    }
                 }
             }
 
@@ -598,6 +647,19 @@ public sealed partial class DebugWindowManager
             TransformGizmoContext.Display => meshBounds.Center,
             _ => Vector3.Zero
         };
+    }
+
+    private static bool TryApplyRuntimeTransformPlacement(string attributeCode, MeshData mesh, out Vector3 anchor)
+    {
+        if (attributeCode.Contains("forge", StringComparison.OrdinalIgnoreCase))
+        {
+            mesh.Translate(0f, 0.6875f, 0f);
+            anchor = new Vector3(0.5f, 0.6875f, 0.5f);
+            return true;
+        }
+
+        anchor = Vector3.Zero;
+        return false;
     }
 
     private void ResetTransformPreviewCameraToSelection()

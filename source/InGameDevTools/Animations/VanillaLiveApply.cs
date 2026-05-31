@@ -1,5 +1,6 @@
 #if DEBUG
 using System.Collections;
+using ImGuiNET;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Vintagestory.API.Client;
@@ -12,6 +13,8 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
+    private readonly Dictionary<string, string> _vanillaLiveAppliedHashes = new(StringComparer.Ordinal);
+
     private void TrackVanillaLiveOriginals()
     {
         foreach (VanillaAnimationDocument document in _vanillaIndex.Documents)
@@ -25,38 +28,53 @@ public sealed partial class DebugWindowManager
     {
         string key = GetVanillaLiveKey(document);
         bool available = IsVanillaLiveTargetAvailable(document);
-        _liveApplyManager.DrawTargetControls(
+        _liveApplyManager.DrawRuntimeStatus(
             $"vanilla-live-{document.HistoryKey}",
             key,
             document.DisplayPath,
             available,
             () =>
             {
-                string status = ApplyVanillaLive(document);
-                RefreshVanillaPreviewAfterEdit(row);
-                return status;
-            },
-            () =>
-            {
                 string status = _liveApplyManager.Revert(key);
+                _vanillaLiveAppliedHashes.Remove(key);
                 RefreshVanillaPreviewAfterEdit(row);
                 return status;
             });
+        if (!available)
+        {
+            return;
+        }
+
+        if (_liveApplyManager.AutoApply)
+        {
+            ImGui.TextWrapped("Runtime apply is enabled in the top toolbar. Edits are applied automatically.");
+        }
+        else
+        {
+            ImGui.TextWrapped("Enable Runtime apply in the top toolbar to apply edits automatically.");
+        }
     }
 
-    private void ApplyAllDirtyVanillaLive()
+    private void ApplyAllDirtyVanillaLive(bool force = false)
     {
         List<VanillaAnimationDocument> dirty = _vanillaIndex.Documents.Where(document => document.Dirty).ToList();
         if (dirty.Count == 0)
         {
-            _vanillaStatus = "No dirty vanilla documents to apply live.";
+            if (force)
+            {
+                _vanillaStatus = "Runtime apply enabled. Future edits will apply automatically.";
+            }
+            else
+            {
+                _vanillaStatus = "No dirty vanilla documents to apply live.";
+            }
             return;
         }
 
         List<string> statuses = [];
         foreach (VanillaAnimationDocument document in dirty)
         {
-            statuses.Add(ApplyVanillaLive(document));
+            statuses.Add(ApplyVanillaLive(document, force));
         }
 
         _vanillaStatus = string.Join(Environment.NewLine, statuses);
@@ -66,13 +84,23 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void AutoApplyVanillaDocument(VanillaAnimationDocument document)
+    private void AutoApplyVanillaDocument(VanillaAnimationDocument document, bool force = false)
     {
         if (!_liveApplyManager.AutoApply || !IsVanillaLiveTargetAvailable(document)) return;
-        _vanillaStatus = ApplyVanillaLive(document);
+
+        string key = GetVanillaLiveKey(document);
+        string serialized = VanillaAnimationDocumentSerializer.Serialize(document);
+        if (!force &&
+            _vanillaLiveAppliedHashes.TryGetValue(key, out string? lastApplied) &&
+            string.Equals(lastApplied, serialized, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _vanillaStatus = ApplyVanillaLive(document, force);
     }
 
-    private string ApplyVanillaLive(VanillaAnimationDocument document)
+    private string ApplyVanillaLive(VanillaAnimationDocument document, bool force = false)
     {
         if (!IsVanillaLiveTargetAvailable(document))
         {
@@ -81,12 +109,19 @@ public sealed partial class DebugWindowManager
         }
 
         string key = GetVanillaLiveKey(document);
-        return _liveApplyManager.Apply(
+        string status = _liveApplyManager.Apply(
             key,
             document.DisplayPath,
             () => CaptureVanillaLiveSnapshot(document),
             () => ApplyVanillaLiveDocument(document),
-            BuildVanillaAppliedStatus(document));
+            () => BuildVanillaAppliedStatus(document));
+        _vanillaLiveAppliedHashes[key] = VanillaAnimationDocumentSerializer.Serialize(document);
+        return status;
+    }
+
+    private void ClearVanillaLiveApplyState()
+    {
+        _vanillaLiveAppliedHashes.Clear();
     }
 
     private static string GetVanillaLiveKey(VanillaAnimationDocument document)

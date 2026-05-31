@@ -731,7 +731,16 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SameLine();
-        ImGui.Checkbox("Live apply##devtools-live-auto", ref _liveApplyManager.AutoApply);
+        bool autoApply = _liveApplyManager.AutoApply;
+        if (ImGui.Checkbox("Runtime apply##devtools-live-auto", ref autoApply))
+        {
+            bool enabled = autoApply && !_liveApplyManager.AutoApply;
+            _liveApplyManager.AutoApply = autoApply;
+            if (enabled)
+            {
+                ApplyDirtyLiveChangesForActiveTab(force: true);
+            }
+        }
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Automatically applies editor changes to loaded runtime objects for this session.");
@@ -746,9 +755,39 @@ public sealed partial class DebugWindowManager
         if (ImGui.Button("Revert live##devtools-live-revert-all"))
         {
             _liveApplyManager.RevertAll();
+            ClearLiveApplyState();
         }
 
         ImGui.Separator();
+    }
+
+    private void ApplyDirtyLiveChangesForActiveTab(bool force = false)
+    {
+        if (!_liveApplyManager.AutoApply) return;
+
+        switch (_activeDevToolsTab)
+        {
+            case DevToolsTab.Animations:
+                ApplyAllDirtyVanillaLive(force);
+                break;
+            case DevToolsTab.RecipeEditor:
+                _recipeEditor.ApplyDirtyRecipeLive(_liveApplyManager, force);
+                break;
+            case DevToolsTab.Particles:
+                _particleEffectsManager.ApplyDirtyParticleLive(_liveApplyManager, force);
+                break;
+            case DevToolsTab.Transforms:
+                ApplySelectedTransformLive(force);
+                break;
+        }
+    }
+
+    private void ClearLiveApplyState()
+    {
+        ClearVanillaLiveApplyState();
+        _recipeEditor.ClearRecipeLiveApplyState();
+        _particleEffectsManager.ClearParticleLiveApplyState();
+        ClearTransformLiveApplyState();
     }
 
     private void ResetDevToolsLayout()

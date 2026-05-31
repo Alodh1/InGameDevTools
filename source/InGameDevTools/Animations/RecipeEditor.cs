@@ -84,6 +84,7 @@ public sealed partial class DebugWindowManager
         private string[] _liquidCodes = [];
         private readonly ImGuiThreePanelLayoutState _layout = new(0.24f, 0.30f);
         private readonly Dictionary<string, string> _stackCodeFilters = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string> _recipeLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
         private ICoreClientAPI? _api;
         private DevToolsLiveApplyManager? _liveApplyManager;
 
@@ -138,6 +139,24 @@ public sealed partial class DebugWindowManager
         public void ResetLayout()
         {
             _layout.Reset();
+        }
+
+        public void ApplyDirtyRecipeLive(DevToolsLiveApplyManager liveApplyManager, bool force = false)
+        {
+            _liveApplyManager = liveApplyManager;
+            RecipeEntry? entry = SelectedEntry;
+            if (entry == null)
+            {
+                liveApplyManager.LastStatus = "No selected recipe to apply.";
+                return;
+            }
+
+            _status = ApplyRecipeLive(entry, force);
+        }
+
+        public void ClearRecipeLiveApplyState()
+        {
+            _recipeLiveAppliedHashes.Clear();
         }
 
         private void EnsureLoaded(ICoreClientAPI api)
@@ -1059,18 +1078,16 @@ public sealed partial class DebugWindowManager
             bool available = TryResolveRecipeLiveTarget(entry, out RecipeLiveListTarget? target, out string unavailableReason);
             string liveKey = target?.LiveKey ?? $"recipe:{entry.Kind}:{entry.Key}";
 
-            if (available && _liveApplyManager.AutoApply)
-            {
-                ApplyRecipeLive(entry);
-            }
-
-            _liveApplyManager.DrawTargetControls(
+            _liveApplyManager.DrawRuntimeStatus(
                 $"recipe-live-{entry.Key}",
                 liveKey,
                 entry.ShortLabel,
                 available,
-                () => ApplyRecipeLive(entry),
-                () => _liveApplyManager.Revert(liveKey));
+                () =>
+                {
+                    _recipeLiveAppliedHashes.Remove(liveKey);
+                    return _liveApplyManager.Revert(liveKey);
+                });
 
             if (!available && !string.IsNullOrWhiteSpace(unavailableReason))
             {
@@ -1082,7 +1099,7 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        private string ApplyRecipeLive(RecipeEntry entry)
+        private string ApplyRecipeLive(RecipeEntry entry, bool force = false)
         {
             if (_liveApplyManager == null || _api == null)
             {
@@ -1095,12 +1112,22 @@ public sealed partial class DebugWindowManager
                 return _liveApplyManager.LastStatus;
             }
 
-            return _liveApplyManager.Apply(
+            string hash = SerializeToken(entry.Recipe);
+            if (!force &&
+                _recipeLiveAppliedHashes.TryGetValue(target.LiveKey, out string? appliedHash) &&
+                string.Equals(appliedHash, hash, StringComparison.Ordinal))
+            {
+                return _liveApplyManager.LastStatus;
+            }
+
+            string status = _liveApplyManager.Apply(
                 target.LiveKey,
                 target.Label,
                 () => CaptureRecipeLiveSnapshot(target, entry),
                 () => ApplyRecipeToTarget(target, entry),
                 BuildRecipeLiveStatus(entry));
+            _recipeLiveAppliedHashes[target.LiveKey] = hash;
+            return status;
         }
 
         private bool TryResolveRecipeLiveTarget(RecipeEntry entry, out RecipeLiveListTarget? target, out string reason)

@@ -25,6 +25,16 @@ public sealed partial class DebugWindowManager
             Action applyCurrent,
             string? appliedStatus = null)
         {
+            return Apply(key, label, captureOriginal, applyCurrent, () => appliedStatus ?? $"Live applied {label}.");
+        }
+
+        public string Apply(
+            string key,
+            string label,
+            Func<LivePatchSnapshot> captureOriginal,
+            Action applyCurrent,
+            Func<string> appliedStatus)
+        {
             try
             {
                 LivePatchEntry entry = EnsureEntry(key, label, captureOriginal);
@@ -37,7 +47,7 @@ public sealed partial class DebugWindowManager
                 entry.Applied = true;
                 entry.LastError = "";
                 entry.LastAppliedAt = DateTime.Now;
-                LastStatus = appliedStatus ?? $"Live applied {label}.";
+                LastStatus = appliedStatus();
                 return LastStatus;
             }
             catch (Exception exception)
@@ -123,6 +133,8 @@ public sealed partial class DebugWindowManager
 
         public bool IsApplied(string key) => _entries.TryGetValue(key, out LivePatchEntry? entry) && entry.Applied;
 
+        public bool CanRevert(string key) => _entries.TryGetValue(key, out LivePatchEntry? entry) && entry.Applied;
+
         public void DrawGlobalControls(string id)
         {
             ImGui.Checkbox($"Live apply##{id}", ref AutoApply);
@@ -183,6 +195,34 @@ public sealed partial class DebugWindowManager
             if (!available)
             {
                 ImGui.TextWrapped($"{label}: no live runtime target.");
+            }
+        }
+
+        public void DrawRuntimeStatus(
+            string id,
+            string key,
+            string label,
+            bool available,
+            Func<string>? revert = null)
+        {
+            ImGui.SeparatorText("Runtime");
+            ImGui.TextDisabled(GetStatus(key, available));
+
+            bool canRevert = available && revert != null && CanRevert(key);
+            if (!canRevert) ImGui.BeginDisabled();
+            if (ImGui.Button($"Revert selected##{id}"))
+            {
+                LastStatus = revert == null ? "No live changes to revert." : revert();
+            }
+            if (!canRevert) ImGui.EndDisabled();
+
+            if (!available)
+            {
+                ImGui.TextWrapped($"{label}: no live runtime target.");
+            }
+            else if (!string.IsNullOrWhiteSpace(LastStatus))
+            {
+                ImGui.TextWrapped(LastStatus);
             }
         }
 

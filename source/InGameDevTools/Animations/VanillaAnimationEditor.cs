@@ -296,11 +296,6 @@ public sealed partial class DebugWindowManager
             ExportDirtyVanillaDocuments();
         }
 
-        if (ImGui.Button("Apply all dirty live##vanilla", new NVector2(-1, 0)))
-        {
-            ApplyAllDirtyVanillaLive();
-        }
-
         DrawVanillaNewAnimationControls();
 
         ImGui.SeparatorText("Index");
@@ -2306,6 +2301,10 @@ public sealed partial class DebugWindowManager
             {
                 CommitPendingVanillaHistory(document);
             }
+            else
+            {
+                AutoApplyVanillaDocument(document);
+            }
             return;
         }
 
@@ -2314,6 +2313,7 @@ public sealed partial class DebugWindowManager
         if (anyItemActive)
         {
             _vanillaHistory.BeginEdit(document, before);
+            AutoApplyVanillaDocument(document);
         }
         else if (_vanillaHistory.RecordSnapshot(document, before))
         {
