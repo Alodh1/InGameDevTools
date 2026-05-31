@@ -39,6 +39,7 @@ public sealed partial class DebugWindowManager
     private float _transformPreviewPitch = 0.35f;
     private float _transformPreviewDistance = 4.5f;
     private Vector3 _transformPreviewTarget = new(0.5f, 0.5f, 0.5f);
+    private Vector3 _transformPreviewAnchor = Vector3.Zero;
     private string _transformsStatus = "";
     private bool _transformsIndexed;
 
@@ -82,6 +83,7 @@ public sealed partial class DebugWindowManager
         _transformPreviewPitch = 0.35f;
         _transformPreviewDistance = 4.5f;
         _transformPreviewTarget = new Vector3(0.5f, 0.5f, 0.5f);
+        _transformPreviewAnchor = Vector3.Zero;
     }
 
     private void EnsureTransformAssetsIndexed()
@@ -496,9 +498,27 @@ public sealed partial class DebugWindowManager
         _transformReferenceMesh?.Dispose();
         _transformPreviewMesh = null;
         _transformReferenceMesh = null;
+        _transformPreviewAnchor = Vector3.Zero;
 
         try
         {
+            TransformGizmoContext context = GetGizmoContextForTransformCode(slot.AttributeCode);
+            Block? reference = null;
+            if (!string.IsNullOrWhiteSpace(referenceCode))
+            {
+                reference = _api.World.GetBlock(AssetLocation.Create(referenceCode, "game"));
+            }
+
+            if (reference != null)
+            {
+                _api.Tesselator.TesselateBlock(reference, out MeshData referenceMesh);
+                _transformReferenceMesh = DevToolsPreviewMeshFactory.FromMesh(_api, $"ref:{reference.Code}", referenceMesh);
+                if (_transformReferenceMesh != null)
+                {
+                    _transformPreviewAnchor = GetTransformReferenceAnchor(context, _transformReferenceMesh.Bounds);
+                }
+            }
+
             MeshData mesh;
             if (asset.Collectible is Block block)
             {
@@ -514,17 +534,18 @@ public sealed partial class DebugWindowManager
             }
 
             mesh.ModelTransform(transform);
-            _transformPreviewMesh = DevToolsPreviewMeshFactory.FromMesh(_api, asset.Label, mesh);
-
-            if (!string.IsNullOrWhiteSpace(referenceCode))
+            DevToolsPreviewBounds transformedBounds = DevToolsPreviewMeshFactory.CalculateBounds(mesh);
+            if (_transformReferenceMesh != null && transformedBounds.IsValid)
             {
-                Block? reference = _api.World.GetBlock(AssetLocation.Create(referenceCode, "game"));
-                if (reference != null)
+                Vector3 meshAnchor = GetTransformMeshAnchor(context, transformedBounds);
+                Vector3 offset = _transformPreviewAnchor - meshAnchor;
+                if (offset.LengthSquared > 0.000001f)
                 {
-                    _api.Tesselator.TesselateBlock(reference, out MeshData referenceMesh);
-                    _transformReferenceMesh = DevToolsPreviewMeshFactory.FromMesh(_api, $"ref:{reference.Code}", referenceMesh);
+                    mesh.Translate(offset.X, offset.Y, offset.Z);
                 }
             }
+
+            _transformPreviewMesh = DevToolsPreviewMeshFactory.FromMesh(_api, asset.Label, mesh);
 
             ResetTransformPreviewCameraToBounds();
         }
@@ -544,15 +565,39 @@ public sealed partial class DebugWindowManager
         uint axisX = ImGui.ColorConvertFloat4ToU32(new NVector4(0.85f, 0.25f, 0.16f, 0.9f));
         uint axisY = ImGui.ColorConvertFloat4ToU32(new NVector4(0.32f, 0.9f, 0.34f, 0.9f));
         uint axisZ = ImGui.ColorConvertFloat4ToU32(new NVector4(0.25f, 0.42f, 0.95f, 0.9f));
-        DrawTransformPreviewLine(drawList, camera, Vector3.Zero, new Vector3(1.5f, 0, 0), axisX, 2f);
-        DrawTransformPreviewLine(drawList, camera, Vector3.Zero, new Vector3(0, 1.5f, 0), axisY, 2f);
-        DrawTransformPreviewLine(drawList, camera, Vector3.Zero, new Vector3(0, 0, 1.5f), axisZ, 2f);
+        DrawTransformPreviewLine(drawList, camera, _transformPreviewAnchor, _transformPreviewAnchor + new Vector3(1.5f, 0, 0), axisX, 2f);
+        DrawTransformPreviewLine(drawList, camera, _transformPreviewAnchor, _transformPreviewAnchor + new Vector3(0, 1.5f, 0), axisY, 2f);
+        DrawTransformPreviewLine(drawList, camera, _transformPreviewAnchor, _transformPreviewAnchor + new Vector3(0, 0, 1.5f), axisZ, 2f);
     }
 
     private static void DrawTransformPreviewLine(ImDrawListPtr drawList, DevToolsPreviewCamera camera, Vector3 start, Vector3 end, uint color, float thickness)
     {
         if (!camera.Project(start, out NVector2 a, out _) || !camera.Project(end, out NVector2 b, out _)) return;
         drawList.AddLine(a, b, color, thickness);
+    }
+
+    private static Vector3 GetTransformReferenceAnchor(TransformGizmoContext context, DevToolsPreviewBounds referenceBounds)
+    {
+        if (!referenceBounds.IsValid) return Vector3.Zero;
+
+        return context switch
+        {
+            TransformGizmoContext.Ground => DevToolsPreviewPlacement.TopCenter(referenceBounds),
+            TransformGizmoContext.Display => referenceBounds.Center,
+            _ => Vector3.Zero
+        };
+    }
+
+    private static Vector3 GetTransformMeshAnchor(TransformGizmoContext context, DevToolsPreviewBounds meshBounds)
+    {
+        if (!meshBounds.IsValid) return Vector3.Zero;
+
+        return context switch
+        {
+            TransformGizmoContext.Ground => DevToolsPreviewPlacement.BottomCenter(meshBounds),
+            TransformGizmoContext.Display => meshBounds.Center,
+            _ => Vector3.Zero
+        };
     }
 
     private void ResetTransformPreviewCameraToSelection()
@@ -566,6 +611,7 @@ public sealed partial class DebugWindowManager
         DevToolsPreviewBounds bounds = DevToolsPreviewBounds.Empty;
         if (_transformReferenceMesh != null) bounds = bounds.Include(_transformReferenceMesh.Bounds);
         if (_transformPreviewMesh != null) bounds = bounds.Include(_transformPreviewMesh.Bounds);
+        if (bounds.IsValid) bounds = bounds.Include(_transformPreviewAnchor);
         if (!bounds.IsValid)
         {
             _transformPreviewTarget = new Vector3(0.5f, 0.5f, 0.5f);

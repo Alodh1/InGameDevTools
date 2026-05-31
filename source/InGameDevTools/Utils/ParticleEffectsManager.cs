@@ -93,7 +93,7 @@ public class ParticleEffectsManager
     private void LoadEmbeddedParticleAssets(ICoreAPI api)
     {
 #if DEBUG
-        _previewReferenceModelCache.Clear();
+        ClearPreviewReferenceModelCache();
 #endif
 
         Dictionary<string, IAsset> assetsByLocation = new(StringComparer.OrdinalIgnoreCase);
@@ -181,7 +181,7 @@ public class ParticleEffectsManager
     private void LoadRuntimeParticleAssets(ICoreAPI api)
     {
 #if DEBUG
-        _previewReferenceModelCache.Clear();
+        ClearPreviewReferenceModelCache();
 #endif
 
         foreach (Block block in api.World.Blocks)
@@ -608,12 +608,12 @@ public class ParticleEffectsManager
 
     private void ClearPreviewReferenceModelCache()
     {
-        foreach (ParticleReferenceModel? model in _previewReferenceModelCache.Values)
+        foreach (ParticlePreviewPlacement placement in _previewPlacementCache.Values)
         {
-            model?.Dispose();
+            placement.Dispose();
         }
 
-        _previewReferenceModelCache.Clear();
+        _previewPlacementCache.Clear();
     }
 
     private DevToolsPreview3DRenderer EnsurePreviewRenderer3D()
@@ -814,7 +814,7 @@ public class ParticleEffectsManager
     private float _previewEmitAccumulator;
     private string _previewEffectKey = "";
     private readonly List<ParticlePreviewParticle> _previewParticles = [];
-    private readonly Dictionary<string, ParticleReferenceModel?> _previewReferenceModelCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ParticlePreviewPlacement> _previewPlacementCache = new(StringComparer.OrdinalIgnoreCase);
     private DevToolsPreview3DRenderer? _previewRenderer3D;
     private readonly Random _previewRandom = new(42);
     private readonly ICoreAPI _api;
@@ -1104,7 +1104,9 @@ public class ParticleEffectsManager
         drawList.AddRect(min, max, border, 4f);
 
         DevToolsPreviewCamera previewCamera = BuildPreviewCamera(min, max);
-        ParticleReferenceModel? referenceModel = _previewShowReferenceModel ? GetPreviewReferenceModel(key) : null;
+        ParticlePreviewPlacement placement = GetPreviewPlacement(key);
+        ParticleReferenceModel? referenceModel = _previewShowReferenceModel ? placement.ReferenceModel : null;
+        Vector3 previewOrigin = placement.ParticleOrigin;
         if (referenceModel?.Mesh != null)
         {
             Matrixf identity = new();
@@ -1126,13 +1128,13 @@ public class ParticleEffectsManager
         }
 
         drawList.PushClipRect(min, max, true);
-        DrawPreviewGrid(drawList, previewCamera, grid);
-        DrawPreviewLine(drawList, previewCamera, Vector3.Zero, new Vector3(1.5f, 0, 0), axisX, 2f);
-        DrawPreviewLine(drawList, previewCamera, Vector3.Zero, new Vector3(0, 1.5f, 0), axisY, 2f);
-        DrawPreviewLine(drawList, previewCamera, Vector3.Zero, new Vector3(0, 0, 1.5f), axisZ, 2f);
-        DrawPreviewTextAt(drawList, previewCamera, new Vector3(1.65f, 0, 0), axisX, "X");
-        DrawPreviewTextAt(drawList, previewCamera, new Vector3(0, 1.65f, 0), axisY, "Y");
-        DrawPreviewTextAt(drawList, previewCamera, new Vector3(0, 0, 1.65f), axisZ, "Z");
+        DrawPreviewGrid(drawList, previewCamera, grid, previewOrigin);
+        DrawPreviewLine(drawList, previewCamera, previewOrigin, previewOrigin + new Vector3(1.5f, 0, 0), axisX, 2f);
+        DrawPreviewLine(drawList, previewCamera, previewOrigin, previewOrigin + new Vector3(0, 1.5f, 0), axisY, 2f);
+        DrawPreviewLine(drawList, previewCamera, previewOrigin, previewOrigin + new Vector3(0, 0, 1.5f), axisZ, 2f);
+        DrawPreviewTextAt(drawList, previewCamera, previewOrigin + new Vector3(1.65f, 0, 0), axisX, "X");
+        DrawPreviewTextAt(drawList, previewCamera, previewOrigin + new Vector3(0, 1.65f, 0), axisY, "Y");
+        DrawPreviewTextAt(drawList, previewCamera, previewOrigin + new Vector3(0, 0, 1.65f), axisZ, "Z");
 
         if (referenceModel != null && _previewReferenceWireframe)
         {
@@ -1146,7 +1148,7 @@ public class ParticleEffectsManager
             {
                 Vector3 direction = Vector3.Normalize(wind);
                 float length = Math.Clamp(wind.Length * 0.45f, 0.4f, 2.4f);
-                Vector3 start = _previewTarget;
+                Vector3 start = previewOrigin;
                 Vector3 end = start + direction * length;
                 DrawPreviewLine(drawList, previewCamera, start, end, windColor, 3f);
                 DrawPreviewTextAt(drawList, previewCamera, end + direction * 0.08f, windColor, "wind");
@@ -1199,14 +1201,14 @@ public class ParticleEffectsManager
         return camera.Project(point, out screen, out depth);
     }
 
-    private static void DrawPreviewGrid(ImDrawListPtr drawList, DevToolsPreviewCamera camera, uint color)
+    private static void DrawPreviewGrid(ImDrawListPtr drawList, DevToolsPreviewCamera camera, uint color, Vector3 origin)
     {
         const int extent = 8;
         for (int i = -extent; i <= extent; i++)
         {
             uint lineColor = i == 0 ? color | 0x55000000 : color;
-            DrawPreviewLine(drawList, camera, new Vector3(-extent, 0, i), new Vector3(extent, 0, i), lineColor, i == 0 ? 1.8f : 1f);
-            DrawPreviewLine(drawList, camera, new Vector3(i, 0, -extent), new Vector3(i, 0, extent), lineColor, i == 0 ? 1.8f : 1f);
+            DrawPreviewLine(drawList, camera, new Vector3(origin.X - extent, origin.Y, origin.Z + i), new Vector3(origin.X + extent, origin.Y, origin.Z + i), lineColor, i == 0 ? 1.8f : 1f);
+            DrawPreviewLine(drawList, camera, new Vector3(origin.X + i, origin.Y, origin.Z - extent), new Vector3(origin.X + i, origin.Y, origin.Z + extent), lineColor, i == 0 ? 1.8f : 1f);
         }
     }
 
@@ -1231,25 +1233,55 @@ public class ParticleEffectsManager
 
     private ParticleReferenceModel? GetPreviewReferenceModel(string key)
     {
+        return GetPreviewPlacement(key).ReferenceModel;
+    }
+
+    private Vector3 GetPreviewParticleOrigin(string key)
+    {
+        return GetPreviewPlacement(key).ParticleOrigin;
+    }
+
+    private ParticlePreviewPlacement GetPreviewPlacement(string key)
+    {
         if (!_particleEffects.TryGetValue(key, out ParticleEffectEntry? entry))
         {
-            return null;
+            return ParticlePreviewPlacement.Unanchored;
         }
 
         string cacheKey = GetReferenceCacheKey(entry);
         if (string.IsNullOrWhiteSpace(cacheKey))
         {
-            return null;
+            return ParticlePreviewPlacement.Unanchored;
         }
 
-        if (_previewReferenceModelCache.TryGetValue(cacheKey, out ParticleReferenceModel? cached))
+        if (_previewPlacementCache.TryGetValue(cacheKey, out ParticlePreviewPlacement? cached))
         {
             return cached;
         }
 
-        ParticleReferenceModel? model = BuildReferenceModel(entry);
-        _previewReferenceModelCache[cacheKey] = model;
-        return model;
+        ParticlePreviewPlacement placement = BuildPreviewPlacement(entry);
+        _previewPlacementCache[cacheKey] = placement;
+        return placement;
+    }
+
+    private bool TryResolveManualReferenceCollectible(out CollectibleObject? collectible)
+    {
+        collectible = null;
+        if (string.IsNullOrWhiteSpace(_previewManualReferenceKey)) return false;
+
+        if (_previewManualReferenceKey.StartsWith("block:", StringComparison.OrdinalIgnoreCase))
+        {
+            collectible = ResolveBlock(_previewManualReferenceKey["block:".Length..], null);
+            return collectible != null;
+        }
+
+        if (_previewManualReferenceKey.StartsWith("item:", StringComparison.OrdinalIgnoreCase))
+        {
+            collectible = ResolveItem(_previewManualReferenceKey["item:".Length..], null);
+            return collectible != null;
+        }
+
+        return false;
     }
 
     private string GetReferenceCacheKey(ParticleEffectEntry entry)
@@ -1279,30 +1311,30 @@ public class ParticleEffectsManager
         return "";
     }
 
-    private ParticleReferenceModel? BuildReferenceModel(ParticleEffectEntry entry)
+    private ParticlePreviewPlacement BuildPreviewPlacement(ParticleEffectEntry entry)
     {
         if (_api is not ICoreClientAPI clientApi)
         {
-            return null;
+            return ParticlePreviewPlacement.Unanchored;
         }
 
         try
         {
-            if (string.IsNullOrWhiteSpace(GetAutomaticReferenceCacheKey(entry)) && TryBuildManualReferenceModel(out ParticleReferenceModel? manualModel))
+            if (string.IsNullOrWhiteSpace(GetAutomaticReferenceCacheKey(entry)) &&
+                TryResolveManualReferenceCollectible(out CollectibleObject? manualReference) &&
+                manualReference != null)
             {
-                return manualModel;
+                return BuildCollectiblePreviewPlacement(clientApi, manualReference);
             }
 
             if (TryResolveReferenceBlock(entry, out Block? block) && block?.Code != null)
             {
-                clientApi.Tesselator.TesselateBlock(block, out MeshData mesh);
-                return BuildReferenceModelFromMesh(clientApi, $"block:{block.Code}", mesh);
+                return BuildCollectiblePreviewPlacement(clientApi, block);
             }
 
             if (TryResolveReferenceItem(entry, out Item? item) && item?.Code != null)
             {
-                clientApi.Tesselator.TesselateItem(item, out MeshData mesh);
-                return BuildReferenceModelFromMesh(clientApi, $"item:{item.Code}", mesh);
+                return BuildCollectiblePreviewPlacement(clientApi, item);
             }
 
             if (TryResolveReferenceEntity(entry, out EntityProperties? entityType) && entityType?.Client?.LoadedShapeForEntity != null)
@@ -1329,7 +1361,8 @@ public class ParticleEffectsManager
                     mesh.Translate(compositeShape.offsetX, compositeShape.offsetY, compositeShape.offsetZ);
                 }
 
-                return BuildReferenceModelFromMesh(clientApi, $"entity:{entityType.Code}", mesh);
+                ParticleReferenceModel? entityModel = BuildReferenceModelFromMesh(clientApi, $"entity:{entityType.Code}", mesh, null);
+                return new ParticlePreviewPlacement(entityModel, entityModel?.ParticleOrigin ?? Vector3.Zero);
             }
         }
         catch (Exception exception)
@@ -1337,33 +1370,35 @@ public class ParticleEffectsManager
             LoggerUtil.Verbose(_api, this, $"Particle reference model failed for '{entry.Key}': {exception.Message}");
         }
 
-        return null;
+        return ParticlePreviewPlacement.Unanchored;
     }
 
-    private bool TryBuildManualReferenceModel(out ParticleReferenceModel? model)
+    private ParticlePreviewPlacement BuildCollectiblePreviewPlacement(ICoreClientAPI clientApi, CollectibleObject collectible)
     {
-        model = null;
-        if (_api is not ICoreClientAPI clientApi || string.IsNullOrWhiteSpace(_previewManualReferenceKey)) return false;
-
-        if (_previewManualReferenceKey.StartsWith("block:", StringComparison.OrdinalIgnoreCase))
+        MeshData mesh;
+        string label;
+        if (collectible is Block block)
         {
-            Block? block = ResolveBlock(_previewManualReferenceKey["block:".Length..], null);
-            if (block?.Code == null) return false;
-            clientApi.Tesselator.TesselateBlock(block, out MeshData mesh);
-            model = BuildReferenceModelFromMesh(clientApi, $"block:{block.Code}", mesh);
-            return model != null;
+            clientApi.Tesselator.TesselateBlock(block, out mesh);
+            label = $"block:{block.Code}";
+        }
+        else if (collectible is Item item)
+        {
+            clientApi.Tesselator.TesselateItem(item, out mesh);
+            label = $"item:{item.Code}";
+        }
+        else
+        {
+            return ParticlePreviewPlacement.Unanchored;
         }
 
-        if (_previewManualReferenceKey.StartsWith("item:", StringComparison.OrdinalIgnoreCase))
+        ParticleReferenceModel? model = BuildReferenceModelFromMesh(clientApi, label, mesh, collectible);
+        if (model == null)
         {
-            Item? item = ResolveItem(_previewManualReferenceKey["item:".Length..], null);
-            if (item?.Code == null) return false;
-            clientApi.Tesselator.TesselateItem(item, out MeshData mesh);
-            model = BuildReferenceModelFromMesh(clientApi, $"item:{item.Code}", mesh);
-            return model != null;
+            return new ParticlePreviewPlacement(null, GetCollectibleParticleOrigin(collectible, DevToolsPreviewBounds.Empty));
         }
 
-        return false;
+        return new ParticlePreviewPlacement(model, model.ParticleOrigin);
     }
 
     private bool TryResolveReferenceBlock(ParticleEffectEntry entry, out Block? block)
@@ -1584,7 +1619,7 @@ public class ParticleEffectsManager
             path.Contains(hint, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static ParticleReferenceModel? BuildReferenceModelFromMesh(ICoreClientAPI api, string label, MeshData mesh)
+    private static ParticleReferenceModel? BuildReferenceModelFromMesh(ICoreClientAPI api, string label, MeshData mesh, CollectibleObject? collectible)
     {
         if (mesh.VerticesCount <= 0 || mesh.xyz == null || mesh.Indices == null || mesh.IndicesCount < 3)
         {
@@ -1634,8 +1669,41 @@ public class ParticleEffectsManager
 
         if (triangles.Count == 0) return null;
 
-        DevToolsPreviewMesh previewMesh = new(label, api.Render.UploadMultiTextureMesh(mesh), new DevToolsPreviewBounds(min, max));
-        return new ParticleReferenceModel(label, previewMesh, triangles, min, max);
+        DevToolsPreviewBounds bounds = new(min, max);
+        Vector3 particleOrigin = collectible == null ? Vector3.Zero : GetCollectibleParticleOrigin(collectible, bounds);
+        DevToolsPreviewMesh previewMesh = new(label, api.Render.UploadMultiTextureMesh(mesh), bounds);
+        return new ParticleReferenceModel(label, previewMesh, triangles, min, max, particleOrigin);
+    }
+
+    private static Vector3 GetCollectibleParticleOrigin(CollectibleObject collectible, DevToolsPreviewBounds meshBounds)
+    {
+        if (collectible is Block && TryGetCollectibleTopMiddle(collectible, out Vector3 blockOrigin))
+        {
+            return blockOrigin;
+        }
+
+        if (meshBounds.IsValid)
+        {
+            return DevToolsPreviewPlacement.TopCenter(meshBounds);
+        }
+
+        if (TryGetCollectibleTopMiddle(collectible, out Vector3 origin))
+        {
+            return origin;
+        }
+
+        return new Vector3(0.5f, 1f, 0.5f);
+    }
+
+    private static bool TryGetCollectibleTopMiddle(CollectibleObject collectible, out Vector3 origin)
+    {
+        origin = Vector3.Zero;
+        FastVec3f? topMiddle = collectible.TopMiddlePos;
+        if (!topMiddle.HasValue) return false;
+
+        FastVec3f value = topMiddle.Value;
+        origin = new Vector3(value.X, value.Y, value.Z);
+        return true;
     }
 
     private static void EnsureReferenceVertexColor(MeshData mesh)
@@ -1754,16 +1822,24 @@ public class ParticleEffectsManager
     {
         _previewYaw = -0.55f;
         _previewPitch = 0.35f;
-        ParticleReferenceModel? model = _previewShowReferenceModel ? GetPreviewReferenceModel(key) : null;
-        if (model == null)
+        ParticlePreviewPlacement placement = GetPreviewPlacement(key);
+        if (!_previewShowReferenceModel)
         {
             _previewDistance = 4.5f;
-            _previewTarget = new Vector3(0f, 0.8f, 0f);
+            _previewTarget = placement.ParticleOrigin;
             return;
         }
 
-        _previewTarget = model.Center;
-        _previewDistance = Math.Clamp(model.Radius * 3.1f, 1.8f, 32f);
+        ParticleReferenceModel? model = placement.ReferenceModel;
+        if (model == null)
+        {
+            _previewDistance = 4.5f;
+            _previewTarget = placement.ParticleOrigin;
+            return;
+        }
+
+        _previewTarget = model.Bounds.Center;
+        _previewDistance = Math.Clamp(model.Bounds.Radius * 3.1f, 1.8f, 32f);
     }
 
     private void ResetPreview(string key)
@@ -1774,13 +1850,13 @@ public class ParticleEffectsManager
         ResetPreviewCamera(key);
     }
 
-    private void EmitPreviewParticles(AdvancedParticleProperties particleProperties, float intensity)
+    private void EmitPreviewParticles(AdvancedParticleProperties particleProperties, float intensity, Vector3 origin)
     {
         int count = Math.Clamp((int)MathF.Round(Math.Max(1f, SampleNatFloat(particleProperties.Quantity)) * Math.Max(0.05f, intensity)), 1, 320);
         for (int index = 0; index < count; index++)
         {
             _previewParticles.Add(new ParticlePreviewParticle(
-                new Vector3(
+                origin + new Vector3(
                     SampleNatFloat(GetNatFloat(particleProperties.PosOffset, 0)),
                     SampleNatFloat(GetNatFloat(particleProperties.PosOffset, 1)),
                     SampleNatFloat(GetNatFloat(particleProperties.PosOffset, 2))),
@@ -1919,15 +1995,28 @@ public class ParticleEffectsManager
         public readonly float Depth = depth;
     }
 
-    private sealed class ParticleReferenceModel(string label, DevToolsPreviewMesh mesh, List<ParticleReferenceTriangle> triangles, Vector3 min, Vector3 max) : IDisposable
+    private sealed class ParticlePreviewPlacement(ParticleReferenceModel? referenceModel, Vector3 particleOrigin) : IDisposable
+    {
+        public static ParticlePreviewPlacement Unanchored { get; } = new(null, Vector3.Zero);
+
+        public ParticleReferenceModel? ReferenceModel { get; } = referenceModel;
+        public Vector3 ParticleOrigin { get; } = particleOrigin;
+
+        public void Dispose()
+        {
+            ReferenceModel?.Dispose();
+        }
+    }
+
+    private sealed class ParticleReferenceModel(string label, DevToolsPreviewMesh mesh, List<ParticleReferenceTriangle> triangles, Vector3 min, Vector3 max, Vector3 particleOrigin) : IDisposable
     {
         public string Label { get; } = label;
         public DevToolsPreviewMesh Mesh { get; } = mesh;
         public List<ParticleReferenceTriangle> Triangles { get; } = triangles;
         public Vector3 Min { get; } = min;
         public Vector3 Max { get; } = max;
-        public Vector3 Center { get; } = (min + max) * 0.5f;
-        public float Radius { get; } = Math.Max(0.5f, (max - min).Length * 0.5f);
+        public Vector3 ParticleOrigin { get; } = particleOrigin;
+        public DevToolsPreviewBounds Bounds { get; } = new DevToolsPreviewBounds(min, max).Include(particleOrigin);
 
         public void Dispose()
         {

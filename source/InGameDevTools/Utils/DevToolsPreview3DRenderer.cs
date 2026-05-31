@@ -302,6 +302,19 @@ internal static class DevToolsPreviewMeshFactory
     }
 }
 
+internal static class DevToolsPreviewPlacement
+{
+    public static Vector3 TopCenter(DevToolsPreviewBounds bounds)
+    {
+        return bounds.IsValid ? new Vector3(bounds.Center.X, bounds.Max.Y, bounds.Center.Z) : Vector3.Zero;
+    }
+
+    public static Vector3 BottomCenter(DevToolsPreviewBounds bounds)
+    {
+        return bounds.IsValid ? new Vector3(bounds.Center.X, bounds.Min.Y, bounds.Center.Z) : Vector3.Zero;
+    }
+}
+
 internal readonly struct DevToolsPreviewBounds
 {
     public DevToolsPreviewBounds(Vector3 min, Vector3 max)
