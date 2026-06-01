@@ -5725,10 +5725,16 @@ public sealed partial class DebugWindowManager
         private VanillaAnimation _animation;
         private string _activeAnimationCode;
         private ClientAnimator _animator;
+        private readonly MeshData _previewMeshData;
         private readonly MultiTextureMeshRef _meshRef;
-        private readonly MultiTextureMeshRef? _firstPersonMeshRef;
-        private readonly MultiTextureMeshRef? _immersiveFirstPersonMeshRef;
+        private MultiTextureMeshRef? _firstPersonMeshRef;
+        private MultiTextureMeshRef? _immersiveFirstPersonMeshRef;
+        private bool _classicFirstPersonBuildAttempted;
+        private bool _immersiveFirstPersonBuildAttempted;
+        private readonly bool _classicFirstPersonSupported;
+        private readonly bool _immersiveFirstPersonSupported;
         private VanillaPreviewMode _previewMode = VanillaPreviewMode.Orbit;
+        private long _renderRevision;
         private bool _disposed;
 
         private VanillaAnimationPreviewScene(
@@ -5754,9 +5760,12 @@ public sealed partial class DebugWindowManager
             _activeAnimationCode = GetAnimationCode(animation, metadata);
             _metadata.Animation = _activeAnimationCode;
             _animator = animator;
+            _previewMeshData = meshes.PreviewMeshData;
             _meshRef = meshes.Orbit;
             _firstPersonMeshRef = meshes.FirstPerson;
             _immersiveFirstPersonMeshRef = meshes.ImmersiveFirstPerson;
+            _classicFirstPersonSupported = meshes.ClassicFirstPersonSupported;
+            _immersiveFirstPersonSupported = meshes.ImmersiveFirstPersonSupported;
             MeshVerticesCount = meshes.VerticesCount;
             MeshIndicesCount = meshes.IndicesCount;
             TextureId = textureId;
@@ -5799,17 +5808,18 @@ public sealed partial class DebugWindowManager
         public float GuiShapeRotateZ { get; private set; }
         public float FirstPersonFovDegrees { get; private set; } = 75f;
         public float FirstPersonYOffset { get; private set; }
-        public bool ClassicFirstPersonAvailable => _firstPersonMeshRef is { Disposed: false, Initialized: true };
-        public bool ImmersiveFirstPersonAvailable => _immersiveFirstPersonMeshRef is { Disposed: false, Initialized: true };
+        public bool ClassicFirstPersonAvailable => IsUsableMesh(_firstPersonMeshRef) || (_classicFirstPersonSupported && !_classicFirstPersonBuildAttempted);
+        public bool ImmersiveFirstPersonAvailable => IsUsableMesh(_immersiveFirstPersonMeshRef) || (_immersiveFirstPersonSupported && !_immersiveFirstPersonBuildAttempted);
         public bool FirstPersonAvailable => ClassicFirstPersonAvailable || ImmersiveFirstPersonAvailable;
         public VanillaPreviewMode PreviewMode => _previewMode;
+        public long RenderRevision => _renderRevision;
 
         public MultiTextureMeshRef GetMeshRef(VanillaPreviewMode mode)
         {
             return mode switch
             {
-                VanillaPreviewMode.FirstPerson when ClassicFirstPersonAvailable => _firstPersonMeshRef!,
-                VanillaPreviewMode.ImmersiveFirstPerson when ImmersiveFirstPersonAvailable => _immersiveFirstPersonMeshRef!,
+                VanillaPreviewMode.FirstPerson when IsUsableMesh(_firstPersonMeshRef) => _firstPersonMeshRef!,
+                VanillaPreviewMode.ImmersiveFirstPerson when IsUsableMesh(_immersiveFirstPersonMeshRef) => _immersiveFirstPersonMeshRef!,
                 _ => _meshRef
             };
         }
@@ -5823,11 +5833,11 @@ public sealed partial class DebugWindowManager
             VanillaAnimation animation = ResolvePreviewAnimation(row, shape, VanillaPreviewMode.Orbit) ?? throw new InvalidOperationException("Selected vanilla row has no matching animation in its preview shape.");
             PrepareAnimationFrames(shape, animation);
             AnimationMetaData metadata = BuildPreviewMetadata(row, animation, VanillaPreviewMode.Orbit);
-            ClientAnimator animator = CreatePreviewAnimator(shape, row.Key);
+            ClientAnimator animator = CreatePreviewAnimator(shape, animation, row.Key);
             VanillaPreviewMeshSet meshes = BuildPreviewMeshes(api, row, shape, animator, out int textureId);
             VanillaModelBounds bounds = CalculateModelBounds(shape);
             VanillaGuiTransform guiTransform = GetGuiTransform(row);
-            string status = $"Loaded {row.Label}. Mesh parts: {meshes.Orbit.meshrefs?.Length ?? 0}. First-person: {(meshes.FirstPerson != null ? "classic" : "not available")}, {(meshes.ImmersiveFirstPerson != null ? "immersive" : "no immersive mesh")}. Bounds: {bounds.Width:0.00} x {bounds.Height:0.00} x {bounds.Depth:0.00}.";
+            string status = $"Loaded {row.Label}. Mesh parts: {meshes.Orbit.meshrefs?.Length ?? 0}. First-person: {(meshes.ClassicFirstPersonSupported ? "classic lazy" : "not available")}, {(meshes.ImmersiveFirstPersonSupported ? "immersive lazy" : "no immersive mesh")}. Bounds: {bounds.Width:0.00} x {bounds.Height:0.00} x {bounds.Depth:0.00}.";
             return new(api, row.Key, row.Label, shape, animation, metadata, animator, meshes, textureId, bounds, guiTransform, status);
         }
 
@@ -5846,7 +5856,7 @@ public sealed partial class DebugWindowManager
             _metadata = metadata;
             _activeAnimationCode = GetAnimationCode(animation, metadata);
             _metadata.Animation = _activeAnimationCode;
-            _animator = CreatePreviewAnimator(shape, row.Key);
+            _animator = CreatePreviewAnimator(shape, animation, row.Key);
             ApplyBounds(CalculateModelBounds(shape));
             ApplyGuiTransform(GetGuiTransform(row));
             FirstPersonFovDegrees = Math.Clamp(_api.Settings.Int["fpHandsFoV"] > 0 ? _api.Settings.Int["fpHandsFoV"] : 75, 25, 130);
@@ -5860,8 +5870,8 @@ public sealed partial class DebugWindowManager
 
         public void SetPreviewMode(VanillaBrowserRow row, VanillaPreviewMode mode)
         {
-            if ((mode == VanillaPreviewMode.FirstPerson && !ClassicFirstPersonAvailable) ||
-                (mode == VanillaPreviewMode.ImmersiveFirstPerson && !ImmersiveFirstPersonAvailable))
+            if ((mode == VanillaPreviewMode.FirstPerson && !EnsureFirstPersonMesh(immersive: false)) ||
+                (mode == VanillaPreviewMode.ImmersiveFirstPerson && !EnsureFirstPersonMesh(immersive: true)))
             {
                 mode = VanillaPreviewMode.Orbit;
             }
@@ -5877,6 +5887,7 @@ public sealed partial class DebugWindowManager
             _metadata = metadata;
             _activeAnimationCode = GetAnimationCode(animation, metadata);
             _metadata.Animation = _activeAnimationCode;
+            _animator = CreatePreviewAnimator(_shape, animation, row.Key);
             _activeAnimationsByAnimCode.Clear();
             _activeAnimationsByAnimCode[_activeAnimationCode] = _metadata;
             QuantityFrames = Math.Max(1, animation.QuantityFrames);
@@ -5909,6 +5920,8 @@ public sealed partial class DebugWindowManager
             {
                 CurrentFrame = Math.Clamp(state.CurrentFrame, 0, Math.Max(0, QuantityFrames - 1));
             }
+
+            MarkRenderDirty();
         }
 
         public void Scrub(float frame)
@@ -5945,6 +5958,54 @@ public sealed partial class DebugWindowManager
                 state.Iterations = CurrentFrame >= QuantityFrames - 1 ? 1 : 0;
             }
             Playing = wasPlaying;
+            MarkRenderDirty();
+        }
+
+        private void MarkRenderDirty()
+        {
+            unchecked
+            {
+                _renderRevision++;
+            }
+        }
+
+        private bool EnsureFirstPersonMesh(bool immersive)
+        {
+            if (immersive)
+            {
+                if (IsUsableMesh(_immersiveFirstPersonMeshRef)) return true;
+                if (!_immersiveFirstPersonSupported || _immersiveFirstPersonBuildAttempted) return false;
+
+                _immersiveFirstPersonBuildAttempted = true;
+                _immersiveFirstPersonMeshRef = TryBuildPlayerFirstPersonMesh(_api, _previewMeshData, _animator, immersive: true);
+                if (IsUsableMesh(_immersiveFirstPersonMeshRef))
+                {
+                    MarkRenderDirty();
+                    return true;
+                }
+
+                Status = $"{Status} Immersive first-person mesh could not be built.";
+                return false;
+            }
+
+            if (IsUsableMesh(_firstPersonMeshRef)) return true;
+            if (!_classicFirstPersonSupported || _classicFirstPersonBuildAttempted) return false;
+
+            _classicFirstPersonBuildAttempted = true;
+            _firstPersonMeshRef = TryBuildPlayerFirstPersonMesh(_api, _previewMeshData, _animator, immersive: false);
+            if (IsUsableMesh(_firstPersonMeshRef))
+            {
+                MarkRenderDirty();
+                return true;
+            }
+
+            Status = $"{Status} Classic first-person mesh could not be built.";
+            return false;
+        }
+
+        private static bool IsUsableMesh(MultiTextureMeshRef? meshRef)
+        {
+            return meshRef is { Disposed: false, Initialized: true };
         }
 
         private void EnsureActive()
@@ -6085,19 +6146,19 @@ public sealed partial class DebugWindowManager
             animation.GenerateAllFrames(shape.Elements, shape.JointsById);
         }
 
-        private static ClientAnimator CreatePreviewAnimator(Shape shape, string shapeName)
+        private static ClientAnimator CreatePreviewAnimator(Shape shape, VanillaAnimation animation, string shapeName)
         {
             if (shape.Elements == null || shape.Elements.Length == 0)
             {
                 throw new InvalidOperationException($"Preview shape '{shapeName}' has no elements for its animator.");
             }
 
-            if (shape.Animations == null || shape.Animations.Length == 0)
+            if (animation == null)
             {
-                throw new InvalidOperationException($"Preview shape '{shapeName}' has no animations for its animator.");
+                throw new InvalidOperationException($"Preview shape '{shapeName}' has no selected animation for its animator.");
             }
 
-            return new ClientAnimator(() => 1, shape.Animations, shape.Elements, shape.JointsById, null, null);
+            return new ClientAnimator(() => 1, [animation], shape.Elements, shape.JointsById, null, null);
         }
 
         private static void CompleteVanillaAnimationTransformGroups(VanillaAnimation animation)
@@ -6314,9 +6375,15 @@ public sealed partial class DebugWindowManager
                 throw new InvalidOperationException($"Preview mesh upload for {row.Label} returned a disposed mesh reference.");
             }
 
-            MultiTextureMeshRef? firstPerson = TryBuildPlayerFirstPersonMesh(api, mesh, animator, immersive: false);
-            MultiTextureMeshRef? immersiveFirstPerson = TryBuildPlayerFirstPersonMesh(api, mesh, animator, immersive: true);
-            return new(orbit, firstPerson, immersiveFirstPerson, mesh.VerticesCount, mesh.IndicesCount);
+            return new(
+                orbit,
+                null,
+                null,
+                mesh,
+                HasPlayerFirstPersonMeshJoints(animator, immersive: false),
+                HasPlayerFirstPersonMeshJoints(animator, immersive: true),
+                mesh.VerticesCount,
+                mesh.IndicesCount);
         }
 
         private static int GetFallbackEntityTextureId(ICoreClientAPI api)
@@ -6346,6 +6413,20 @@ public sealed partial class DebugWindowManager
                 api.Logger.VerboseDebug("[InGameDevTools] First-person vanilla preview mesh skipped: immersive={0}, reason={1}", immersive, exception.Message);
                 return null;
             }
+        }
+
+        private static bool HasPlayerFirstPersonMeshJoints(ClientAnimator animator, bool immersive)
+        {
+            HashSet<int> jointIds = [];
+            if (immersive)
+            {
+                LoadJointIdsRecursive(animator.GetPosebyName("Neck", StringComparison.InvariantCultureIgnoreCase), jointIds);
+                return jointIds.Count > 0;
+            }
+
+            LoadJointIdsRecursive(animator.GetPosebyName("UpperArmR", StringComparison.InvariantCultureIgnoreCase), jointIds);
+            LoadJointIdsRecursive(animator.GetPosebyName("UpperArmL", StringComparison.InvariantCultureIgnoreCase), jointIds);
+            return jointIds.Count > 0;
         }
 
         private static MultiTextureMeshRef? BuildPlayerFirstPersonMesh(ICoreClientAPI api, MeshData mesh, ClientAnimator animator, bool immersive)
@@ -6623,6 +6704,9 @@ public sealed partial class DebugWindowManager
         MultiTextureMeshRef Orbit,
         MultiTextureMeshRef? FirstPerson,
         MultiTextureMeshRef? ImmersiveFirstPerson,
+        MeshData PreviewMeshData,
+        bool ClassicFirstPersonSupported,
+        bool ImmersiveFirstPersonSupported,
         int VerticesCount,
         int IndicesCount);
 
@@ -6637,10 +6721,25 @@ public sealed partial class DebugWindowManager
         NVector3 Target,
         float Distance);
 
+    private readonly record struct VanillaPreviewRenderKey(
+        string SceneKey,
+        long RenderRevision,
+        int Width,
+        int Height,
+        float Yaw,
+        float Pitch,
+        float Zoom,
+        float PanX,
+        float PanY,
+        VanillaPreviewMode Mode,
+        bool WorldLighting);
+
     private sealed class VanillaAnimationViewport3DRenderer : IDisposable
     {
         private readonly ICoreClientAPI _api;
         private FrameBufferRef? _frameBuffer;
+        private VanillaPreviewRenderKey? _lastRenderKey;
+        private int _lastTextureId;
         private string _lastSceneLogKey = "";
         private string _lastFrameLogKey = "";
         private string _lastSkipLogKey = "";
@@ -6654,6 +6753,7 @@ public sealed partial class DebugWindowManager
         public void SetVisible(bool visible)
         {
             if (visible) return;
+            ClearRenderCache();
             _lastFrameLogKey = "";
             _lastSkipLogKey = "";
         }
@@ -6681,6 +6781,25 @@ public sealed partial class DebugWindowManager
 
             int framebufferWidth = Math.Max(1, (int)Math.Ceiling(width));
             int framebufferHeight = Math.Max(1, (int)Math.Ceiling(height));
+            VanillaPreviewRenderKey renderKey = new(
+                scene.Key,
+                scene.RenderRevision,
+                framebufferWidth,
+                framebufferHeight,
+                yaw,
+                pitch,
+                zoom,
+                panX,
+                panY,
+                mode,
+                worldLighting);
+            if (_lastTextureId > 0 &&
+                _lastRenderKey == renderKey &&
+                _frameBuffer is { Disposed: false, ColorTextureIds.Length: > 0 })
+            {
+                return _lastTextureId;
+            }
+
             FrameBufferRef frameBuffer = EnsureFrameBuffer(framebufferWidth, framebufferHeight);
             if (frameBuffer == null || frameBuffer.Disposed)
             {
@@ -6790,7 +6909,9 @@ public sealed partial class DebugWindowManager
                 shader = null;
                 previous?.Use();
                 LogVerboseFrame(scene, mode, meshRef, frameBuffer, framebufferWidth, framebufferHeight, shaderName, frameBufferStatus, glError, verboseLogs);
-                return frameBuffer.ColorTextureIds[0];
+                _lastRenderKey = renderKey;
+                _lastTextureId = frameBuffer.ColorTextureIds[0];
+                return _lastTextureId;
             }
             catch (Exception exception)
             {
@@ -6883,9 +7004,19 @@ public sealed partial class DebugWindowManager
 
         private void DestroyFrameBuffer()
         {
-            if (_frameBuffer == null || _frameBuffer.Disposed) return;
-            _api.Render.DestroyFrameBuffer(_frameBuffer);
+            if (_frameBuffer != null && !_frameBuffer.Disposed)
+            {
+                _api.Render.DestroyFrameBuffer(_frameBuffer);
+            }
+
             _frameBuffer = null;
+            ClearRenderCache();
+        }
+
+        private void ClearRenderCache()
+        {
+            _lastRenderKey = null;
+            _lastTextureId = 0;
         }
 
         private int Skip(VanillaAnimationPreviewScene scene, VanillaPreviewMode mode, float width, float height, string reason, bool verboseLogs, out string skipReason)
