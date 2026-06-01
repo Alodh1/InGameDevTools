@@ -1198,7 +1198,8 @@ public sealed partial class DebugWindowManager
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.055f, 0.052f, 0.045f, 1f));
         uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 1f));
-        uint grid = ImGui.ColorConvertFloat4ToU32(new NVector4(0.28f, 0.27f, 0.22f, 0.55f));
+        uint grid = ImGui.ColorConvertFloat4ToU32(new NVector4(0.28f, 0.27f, 0.22f, 0.42f));
+        uint gridMajor = ImGui.ColorConvertFloat4ToU32(new NVector4(0.45f, 0.42f, 0.33f, 0.72f));
         uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.86f, 0.82f, 0.72f, 1f));
         drawList.AddRectFilled(min, max, background, 4f);
 
@@ -1236,7 +1237,7 @@ public sealed partial class DebugWindowManager
         {
             VanillaPreviewCameraState camera = BuildVanillaPreviewCamera(scene, viewportWidth, viewportHeight, _vanillaViewportYaw, _vanillaViewportPitch, _vanillaViewportZoom, _vanillaViewportPanX, _vanillaViewportPanY, effectiveMode);
             drawList.PushClipRect(min, max, true);
-            DrawVanillaViewportGrid(drawList, camera, scene, min, viewportWidth, viewportHeight, grid);
+            DrawVanillaViewportGrid(drawList, camera, scene, min, viewportWidth, viewportHeight, grid, gridMajor);
             drawList.PopClipRect();
         }
 
@@ -1269,29 +1270,48 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private static void DrawVanillaViewportGrid(ImDrawListPtr drawList, VanillaPreviewCameraState camera, VanillaAnimationPreviewScene scene, NVector2 min, float width, float height, uint color)
+    private static void DrawVanillaViewportGrid(ImDrawListPtr drawList, VanillaPreviewCameraState camera, VanillaAnimationPreviewScene scene, NVector2 min, float width, float height, uint color, uint majorColor)
     {
-        int extent = Math.Clamp((int)Math.Ceiling(Math.Max(Math.Max(scene.ModelWidth, scene.ModelDepth), 4f) * 1.5f), 4, 12);
-        float centerX = scene.ModelCenterX;
-        float centerZ = scene.ModelCenterZ;
+        float modelExtent = Math.Max(Math.Max(scene.ModelWidth, scene.ModelHeight), scene.ModelDepth);
+        float centerExtent = Math.Max(Math.Max(Math.Abs(scene.ModelCenterX), Math.Abs(scene.ModelCenterY)), Math.Abs(scene.ModelCenterZ));
+        int extent = Math.Clamp((int)Math.Ceiling(Math.Max(modelExtent * 1.5f, centerExtent + 2f)), 4, 16);
+
+        DrawVanillaViewportGridPlane(drawList, camera, min, width, height, NVector3.UnitX, NVector3.UnitZ, extent, color, majorColor);
+        DrawVanillaViewportGridPlane(drawList, camera, min, width, height, NVector3.UnitX, NVector3.UnitY, extent, color, majorColor);
+        DrawVanillaViewportGridPlane(drawList, camera, min, width, height, NVector3.UnitZ, NVector3.UnitY, extent, color, majorColor);
+    }
+
+    private static void DrawVanillaViewportGridPlane(ImDrawListPtr drawList, VanillaPreviewCameraState camera, NVector2 min, float width, float height, NVector3 axisA, NVector3 axisB, int extent, uint color, uint majorColor)
+    {
         for (int i = -extent; i <= extent; i++)
         {
-            uint lineColor = i == 0 ? color | 0x55000000 : color;
+            uint lineColor = i == 0 ? majorColor : color;
             float thickness = i == 0 ? 1.8f : 1f;
-            DrawVanillaViewportGridLine(drawList, camera, min, width, height, new NVector3(centerX - extent, 0f, centerZ + i), new NVector3(centerX + extent, 0f, centerZ + i), lineColor, thickness);
-            DrawVanillaViewportGridLine(drawList, camera, min, width, height, new NVector3(centerX + i, 0f, centerZ - extent), new NVector3(centerX + i, 0f, centerZ + extent), lineColor, thickness);
+            DrawVanillaViewportGridLine(drawList, camera, min, width, height, axisA * -extent + axisB * i, axisA * extent + axisB * i, lineColor, thickness);
+            DrawVanillaViewportGridLine(drawList, camera, min, width, height, axisA * i + axisB * -extent, axisA * i + axisB * extent, lineColor, thickness);
         }
     }
 
     private static void DrawVanillaViewportGridLine(ImDrawListPtr drawList, VanillaPreviewCameraState camera, NVector2 min, float width, float height, NVector3 start, NVector3 end, uint color, float thickness)
     {
-        if (!ProjectVanillaPreviewPoint(camera.Model, camera, start, min, width, height, out NVector2 startScreen) ||
-            !ProjectVanillaPreviewPoint(camera.Model, camera, end, min, width, height, out NVector2 endScreen))
-        {
-            return;
-        }
+        int segments = Math.Max(1, (int)Math.Ceiling((end - start).Length()));
+        NVector3 step = (end - start) / segments;
+        NVector3 previousPoint = start;
+        bool previousVisible = ProjectVanillaPreviewPoint(camera.Model, camera, previousPoint, min, width, height, out NVector2 previousScreen);
 
-        DrawVanillaViewportLine(drawList, startScreen, endScreen, color, thickness);
+        for (int segment = 1; segment <= segments; segment++)
+        {
+            NVector3 point = start + step * segment;
+            bool visible = ProjectVanillaPreviewPoint(camera.Model, camera, point, min, width, height, out NVector2 screen);
+            if (previousVisible && visible)
+            {
+                DrawVanillaViewportLine(drawList, previousScreen, screen, color, thickness);
+            }
+
+            previousPoint = point;
+            previousScreen = screen;
+            previousVisible = visible;
+        }
     }
 
     private VanillaPreviewGhost BuildVanillaLiveSymmetryGhost(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, VanillaPreviewMode effectiveMode)

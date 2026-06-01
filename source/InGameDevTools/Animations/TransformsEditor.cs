@@ -922,6 +922,8 @@ public sealed partial class DebugWindowManager
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.035f, 0.036f, 0.032f, 1f));
         uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 1f));
+        uint grid = ImGui.ColorConvertFloat4ToU32(new NVector4(0.28f, 0.27f, 0.22f, 0.42f));
+        uint gridMajor = ImGui.ColorConvertFloat4ToU32(new NVector4(0.45f, 0.42f, 0.33f, 0.72f));
         uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.86f, 0.82f, 0.72f, 1f));
         drawList.AddRectFilled(min, max, background, 4f);
 
@@ -944,6 +946,7 @@ public sealed partial class DebugWindowManager
         }
 
         drawList.PushClipRect(min, max, true);
+        DrawTransformPreviewGrid(drawList, camera, GetTransformPreviewGridExtent(), grid, gridMajor);
         if (!DrawTransformViewportGizmo(asset, slot, transform, drawList, camera, min, max, hovered))
         {
             DrawTransformPreviewAxes(drawList, camera);
@@ -1341,6 +1344,20 @@ public sealed partial class DebugWindowManager
         DrawTransformPreviewLine(drawList, camera, _transformPreviewAnchor, _transformPreviewAnchor + new Vector3(1.5f, 0, 0), axisX, 2f);
         DrawTransformPreviewLine(drawList, camera, _transformPreviewAnchor, _transformPreviewAnchor + new Vector3(0, 1.5f, 0), axisY, 2f);
         DrawTransformPreviewLine(drawList, camera, _transformPreviewAnchor, _transformPreviewAnchor + new Vector3(0, 0, 1.5f), axisZ, 2f);
+    }
+
+    private int GetTransformPreviewGridExtent()
+    {
+        DevToolsPreviewBounds bounds = DevToolsPreviewBounds.Empty;
+        if (_transformReferenceMesh != null) bounds = bounds.Include(_transformReferenceMesh.Bounds);
+        if (_transformPreviewMesh != null) bounds = bounds.Include(_transformPreviewMesh.Bounds);
+        if (bounds.IsValid) bounds = bounds.Include(_transformPreviewAnchor).Include(Vector3.Zero);
+        if (!bounds.IsValid) return 4;
+
+        float coordinateExtent = Math.Max(
+            Math.Max(Math.Max(Math.Abs(bounds.Min.X), Math.Abs(bounds.Max.X)), Math.Max(Math.Abs(bounds.Min.Y), Math.Abs(bounds.Max.Y))),
+            Math.Max(Math.Abs(bounds.Min.Z), Math.Abs(bounds.Max.Z)));
+        return Math.Clamp((int)Math.Ceiling(Math.Max(bounds.Radius * 1.5f, coordinateExtent + 1f)), 4, 16);
     }
 
     private bool DrawTransformViewportGizmo(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform, ImDrawListPtr drawList, DevToolsPreviewCamera camera, NVector2 min, NVector2 max, bool hovered)
@@ -1764,6 +1781,44 @@ public sealed partial class DebugWindowManager
     {
         if (!camera.Project(start, out NVector2 a, out _) || !camera.Project(end, out NVector2 b, out _)) return;
         drawList.AddLine(a, b, color, thickness);
+    }
+
+    private static void DrawTransformPreviewGrid(ImDrawListPtr drawList, DevToolsPreviewCamera camera, int extent, uint color, uint majorColor)
+    {
+        DrawTransformPreviewGridPlane(drawList, camera, Vector3.UnitX, Vector3.UnitZ, extent, color, majorColor);
+        DrawTransformPreviewGridPlane(drawList, camera, Vector3.UnitX, Vector3.UnitY, extent, color, majorColor);
+        DrawTransformPreviewGridPlane(drawList, camera, Vector3.UnitZ, Vector3.UnitY, extent, color, majorColor);
+    }
+
+    private static void DrawTransformPreviewGridPlane(ImDrawListPtr drawList, DevToolsPreviewCamera camera, Vector3 axisA, Vector3 axisB, int extent, uint color, uint majorColor)
+    {
+        for (int i = -extent; i <= extent; i++)
+        {
+            uint lineColor = i == 0 ? majorColor : color;
+            float thickness = i == 0 ? 1.8f : 1f;
+            DrawTransformPreviewGridLine(drawList, camera, axisA * -extent + axisB * i, axisA * extent + axisB * i, lineColor, thickness);
+            DrawTransformPreviewGridLine(drawList, camera, axisA * i + axisB * -extent, axisA * i + axisB * extent, lineColor, thickness);
+        }
+    }
+
+    private static void DrawTransformPreviewGridLine(ImDrawListPtr drawList, DevToolsPreviewCamera camera, Vector3 start, Vector3 end, uint color, float thickness)
+    {
+        int segments = Math.Max(1, (int)Math.Ceiling((end - start).Length));
+        Vector3 step = (end - start) / segments;
+        bool previousVisible = camera.Project(start, out NVector2 previousScreen, out _);
+
+        for (int segment = 1; segment <= segments; segment++)
+        {
+            Vector3 point = start + step * segment;
+            bool visible = camera.Project(point, out NVector2 screen, out _);
+            if (previousVisible && visible)
+            {
+                DrawTransformViewportLine(drawList, previousScreen, screen, color, thickness);
+            }
+
+            previousScreen = screen;
+            previousVisible = visible;
+        }
     }
 
     private static Vector3 GetTransformReferenceAnchor(TransformGizmoContext context, DevToolsPreviewBounds referenceBounds)
