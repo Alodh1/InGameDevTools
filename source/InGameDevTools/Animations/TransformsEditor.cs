@@ -2,6 +2,7 @@ using ImGuiNET;
 using InGameDevTools.Utils;
 using Newtonsoft.Json.Linq;
 using OpenTK.Mathematics;
+using System.Text.RegularExpressions;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Datastructures;
@@ -20,6 +21,8 @@ public sealed partial class DebugWindowManager
     private readonly Dictionary<string, string> _transformFamilyKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _transformFamilyDisplayKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _transformFamilyCounts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TransformApplicabilityResult> _transformApplicabilityCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, JObject?> _transformSourceJsonCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ImGuiThreePanelLayoutState _transformsLayout = new(0.24f, 0.32f);
     private DevToolsPreview3DRenderer? _transformsPreviewRenderer;
     private DevToolsPreviewMesh? _transformPreviewMesh;
@@ -30,6 +33,8 @@ public sealed partial class DebugWindowManager
     private int _transformsAssetIndex;
     private int _transformsTypeFilter;
     private bool _transformsDirtyOnly;
+    private bool _transformsOnlyApplicable = true;
+    private bool _transformsShowUncertain;
     private bool _transformGroupEdit;
     private bool _transformUseTypedSlot;
     private int _transformDirectSlotIndex;
@@ -104,6 +109,8 @@ public sealed partial class DebugWindowManager
     {
         if (_transformsIndexed) return;
         _transformAssets.Clear();
+        _transformApplicabilityCache.Clear();
+        _transformSourceJsonCache.Clear();
         foreach (Block block in _api.World.Blocks)
         {
             if (block?.Code == null) continue;
@@ -125,6 +132,7 @@ public sealed partial class DebugWindowManager
     private void RebuildVisibleTransformAssets()
     {
         string filter = _transformsFilter.Trim();
+        string attributeCode = GetSelectedTransformAttributeCode();
         TransformAssetEntry? selected = SelectedTransformAsset;
         _visibleTransformAssets.Clear();
         foreach (TransformAssetEntry entry in _transformAssets)
@@ -134,6 +142,12 @@ public sealed partial class DebugWindowManager
             if (_transformsTypeFilter == 2 && entry.IsBlock) continue;
             if (_transformsDirtyOnly && !_transformDirtyKeys.Any(key => key.StartsWith(entry.Key + "|", StringComparison.OrdinalIgnoreCase))) continue;
             if (!string.IsNullOrWhiteSpace(filter) && !entry.SearchText.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
+            TransformApplicabilityResult applicability = GetTransformApplicability(entry, attributeCode);
+            if (_transformsOnlyApplicable)
+            {
+                if (applicability.Kind == TransformApplicabilityKind.NotApplicable) continue;
+                if (!_transformsShowUncertain && applicability.Kind == TransformApplicabilityKind.Uncertain) continue;
+            }
             _visibleTransformAssets.Add(entry);
         }
 
@@ -240,6 +254,499 @@ public sealed partial class DebugWindowManager
         return value.TrimEnd('-', '/', '_');
     }
 
+    private TransformApplicabilityResult GetTransformApplicability(TransformAssetEntry entry, string attributeCode)
+    {
+        string baseAttribute = GetTransformBaseAttributeCode(attributeCode);
+        string cacheKey = $"{entry.Key}|{baseAttribute}";
+        if (_transformApplicabilityCache.TryGetValue(cacheKey, out TransformApplicabilityResult? cached)) return cached;
+
+        TransformApplicabilityResult result = ComputeTransformApplicability(entry, baseAttribute);
+        _transformApplicabilityCache[cacheKey] = result;
+        return result;
+    }
+
+    private TransformApplicabilityResult ComputeTransformApplicability(TransformAssetEntry entry, string baseAttribute)
+    {
+        if (IsGeneralTransformContext(baseAttribute))
+        {
+            return TransformApplicabilityResult.Applicable("General held/inventory transform context.");
+        }
+
+        JObject? sourceJson = GetTransformSourceJson(entry);
+        TransformContextRule rule = GetTransformContextRule(baseAttribute);
+
+        if (TryFindNegativeApplicability(entry, sourceJson, rule, out string negativeReason))
+        {
+            return TransformApplicabilityResult.NotApplicable(negativeReason);
+        }
+
+        if (TryFindTransformMetadataMatch(entry, sourceJson, baseAttribute, out string transformReason))
+        {
+            return TransformApplicabilityResult.Applicable(transformReason);
+        }
+
+        if (TryFindPositiveCapability(entry, sourceJson, rule, out string capabilityReason))
+        {
+            return TransformApplicabilityResult.Applicable(capabilityReason);
+        }
+
+        if (rule.CheckCombustibleProps && TryFindRuntimeInterfaceMatch(entry, ["IInFirepitMeshSupplier", "IInFirepitRendererSupplier"], out string interfaceReason))
+        {
+            return TransformApplicabilityResult.Applicable(interfaceReason);
+        }
+
+        if (TryFindDisplayableMatch(entry, sourceJson, rule, out string displayableReason))
+        {
+            return TransformApplicabilityResult.Applicable(displayableReason);
+        }
+
+        if (TryFindBehaviorMatch(entry, sourceJson, rule, out string behaviorReason))
+        {
+            return TransformApplicabilityResult.Applicable(behaviorReason);
+        }
+
+        return rule.UnmatchedIsUncertain
+            ? TransformApplicabilityResult.Uncertain($"No metadata proves {baseAttribute}; disable Only applicable or enable Show uncertain to author it manually.")
+            : TransformApplicabilityResult.NotApplicable($"No {rule.DisplayName} metadata matched.");
+    }
+
+    private JObject? GetTransformSourceJson(TransformAssetEntry entry)
+    {
+        if (_transformSourceJsonCache.TryGetValue(entry.Key, out JObject? cached)) return cached;
+
+        IAsset? sourceAsset = FindCollectibleSourceAsset(entry.Collectible);
+        JObject? json = sourceAsset == null ? null : TryParseJsonObject(ReadAssetText(sourceAsset));
+        _transformSourceJsonCache[entry.Key] = json;
+        return json;
+    }
+
+    private static bool IsGeneralTransformContext(string baseAttribute)
+    {
+        return baseAttribute.Equals("guiTransform", StringComparison.OrdinalIgnoreCase) ||
+               baseAttribute.Equals("groundTransform", StringComparison.OrdinalIgnoreCase) ||
+               baseAttribute.Equals("tpHandTransform", StringComparison.OrdinalIgnoreCase) ||
+               baseAttribute.Equals("tpOffHandTransform", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static TransformContextRule GetTransformContextRule(string baseAttribute)
+    {
+        string code = baseAttribute.ToLowerInvariant();
+
+        if (code.Contains("forge", StringComparison.Ordinal))
+        {
+            return new("forge", ["forgable", "workableTemperature"], ["forgable"], [], [], true);
+        }
+
+        if (code.Contains("tong", StringComparison.Ordinal))
+        {
+            return new("tongs", ["forgable", "workableTemperature"], ["forgable"], [], ["tong", "tongs"], true);
+        }
+
+        if (code.Contains("firepit", StringComparison.Ordinal))
+        {
+            return new("firepit", ["combustibleProps"], [], [], ["firepit"], true, CheckCombustibleProps: true);
+        }
+
+        if (code.Contains("groundstorage", StringComparison.Ordinal))
+        {
+            return new("ground storage", [], [], ["GroundStorable"], ["groundstorage", "groundStorage"], true);
+        }
+
+        if (code.Contains("display", StringComparison.Ordinal))
+        {
+            return new("display", ["displaycaseable"], ["displaycaseable"], [], ["display", "displaycase", "genericdisplay", "genericDisplay"], true);
+        }
+
+        if (code.Contains("shelf", StringComparison.Ordinal))
+        {
+            return new("shelf", ["shelvable"], ["shelvable"], [], ["shelf"], true);
+        }
+
+        if (code.Contains("toolrack", StringComparison.Ordinal))
+        {
+            return new("tool rack", ["rackable"], ["rackable"], [], ["toolrack", "rack"], true);
+        }
+
+        if (code.Contains("moldrack", StringComparison.Ordinal))
+        {
+            return new("mold rack", ["moldrackable"], ["moldrackable"], [], ["moldrack"], true);
+        }
+
+        if (code.Contains("scrollrack", StringComparison.Ordinal))
+        {
+            return new("scroll rack", ["scrollrackable"], ["scrollrackable"], [], ["scrollrack"], true);
+        }
+
+        if (code.Contains("trap", StringComparison.Ordinal))
+        {
+            return new("trap", [], [], [], ["trap"], true);
+        }
+
+        if (code.Contains("omok", StringComparison.Ordinal))
+        {
+            return new("omok", [], [], [], ["omok"], true);
+        }
+
+        if (code.Contains("weaponrack", StringComparison.Ordinal))
+        {
+            return new("weapon rack", ["rackable", "weaponrackable"], ["weaponrackable"], [], ["weaponrack", "rack"], true);
+        }
+
+        if (code.Contains("wallmount", StringComparison.Ordinal))
+        {
+            return new("wall mount", ["wallmountable"], ["wallmountable"], [], ["wallmount"], true);
+        }
+
+        if (code.Contains("pistolstand", StringComparison.Ordinal))
+        {
+            return new("pistol stand", ["pistolstandable"], ["pistolstandable"], [], ["pistolstand"], true);
+        }
+
+        if (code.Contains("vice", StringComparison.Ordinal))
+        {
+            return new("vice", ["viceable"], ["viceable"], [], ["vice"], true);
+        }
+
+        if (code.Contains("crossbowwallmount", StringComparison.Ordinal))
+        {
+            return new("crossbow wall mount", ["crossbowwallmountable", "wallmountable"], ["crossbowwallmountable"], [], ["crossbowwallmount", "wallmount"], true);
+        }
+
+        if (code.Contains("antlermount", StringComparison.Ordinal))
+        {
+            return new("antler mount", ["antlermountable", "wallmountable"], ["antlermountable"], [], ["antlermount", "wallmount"], true);
+        }
+
+        return new(baseAttribute, [], [], [], [], true);
+    }
+
+    private bool TryFindNegativeApplicability(TransformAssetEntry entry, JObject? sourceJson, TransformContextRule rule, out string reason)
+    {
+        foreach (string capability in rule.NegativeCapabilityKeys)
+        {
+            if (TryFindMetadataToken(entry, sourceJson, capability, out JToken? token, out string matchReason) &&
+                IsExplicitFalse(token))
+            {
+                reason = $"{matchReason} is false.";
+                return true;
+            }
+        }
+
+        if (rule.CheckCombustibleProps &&
+            TryFindMetadataToken(entry, sourceJson, "combustibleProps", out JToken? combustibleToken, out string combustibleReason) &&
+            CombustibleRequiresContainer(combustibleToken))
+        {
+            reason = $"{combustibleReason} requires a container.";
+            return true;
+        }
+
+        reason = "";
+        return false;
+    }
+
+    private bool TryFindTransformMetadataMatch(TransformAssetEntry entry, JObject? sourceJson, string baseAttribute, out string reason)
+    {
+        foreach (JObject container in GetTransformMetadataContainers(entry, sourceJson, includeSourceRoot: false))
+        {
+            if (TryGetProperty(container, baseAttribute, out JToken? direct) && direct.Type != JTokenType.Null)
+            {
+                reason = $"Existing {baseAttribute}.";
+                return true;
+            }
+
+            if (TryGetByTypeMatch(entry, container, $"{baseAttribute}ByType", out JToken? byType, out string pattern) &&
+                byType.Type != JTokenType.Null)
+            {
+                reason = $"{baseAttribute}ByType matched {pattern}.";
+                return true;
+            }
+        }
+
+        reason = "";
+        return false;
+    }
+
+    private bool TryFindPositiveCapability(TransformAssetEntry entry, JObject? sourceJson, TransformContextRule rule, out string reason)
+    {
+        foreach (string capability in rule.CapabilityKeys)
+        {
+            if (!TryFindMetadataToken(entry, sourceJson, capability, out JToken? token, out string matchReason)) continue;
+            if (rule.CheckCombustibleProps)
+            {
+                if (IsCombustibleUsableInFirepit(token))
+                {
+                    reason = $"{matchReason} is usable without a container.";
+                    return true;
+                }
+
+                continue;
+            }
+
+            if (IsCapabilityPositive(token))
+            {
+                reason = matchReason;
+                return true;
+            }
+        }
+
+        reason = "";
+        return false;
+    }
+
+    private bool TryFindDisplayableMatch(TransformAssetEntry entry, JObject? sourceJson, TransformContextRule rule, out string reason)
+    {
+        if (rule.DisplayableKeys.Length == 0)
+        {
+            reason = "";
+            return false;
+        }
+
+        foreach (JObject container in GetTransformMetadataContainers(entry, sourceJson, includeSourceRoot: false))
+        {
+            if (TryGetProperty(container, "displayable", out JToken? displayable) &&
+                TryMatchDisplayableContext(displayable, rule.DisplayableKeys, out string key))
+            {
+                reason = $"displayable.{key}.";
+                return true;
+            }
+
+            if (TryGetByTypeMatch(entry, container, "displayableByType", out JToken? byTypeDisplayable, out string pattern) &&
+                TryMatchDisplayableContext(byTypeDisplayable, rule.DisplayableKeys, out key))
+            {
+                reason = $"displayableByType matched {pattern} / {key}.";
+                return true;
+            }
+        }
+
+        reason = "";
+        return false;
+    }
+
+    private bool TryFindBehaviorMatch(TransformAssetEntry entry, JObject? sourceJson, TransformContextRule rule, out string reason)
+    {
+        if (sourceJson == null || rule.BehaviorNames.Length == 0)
+        {
+            reason = "";
+            return false;
+        }
+
+        if (TryMatchBehaviorArray(sourceJson["behaviors"], rule.BehaviorNames, out string behavior))
+        {
+            reason = $"behavior {behavior}.";
+            return true;
+        }
+
+        if (sourceJson["behaviorsByType"] is JObject byType)
+        {
+            foreach (JProperty property in byType.Properties())
+            {
+                if (!TransformPatternMatches(entry, property.Name)) continue;
+                if (!TryMatchBehaviorArray(property.Value, rule.BehaviorNames, out behavior)) continue;
+                reason = $"behaviorsByType matched {property.Name} / {behavior}.";
+                return true;
+            }
+        }
+
+        reason = "";
+        return false;
+    }
+
+    private static bool TryFindRuntimeInterfaceMatch(TransformAssetEntry entry, string[] interfaceNames, out string reason)
+    {
+        foreach (Type interfaceType in entry.Collectible.GetType().GetInterfaces())
+        {
+            if (!interfaceNames.Any(name => interfaceType.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) continue;
+            reason = $"runtime interface {interfaceType.Name}.";
+            return true;
+        }
+
+        reason = "";
+        return false;
+    }
+
+    private bool TryFindMetadataToken(TransformAssetEntry entry, JObject? sourceJson, string metadataKey, out JToken token, out string reason)
+    {
+        foreach (JObject container in GetTransformMetadataContainers(entry, sourceJson, includeSourceRoot: true))
+        {
+            if (TryGetProperty(container, metadataKey, out JToken? direct))
+            {
+                token = direct;
+                reason = metadataKey;
+                return true;
+            }
+
+            string byTypeKey = metadataKey.EndsWith("ByType", StringComparison.OrdinalIgnoreCase)
+                ? metadataKey
+                : $"{metadataKey}ByType";
+            if (TryGetByTypeMatch(entry, container, byTypeKey, out JToken? byTypeToken, out string pattern))
+            {
+                token = byTypeToken;
+                reason = $"{byTypeKey} matched {pattern}";
+                return true;
+            }
+        }
+
+        token = JValue.CreateNull();
+        reason = "";
+        return false;
+    }
+
+    private IEnumerable<JObject> GetTransformMetadataContainers(TransformAssetEntry entry, JObject? sourceJson, bool includeSourceRoot)
+    {
+        if (entry.Collectible.Attributes?.Token is JObject runtimeAttributes) yield return runtimeAttributes;
+
+        if (sourceJson?["attributes"] is JObject sourceAttributes) yield return sourceAttributes;
+        if (sourceJson?["attributesByType"] is JObject attributesByType)
+        {
+            foreach (JProperty property in attributesByType.Properties())
+            {
+                if (TransformPatternMatches(entry, property.Name) && property.Value is JObject typedAttributes)
+                {
+                    yield return typedAttributes;
+                }
+            }
+        }
+
+        if (includeSourceRoot && sourceJson != null) yield return sourceJson;
+    }
+
+    private static bool TryGetProperty(JObject container, string key, out JToken token)
+    {
+        return container.TryGetValue(key, StringComparison.OrdinalIgnoreCase, out token!);
+    }
+
+    private static bool TryGetByTypeMatch(TransformAssetEntry entry, JObject container, string byTypeKey, out JToken token, out string pattern)
+    {
+        if (TryGetProperty(container, byTypeKey, out JToken? mapToken) && mapToken is JObject map)
+        {
+            foreach (JProperty property in map.Properties())
+            {
+                if (!TransformPatternMatches(entry, property.Name)) continue;
+                token = property.Value;
+                pattern = property.Name;
+                return true;
+            }
+        }
+
+        token = JValue.CreateNull();
+        pattern = "";
+        return false;
+    }
+
+    private static bool TransformPatternMatches(TransformAssetEntry entry, string pattern)
+    {
+        if (string.IsNullOrWhiteSpace(pattern)) return false;
+        string path = entry.Collectible.Code?.Path ?? "";
+        string fullCode = entry.Collectible.Code?.ToString() ?? path;
+
+        return PatternMatchesCode(path, pattern) || PatternMatchesCode(fullCode, pattern);
+    }
+
+    private static bool PatternMatchesCode(string code, string pattern)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return false;
+        if (pattern.StartsWith('@'))
+        {
+            try
+            {
+                return Regex.IsMatch(code, pattern[1..], RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        if (pattern.Contains('*') || pattern.Contains('?'))
+        {
+            string regex = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+            return Regex.IsMatch(code, regex, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        return string.Equals(code, pattern, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsExplicitFalse(JToken token)
+    {
+        return token.Type switch
+        {
+            JTokenType.Boolean => token.Value<bool>() == false,
+            JTokenType.Integer or JTokenType.Float => Math.Abs(token.Value<double>()) < 0.000001,
+            JTokenType.String => token.Value<string>() is { } text &&
+                                 (text.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+                                  text.Equals("no", StringComparison.OrdinalIgnoreCase) ||
+                                  text.Equals("none", StringComparison.OrdinalIgnoreCase)),
+            _ => false
+        };
+    }
+
+    private static bool IsCapabilityPositive(JToken token)
+    {
+        if (token.Type == JTokenType.Null) return false;
+        if (token.Type is JTokenType.Integer or JTokenType.Float) return true;
+        if (IsExplicitFalse(token)) return false;
+        return true;
+    }
+
+    private static bool CombustibleRequiresContainer(JToken token)
+    {
+        return token is JObject obj &&
+               TryGetProperty(obj, "requiresContainer", out JToken? requiresContainer) &&
+               requiresContainer.Type == JTokenType.Boolean &&
+               requiresContainer.Value<bool>();
+    }
+
+    private static bool IsCombustibleUsableInFirepit(JToken token)
+    {
+        return token.Type != JTokenType.Null && !CombustibleRequiresContainer(token) && !IsExplicitFalse(token);
+    }
+
+    private static bool TryMatchDisplayableContext(JToken token, string[] contextKeys, out string matchedKey)
+    {
+        if (token is JObject displayable)
+        {
+            foreach (string contextKey in contextKeys)
+            {
+                foreach (JProperty property in displayable.Properties())
+                {
+                    if (!property.Name.Equals(contextKey, StringComparison.OrdinalIgnoreCase)) continue;
+                    matchedKey = property.Name;
+                    return true;
+                }
+            }
+        }
+
+        matchedKey = "";
+        return false;
+    }
+
+    private static bool TryMatchBehaviorArray(JToken? token, string[] behaviorNames, out string behavior)
+    {
+        if (token is JArray behaviors)
+        {
+            foreach (JToken behaviorToken in behaviors)
+            {
+                string? name = behaviorToken is JObject obj && TryGetProperty(obj, "name", out JToken? nameToken)
+                    ? nameToken.Value<string>()
+                    : behaviorToken.Value<string>();
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                if (!behaviorNames.Any(expected => expected.Equals(name, StringComparison.OrdinalIgnoreCase))) continue;
+                behavior = name;
+                return true;
+            }
+        }
+
+        behavior = "";
+        return false;
+    }
+
+    private static string GetTransformBaseAttributeCode(string attributeCode)
+    {
+        return attributeCode.EndsWith("ByType", StringComparison.OrdinalIgnoreCase)
+            ? attributeCode[..^"ByType".Length]
+            : attributeCode;
+    }
+
     private void DrawTransformsBrowser(NVector2 size)
     {
         ImGui.BeginChild("##transforms-browser", size, true);
@@ -252,14 +759,29 @@ public sealed partial class DebugWindowManager
                 EnsureTransformAssetsIndexed();
             }
 
-            if (ImGuiLayoutHelper.DrawDomainCombo("Domain##transforms-domain", ref _transformsDomainFilter, _transformAssets.Select(entry => entry.Domain)))
+            bool useTypedSlot = _transformUseTypedSlot;
+            if (ImGui.Checkbox("Typed map##transform-use-typed-global", ref useTypedSlot))
             {
+                _transformUseTypedSlot = useTypedSlot;
+                _transformPreviewCacheKey = "";
+                RebuildVisibleTransformAssets();
+            }
+
+            if (DrawTransformContextSelector())
+            {
+                _transformPreviewCacheKey = "";
+                ResetTransformPreviewCameraToSelection();
                 RebuildVisibleTransformAssets();
             }
 
             string[] typeLabels = ["All", "Blocks", "Items"];
             ImGui.SetNextItemWidth(-1);
             if (ImGui.Combo("Type##transforms-type", ref _transformsTypeFilter, typeLabels, typeLabels.Length))
+            {
+                RebuildVisibleTransformAssets();
+            }
+
+            if (ImGuiLayoutHelper.DrawDomainCombo("Domain##transforms-domain", ref _transformsDomainFilter, _transformAssets.Select(entry => entry.Domain)))
             {
                 RebuildVisibleTransformAssets();
             }
@@ -274,15 +796,44 @@ public sealed partial class DebugWindowManager
                 RebuildVisibleTransformAssets();
             }
 
+            bool onlyApplicable = _transformsOnlyApplicable;
+            if (ImGui.Checkbox("Only applicable##transforms-only-applicable", ref onlyApplicable))
+            {
+                _transformsOnlyApplicable = onlyApplicable;
+                RebuildVisibleTransformAssets();
+            }
+
+            if (_transformsOnlyApplicable)
+            {
+                bool showUncertain = _transformsShowUncertain;
+                if (ImGui.Checkbox("Show uncertain##transforms-show-uncertain", ref showUncertain))
+                {
+                    _transformsShowUncertain = showUncertain;
+                    RebuildVisibleTransformAssets();
+                }
+            }
+
             ImGui.TextDisabled($"Showing {_visibleTransformAssets.Count} / {_transformAssets.Count} assets");
             ImGui.BeginChild("##transforms-asset-list", new NVector2(0, 0), false);
+            string attributeCode = GetSelectedTransformAttributeCode();
             for (int index = 0; index < _visibleTransformAssets.Count; index++)
             {
                 TransformAssetEntry entry = _visibleTransformAssets[index];
-                if (ImGui.Selectable($"{entry.Label}##transform-asset-{entry.Key}", index == _transformsAssetIndex))
+                TransformApplicabilityResult applicability = GetTransformApplicability(entry, attributeCode);
+                string marker = applicability.Kind switch
+                {
+                    TransformApplicabilityKind.Applicable => "",
+                    TransformApplicabilityKind.Uncertain => " ?",
+                    _ => " !"
+                };
+                if (ImGui.Selectable($"{entry.Label}{marker}##transform-asset-{entry.Key}", index == _transformsAssetIndex))
                 {
                     _transformsAssetIndex = index;
                     ResetTransformPreviewCameraToSelection();
+                }
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip($"{applicability.Kind}: {applicability.Reason}");
                 }
             }
             ImGui.EndChild();
@@ -291,6 +842,25 @@ public sealed partial class DebugWindowManager
         {
             ImGui.EndChild();
         }
+    }
+
+    private bool DrawTransformContextSelector()
+    {
+        bool changed = false;
+        if (!_transformUseTypedSlot)
+        {
+            _transformDirectSlotIndex = Math.Clamp(_transformDirectSlotIndex, 0, DirectTransformAttributeCodes.Length - 1);
+            ImGui.SetNextItemWidth(-1);
+            changed |= ImGui.Combo("Context##transform-direct-slot-global", ref _transformDirectSlotIndex, DirectTransformAttributeCodes, DirectTransformAttributeCodes.Length);
+            return changed;
+        }
+
+        _transformTypedMapIndex = Math.Clamp(_transformTypedMapIndex, 0, TypedTransformAttributeCodes.Length - 1);
+        ImGui.SetNextItemWidth(-1);
+        changed |= ImGui.Combo("Context map##transform-typed-map-global", ref _transformTypedMapIndex, TypedTransformAttributeCodes, TypedTransformAttributeCodes.Length);
+        ImGui.SetNextItemWidth(-1);
+        changed |= ImGui.InputTextWithHint("Key##transform-typed-key-global", "type key", ref _transformTypedKey, 120);
+        return changed;
     }
 
     private void DrawTransformsViewport(NVector2 size)
@@ -398,9 +968,15 @@ public sealed partial class DebugWindowManager
 
             ImGui.SeparatorText("Slot");
             ImGui.TextWrapped(asset.Collectible.Code.ToString());
-            ImGui.Checkbox("Typed map##transform-use-typed", ref _transformUseTypedSlot);
-            TransformSlotSelection? slot = DrawTransformSlotSelector(asset);
-            if (slot == null) return;
+            TransformSlotSelection? slot = GetSelectedTransformSlot(asset);
+            if (slot == null)
+            {
+                ImGui.TextDisabled("Enter a typed transform key in the browser.");
+                return;
+            }
+            ImGui.TextDisabled(slot.DisplayName);
+            TransformApplicabilityResult applicability = GetTransformApplicability(asset, slot.AttributeCode);
+            ImGui.TextWrapped($"{applicability.Kind}: {applicability.Reason}");
 
             ModelTransform transform = GetTransformDraft(asset, slot);
             bool exists = TransformSlotExists(asset, slot);
@@ -638,15 +1214,15 @@ public sealed partial class DebugWindowManager
             return;
         }
 
-        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot).ToList();
+        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot, out int skipped);
         foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
         {
             ApplyTransformLive(targetAsset, targetSlot, GetTransformDraft(targetAsset, targetSlot), force);
         }
 
-        if (targets.Count > 1)
+        if (targets.Count > 1 || skipped > 0)
         {
-            _liveApplyManager.LastStatus = $"Live applied {slot.DisplayName} to {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s).";
+            _liveApplyManager.LastStatus = $"Live applied {slot.DisplayName} to {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s){FormatTransformSkippedSuffix(skipped)}.";
         }
     }
 
@@ -1294,7 +1870,7 @@ public sealed partial class DebugWindowManager
 
     private void ApplyTransformDraftEdit(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform)
     {
-        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot).ToList();
+        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot, out int skipped);
         foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
         {
             _transformDrafts[targetSlot.Key] = ReferenceEquals(targetSlot, slot) || targetSlot.Key.Equals(slot.Key, StringComparison.OrdinalIgnoreCase)
@@ -1303,6 +1879,7 @@ public sealed partial class DebugWindowManager
             _transformDirtyKeys.Add(targetSlot.Key);
         }
 
+        _transformApplicabilityCache.Clear();
         _transformPreviewCacheKey = "";
         RebuildVisibleTransformAssets();
         if (_liveApplyManager.AutoApply)
@@ -1313,20 +1890,22 @@ public sealed partial class DebugWindowManager
             }
         }
 
+        string skippedSuffix = FormatTransformSkippedSuffix(skipped);
         _transformsStatus = targets.Count > 1
-            ? $"Edited {slot.DisplayName} for {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s)."
-            : $"Edited {slot.DisplayName} for {asset.Label}.";
+            ? $"Edited {slot.DisplayName} for {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s){skippedSuffix}."
+            : $"Edited {slot.DisplayName} for {asset.Label}{skippedSuffix}.";
     }
 
     private void ResetTransformDraftToDefault(TransformAssetEntry asset, TransformSlotSelection slot)
     {
-        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot).ToList();
+        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot, out int skipped);
         foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
         {
             _transformDrafts[targetSlot.Key] = CreateDefaultTransformForSlot(targetAsset, targetSlot.AttributeCode);
             _transformDirtyKeys.Add(targetSlot.Key);
         }
 
+        _transformApplicabilityCache.Clear();
         _transformPreviewCacheKey = "";
         RebuildVisibleTransformAssets();
         if (_liveApplyManager.AutoApply)
@@ -1337,25 +1916,42 @@ public sealed partial class DebugWindowManager
             }
         }
 
+        string skippedSuffix = FormatTransformSkippedSuffix(skipped);
         _transformsStatus = targets.Count > 1
-            ? $"Reset {slot.DisplayName} defaults for {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s)."
-            : $"Reset {slot.DisplayName} default for {asset.Label}.";
+            ? $"Reset {slot.DisplayName} defaults for {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s){skippedSuffix}."
+            : $"Reset {slot.DisplayName} default for {asset.Label}{skippedSuffix}.";
     }
 
-    private IEnumerable<(TransformAssetEntry Asset, TransformSlotSelection Slot)> GetTransformEditTargets(TransformAssetEntry asset, TransformSlotSelection slot)
+    private List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> GetTransformEditTargets(TransformAssetEntry asset, TransformSlotSelection slot, out int skipped)
     {
+        skipped = 0;
+        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = [];
         if (!_transformGroupEdit)
         {
-            yield return (asset, slot);
-            yield break;
+            targets.Add((asset, slot));
+            return targets;
         }
 
         string familyKey = GetTransformFamilyKey(asset);
         foreach (TransformAssetEntry target in _transformAssets)
         {
             if (!string.Equals(GetTransformFamilyKey(target), familyKey, StringComparison.OrdinalIgnoreCase)) continue;
-            yield return (target, new TransformSlotSelection(target, slot.AttributeCode, slot.TypedKey));
+            if (!string.Equals(target.Key, asset.Key, StringComparison.OrdinalIgnoreCase) &&
+                GetTransformApplicability(target, slot.AttributeCode).Kind != TransformApplicabilityKind.Applicable)
+            {
+                skipped++;
+                continue;
+            }
+
+            targets.Add((target, new TransformSlotSelection(target, slot.AttributeCode, slot.TypedKey)));
         }
+
+        return targets.Count == 0 ? [(asset, slot)] : targets;
+    }
+
+    private static string FormatTransformSkippedSuffix(int skipped)
+    {
+        return skipped > 0 ? $"; skipped {skipped} not applicable" : "";
     }
 
     private string GetTransformFamilyKey(TransformAssetEntry asset)
@@ -1371,16 +1967,28 @@ public sealed partial class DebugWindowManager
     private TransformSlotSelection? GetSelectedTransformSlot(TransformAssetEntry? asset)
     {
         if (asset == null) return null;
+        string attributeCode = GetSelectedTransformAttributeCode();
+        string? typedKey = GetSelectedTransformTypedKey();
+        return _transformUseTypedSlot && string.IsNullOrWhiteSpace(typedKey)
+            ? null
+            : new TransformSlotSelection(asset, attributeCode, typedKey);
+    }
+
+    private string GetSelectedTransformAttributeCode()
+    {
         if (!_transformUseTypedSlot)
         {
             _transformDirectSlotIndex = Math.Clamp(_transformDirectSlotIndex, 0, DirectTransformAttributeCodes.Length - 1);
-            return new(asset, DirectTransformAttributeCodes[_transformDirectSlotIndex], null);
+            return DirectTransformAttributeCodes[_transformDirectSlotIndex];
         }
 
         _transformTypedMapIndex = Math.Clamp(_transformTypedMapIndex, 0, TypedTransformAttributeCodes.Length - 1);
-        return string.IsNullOrWhiteSpace(_transformTypedKey)
-            ? null
-            : new TransformSlotSelection(asset, TypedTransformAttributeCodes[_transformTypedMapIndex], _transformTypedKey.Trim());
+        return TypedTransformAttributeCodes[_transformTypedMapIndex];
+    }
+
+    private string? GetSelectedTransformTypedKey()
+    {
+        return _transformUseTypedSlot && !string.IsNullOrWhiteSpace(_transformTypedKey) ? _transformTypedKey.Trim() : null;
     }
 
     private IEnumerable<string> GetTypedTransformKeys(TransformAssetEntry asset, string attributeCode)
@@ -1444,4 +2052,27 @@ public sealed partial class DebugWindowManager
         public string DisplayName => TypedKey == null ? AttributeCode : $"{AttributeCode} / {TypedKey}";
         public bool CanSaveToSource => true;
     }
+
+    private enum TransformApplicabilityKind
+    {
+        Applicable,
+        Uncertain,
+        NotApplicable
+    }
+
+    private sealed record TransformApplicabilityResult(TransformApplicabilityKind Kind, string Reason)
+    {
+        public static TransformApplicabilityResult Applicable(string reason) => new(TransformApplicabilityKind.Applicable, reason);
+        public static TransformApplicabilityResult Uncertain(string reason) => new(TransformApplicabilityKind.Uncertain, reason);
+        public static TransformApplicabilityResult NotApplicable(string reason) => new(TransformApplicabilityKind.NotApplicable, reason);
+    }
+
+    private sealed record TransformContextRule(
+        string DisplayName,
+        string[] CapabilityKeys,
+        string[] NegativeCapabilityKeys,
+        string[] BehaviorNames,
+        string[] DisplayableKeys,
+        bool UnmatchedIsUncertain,
+        bool CheckCombustibleProps = false);
 }
