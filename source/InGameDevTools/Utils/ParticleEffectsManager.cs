@@ -1754,10 +1754,12 @@ public class ParticleEffectsManager
         if (runtimeRateControlsDisabled) ImGui.EndDisabled();
         ImGui.SameLine();
         ImGui.SetNextItemWidth(110);
+        if (runtimeRateControlsDisabled) ImGui.BeginDisabled();
         ImGui.SliderFloat($"Speed##particle-preview-{id}", ref _previewTimeScale, 0.05f, 4f, "%.2fx");
+        if (runtimeRateControlsDisabled) ImGui.EndDisabled();
         if (useRuntimePreview)
         {
-            ImGui.TextDisabled($"Runtime block tick uses the engine {RuntimePreviewTickIntervalSeconds:0.000}s async cadence; rate and intensity are ignored.");
+            ImGui.TextDisabled($"Runtime block tick uses the engine {RuntimePreviewTickIntervalSeconds:0.000}s async cadence; rate, intensity, and speed are ignored.");
         }
 
         ImGui.SetNextItemWidth(110);
@@ -1791,7 +1793,7 @@ public class ParticleEffectsManager
             ImGui.TextDisabled("Uses Vintage Story ParticlePhysics against the current client world.");
         }
 
-        float dt = Math.Clamp(deltaSeconds, 0f, 0.1f) * _previewTimeScale;
+        float dt = Math.Clamp(deltaSeconds, 0f, 0.1f) * (useRuntimePreview ? 1f : _previewTimeScale);
         if (_previewLoop && dt > 0)
         {
             if (useRuntimePreview && runtimePreviewBlock != null)
