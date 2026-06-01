@@ -10,12 +10,13 @@ namespace InGameDevTools.Utils;
 
 internal sealed class DevToolsPreview3DRenderer : IDisposable
 {
-    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad";
+    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad-v2";
 
     private readonly ICoreClientAPI _api;
     private FrameBufferRef? _frameBuffer;
     private EngineParticlePreview? _particlePreview;
     private IShaderProgram? _previewQuadParticleShader;
+    private readonly HashSet<string> _missingParticleUniformsLogged = new(StringComparer.Ordinal);
 
     public DevToolsPreview3DRenderer(ICoreClientAPI api)
     {
@@ -62,6 +63,15 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         GL.GetBoolean(GetPName.DepthWritemask, out bool restoreDepthMask);
         bool restoreCullFace = GL.IsEnabled(EnableCap.CullFace);
         bool restoreBlend = GL.IsEnabled(EnableCap.Blend);
+        GL.GetInteger(GetPName.BlendSrcRgb, out int restoreBlendSrcRgb);
+        GL.GetInteger(GetPName.BlendDstRgb, out int restoreBlendDstRgb);
+        GL.GetInteger(GetPName.BlendSrcAlpha, out int restoreBlendSrcAlpha);
+        GL.GetInteger(GetPName.BlendDstAlpha, out int restoreBlendDstAlpha);
+        GL.GetInteger(GetPName.BlendEquationRgb, out int restoreBlendEquationRgb);
+        GL.GetInteger(GetPName.BlendEquationAlpha, out int restoreBlendEquationAlpha);
+        GL.GetInteger(GetPName.ActiveTexture, out int restoreActiveTexture);
+        GL.ActiveTexture(TextureUnit.Texture0);
+        GL.GetInteger(GetPName.TextureBinding2D, out int restoreTexture2D);
         float[] restoreClearColor = new float[4];
         GL.GetFloat(GetPName.ColorClearValue, restoreClearColor);
         IShaderProgram? activeShader = null;
@@ -128,8 +138,24 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
             render.GLDepthMask(restoreDepthMask);
             if (restoreCullFace) render.GlEnableCullFace();
             else render.GlDisableCullFace();
-            if (restoreBlend) render.GlToggleBlend(true, EnumBlendMode.Standard);
-            else render.GlToggleBlend(false);
+            if (restoreBlend)
+            {
+                GL.Enable(EnableCap.Blend);
+                GL.BlendEquationSeparate((BlendEquationMode)restoreBlendEquationRgb, (BlendEquationMode)restoreBlendEquationAlpha);
+                GL.BlendFuncSeparate(
+                    (BlendingFactorSrc)restoreBlendSrcRgb,
+                    (BlendingFactorDest)restoreBlendDstRgb,
+                    (BlendingFactorSrc)restoreBlendSrcAlpha,
+                    (BlendingFactorDest)restoreBlendDstAlpha);
+            }
+            else
+            {
+                render.GlToggleBlend(false);
+            }
+
+            GL.ActiveTexture(TextureUnit.Texture0);
+            GL.BindTexture(TextureTarget.Texture2D, restoreTexture2D);
+            GL.ActiveTexture((TextureUnit)restoreActiveTexture);
             if (restoreDepthTest) render.GLEnableDepthTest();
             else GL.Disable(EnableCap.DepthTest);
         }
@@ -268,21 +294,26 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         if (_particlePreview == null || _particlePreview.ParticleCount == 0) return;
 
         IRenderAPI render = _api.Render;
-        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        // The engine's 3D quad shader declares particleTex but does not sample it in this
+        // Vintage Story build. Clearing texture unit 0 still prevents reference mesh state
+        // from leaking into preview particle shaders.
+        GL.ActiveTexture(TextureUnit.Texture0);
+        GL.BindTexture(TextureTarget.Texture2D, 0);
         render.GLDepthMask(false);
         GL.Disable(EnableCap.DepthTest);
 
         _particlePreview.Update(camera.Position, Math.Clamp(deltaSeconds, 0f, 0.1f));
         Matrixf particleView = BuildCameraOriginView(camera);
 
-        RenderEngineParticlePool(render.GetEngineShader(EnumShaderProgram.Particlescube), _particlePreview.CubePool, particleView, camera.Projection);
-        RenderEngineParticlePool(EnsurePreviewQuadParticleShader(), _particlePreview.QuadPool, particleView, camera.Projection);
+        RenderEngineParticlePool(render.GetEngineShader(EnumShaderProgram.Particlescube), _particlePreview.CubePool, particleView, camera.Projection, EnumBlendMode.Standard);
+        RenderEngineParticlePool(EnsurePreviewQuadParticleShader(), _particlePreview.QuadPool, particleView, camera.Projection, EnumBlendMode.Glow);
     }
 
-    private void RenderEngineParticlePool(IShaderProgram shader, IParticlePool pool, Matrixf modelView, Matrixf projection)
+    private void RenderEngineParticlePool(IShaderProgram shader, IParticlePool pool, Matrixf modelView, Matrixf projection, EnumBlendMode blendMode)
     {
         if (pool.QuantityAlive <= 0) return;
 
+        _api.Render.GlToggleBlend(true, blendMode);
         shader.Use();
         try
         {
@@ -344,11 +375,42 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
     {
         IRenderAPI render = _api.Render;
         if (shader.HasUniform("rgbaFogIn")) shader.Uniform("rgbaFogIn", render.FogColor);
+        else LogMissingParticleUniform(shader, "rgbaFogIn");
         if (shader.HasUniform("rgbaAmbientIn")) shader.Uniform("rgbaAmbientIn", render.AmbientColor);
-        SetUniform(shader, "fogMinIn", render.FogMin);
-        SetUniform(shader, "fogDensityIn", render.FogDensity);
-        SetUniformMatrix(shader, "projectionMatrix", projection.Values);
-        SetUniformMatrix(shader, "modelViewMatrix", modelView.Values);
+        else LogMissingParticleUniform(shader, "rgbaAmbientIn");
+        SetExpectedParticleUniform(shader, "fogMinIn", render.FogMin);
+        SetExpectedParticleUniform(shader, "fogDensityIn", render.FogDensity);
+        SetExpectedParticleUniformMatrix(shader, "projectionMatrix", projection.Values);
+        SetExpectedParticleUniformMatrix(shader, "modelViewMatrix", modelView.Values);
+    }
+
+    private void SetExpectedParticleUniform(IShaderProgram shader, string name, float value)
+    {
+        if (shader.HasUniform(name))
+        {
+            shader.Uniform(name, value);
+            return;
+        }
+
+        LogMissingParticleUniform(shader, name);
+    }
+
+    private void SetExpectedParticleUniformMatrix(IShaderProgram shader, string name, float[] matrix)
+    {
+        if (shader.HasUniform(name))
+        {
+            shader.UniformMatrix(name, matrix);
+            return;
+        }
+
+        LogMissingParticleUniform(shader, name);
+    }
+
+    private void LogMissingParticleUniform(IShaderProgram shader, string name)
+    {
+        string key = $"{shader.GetHashCode()}:{name}";
+        if (!_missingParticleUniformsLogged.Add(key)) return;
+        _api.Logger.VerboseDebug("InGameDevTools: preview particle shader {0} is missing expected uniform '{1}'.", shader.GetType().Name, name);
     }
 
     private static Matrixf BuildCameraOriginView(DevToolsPreviewCamera camera)
@@ -519,6 +581,7 @@ uniform mat4 modelViewMatrix;
 
 out vec4 color;
 out vec2 uv;
+out float glowLevel;
 
 mat4 rotationZ(float angle) {
     return mat4(cos(angle), -sin(angle), 0, 0,
@@ -558,6 +621,7 @@ void main()
     vec3 light = max(rgbaAmbientIn, rgbaLightIn.rgb);
     light = max(light, vec3(0.35));
     color = baseColor * vec4(rgbaBlockIn.rgb * light, rgbaBlockIn.a);
+    glowLevel = clamp(float(renderFlags & 255) / 128.0, 0.0, 2.0);
 
     vec4 cameraPos = mvmat * vec4(localPos, 1.0);
     gl_Position = projectionMatrix * cameraPos;
@@ -570,6 +634,7 @@ void main()
 
 in vec4 color;
 in vec2 uv;
+in float glowLevel;
 
 layout(location = 0) out vec4 outColor;
 
@@ -584,7 +649,9 @@ void main()
     previewColor.a *= 1.0 - clamp(length(edgeFade) * 10.0, 0.0, 1.0);
     if (previewColor.a < 0.002) discard;
 
-    outColor = clamp(previewColor, vec4(0.0), vec4(1.0));
+    float alpha = clamp(max(previewColor.a, glowLevel * 0.08), 0.0, 1.0);
+    vec3 rgb = previewColor.rgb * max(1.0, glowLevel);
+    outColor = vec4(clamp(rgb, vec3(0.0), vec3(1.0)), alpha);
 }
 """;
 }
