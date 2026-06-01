@@ -85,6 +85,7 @@ public sealed partial class DebugWindowManager
     private bool _vanillaShowLiveSymmetryGhost = true;
     private float _vanillaLiveSymmetryGhostOpacity = 0.35f;
     private bool _vanillaIkFollowMove;
+    private bool _vanillaIkViewportPickMode = true;
     private readonly List<string> _vanillaIkChainElementNames = [];
     private bool _vanillaIkHasTarget;
     private float _vanillaIkTargetX;
@@ -1240,7 +1241,8 @@ public sealed partial class DebugWindowManager
 
         if (effectiveMode == VanillaPreviewMode.Orbit)
         {
-            DrawVanillaViewportGizmo(row, scene, drawList, min, max, hovered);
+            bool suppressBodyPick = DrawVanillaViewportGizmo(row, scene, drawList, min, max, hovered);
+            DrawVanillaViewportElementPicker(row, scene, drawList, min, max, hovered, suppressBodyPick);
         }
         else
         {
@@ -1317,15 +1319,15 @@ public sealed partial class DebugWindowManager
         }
 
         return mode == VanillaPreviewMode.Orbit
-            ? "RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms."
+            ? "LMB picks body parts. RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms."
             : "First person: RMB adjusts preview yaw/pitch. MMB or Shift+RMB offsets. Mouse wheel changes hand FOV.";
     }
 
-    private void DrawVanillaViewportGizmo(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, ImDrawListPtr drawList, NVector2 min, NVector2 max, bool hovered)
+    private bool DrawVanillaViewportGizmo(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, ImDrawListPtr drawList, NVector2 min, NVector2 max, bool hovered)
     {
-        if (GizmoMode == TransformGizmoMode.None) return;
-        if (!TryGetVanillaViewportGizmoTarget(row, out VanillaShapeAnimationEntry? entry, out VanillaAnimation? animation, out AnimationKeyFrame? keyFrame, out AnimationKeyFrameElement? element)) return;
-        if (!TryGetVanillaGizmoProjection(scene, element, _vanillaSelection.ElementName, min, max, out VanillaGizmoProjection projection)) return;
+        if (GizmoMode == TransformGizmoMode.None) return false;
+        if (!TryGetVanillaViewportGizmoTarget(row, out VanillaShapeAnimationEntry? entry, out VanillaAnimation? animation, out AnimationKeyFrame? keyFrame, out AnimationKeyFrameElement? element)) return false;
+        if (!TryGetVanillaGizmoProjection(scene, element, _vanillaSelection.ElementName, min, max, out VanillaGizmoProjection projection)) return false;
 
         TransformGizmoAxis hoveredAxis = hovered ? PickVanillaViewportGizmoAxis(projection) : TransformGizmoAxis.None;
         if (hoveredAxis != TransformGizmoAxis.None)
@@ -1373,25 +1375,199 @@ public sealed partial class DebugWindowManager
         DrawVanillaViewportGizmoAxes(drawList, projection, hoveredAxis);
         drawList.AddText(projection.Center + new NVector2(8f, 8f), labelColor, _vanillaSelection.ElementName);
         drawList.PopClipRect();
+        return hoveredAxis != TransformGizmoAxis.None || _vanillaViewportGizmoDragAxis != TransformGizmoAxis.None;
+    }
+
+    private void DrawVanillaViewportElementPicker(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, ImDrawListPtr drawList, NVector2 min, NVector2 max, bool hovered, bool suppressClick)
+    {
+        if (!hovered || _vanillaViewportGizmoDragAxis != TransformGizmoAxis.None) return;
+        if (!TryPickVanillaViewportElement(scene, min, max, ImGui.GetMousePos(), out VanillaViewportElementHit hit)) return;
+
+        ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+        drawList.PushClipRect(min, max, true);
+        uint boundsColor = ContainsVanillaIkChainElement(hit.ElementName)
+            ? ImGui.ColorConvertFloat4ToU32(new NVector4(0.42f, 0.86f, 1f, 0.95f))
+            : ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.86f, 0.36f, 0.92f));
+        uint labelColor = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.96f, 0.78f, 1f));
+        DrawVanillaViewportBoxBounds(drawList, hit.BoundsCorners, boundsColor, 2.2f);
+        string action = _vanillaIkViewportPickMode ? "IK" : "select";
+        drawList.AddText(hit.Center + new NVector2(8f, -18f), labelColor, $"{hit.ElementName} ({action})");
+        drawList.PopClipRect();
+
+        if (suppressClick || !ImGui.IsMouseClicked(ImGuiMouseButton.Left)) return;
+
+        _vanillaSelection.ElementName = hit.ElementName;
+        if (_vanillaIkViewportPickMode)
+        {
+            ToggleVanillaIkChainElement(hit.ElementName);
+        }
+        else
+        {
+            ClearVanillaViewportGizmoDrag();
+            _vanillaStatus = $"Selected {hit.ElementName}.";
+        }
+    }
+
+    private bool TryPickVanillaViewportElement(VanillaAnimationPreviewScene scene, NVector2 min, NVector2 max, NVector2 mouse, out VanillaViewportElementHit hit)
+    {
+        hit = default;
+        float width = Math.Max(1f, max.X - min.X);
+        float height = Math.Max(1f, max.Y - min.Y);
+        VanillaPreviewCameraState camera = BuildVanillaPreviewCamera(scene, width, height, _vanillaViewportYaw, _vanillaViewportPitch, _vanillaViewportZoom, _vanillaViewportPanX, _vanillaViewportPanY, VanillaPreviewMode.Orbit);
+        bool found = false;
+
+        foreach (ElementPose root in scene.Animator.RootPoses ?? [])
+        {
+            CollectVanillaViewportElementHits(root, camera, min, width, height, mouse, depth: 0, ref found, ref hit);
+        }
+
+        return found;
+    }
+
+    private static void CollectVanillaViewportElementHits(ElementPose pose, VanillaPreviewCameraState camera, NVector2 min, float width, float height, NVector2 mouse, int depth, ref bool found, ref VanillaViewportElementHit best)
+    {
+        if (TryBuildVanillaViewportElementHit(pose, camera, min, width, height, mouse, depth, out VanillaViewportElementHit candidate) &&
+            (!found || IsBetterVanillaViewportElementHit(candidate, best)))
+        {
+            best = candidate;
+            found = true;
+        }
+
+        if (pose.ChildElementPoses == null) return;
+        foreach (ElementPose child in pose.ChildElementPoses)
+        {
+            CollectVanillaViewportElementHits(child, camera, min, width, height, mouse, depth + 1, ref found, ref best);
+        }
+    }
+
+    private static bool IsBetterVanillaViewportElementHit(VanillaViewportElementHit candidate, VanillaViewportElementHit current)
+    {
+        if (candidate.Distance < current.Distance - 0.01) return true;
+        if (candidate.Distance > current.Distance + 0.01) return false;
+        if (candidate.HierarchyDepth != current.HierarchyDepth) return candidate.HierarchyDepth > current.HierarchyDepth;
+        return candidate.ScreenArea < current.ScreenArea;
+    }
+
+    private static bool TryBuildVanillaViewportElementHit(ElementPose pose, VanillaPreviewCameraState camera, NVector2 min, float width, float height, NVector2 mouse, int depth, out VanillaViewportElementHit hit)
+    {
+        hit = default;
+        if (pose.ForElement == null || string.IsNullOrWhiteSpace(pose.ForElement.Name)) return false;
+
+        Matrixf elementModel = BuildVanillaElementModelMatrix(camera.Model, pose);
+        if (!TryIntersectVanillaViewportElementBox(camera, elementModel, pose.ForElement, min, width, height, mouse, out double distance)) return false;
+
+        NVector2[] bounds = BuildVanillaElementBounds3D(camera, elementModel, pose.ForElement, min, width, height, out bool hasVisualCenter, out NVector2 visualCenter);
+        if (bounds.Length < 8 || !hasVisualCenter) return false;
+
+        hit = new(
+            pose.ForElement.Name,
+            bounds,
+            visualCenter,
+            distance,
+            GetProjectedBoundsArea(bounds),
+            depth);
+        return true;
+    }
+
+    private static bool TryIntersectVanillaViewportElementBox(VanillaPreviewCameraState camera, Matrixf elementModel, ShapeElement element, NVector2 min, float width, float height, NVector2 mouse, out double distance)
+    {
+        distance = 0;
+        Matrixf clipFromLocal = new();
+        clipFromLocal.Set(elementModel.Values);
+        clipFromLocal.ReverseMul(camera.ProjectionView.Values);
+
+        double[] inverseClipFromLocal = Mat4d.Create();
+        if (Mat4d.Invert(inverseClipFromLocal, ToDoubleMatrix(clipFromLocal.Values)) == null) return false;
+        if (!UnprojectVanillaViewportPoint(inverseClipFromLocal, min, width, height, mouse, -1.0, out Vec3d near)) return false;
+        if (!UnprojectVanillaViewportPoint(inverseClipFromLocal, min, width, height, mouse, 1.0, out Vec3d far)) return false;
+
+        Vec3d direction = Sub(far, near);
+        if (direction.LengthSq() < 0.000001) return false;
+        direction.Normalize();
+
+        Vec3f[] corners = GetElementLocalBoxCorners(element);
+        return TryIntersectLocalAabb(near, direction, corners, out distance);
+    }
+
+    private static double[] ToDoubleMatrix(float[] values)
+    {
+        double[] result = new double[values.Length];
+        for (int index = 0; index < values.Length; index++)
+        {
+            result[index] = values[index];
+        }
+
+        return result;
+    }
+
+    private static bool UnprojectVanillaViewportPoint(double[] inverseClipFromLocal, NVector2 min, float width, float height, NVector2 mouse, double clipZ, out Vec3d local)
+    {
+        local = new Vec3d();
+        double ndcX = 2.0 * (mouse.X - min.X) / Math.Max(1f, width) - 1.0;
+        double ndcY = 1.0 - 2.0 * (mouse.Y - min.Y) / Math.Max(1f, height);
+        double[] result = Mat4d.MulWithVec4(inverseClipFromLocal, [ndcX, ndcY, clipZ, 1.0]);
+        if (Math.Abs(result[3]) < 0.000001) return false;
+
+        local.X = result[0] / result[3];
+        local.Y = result[1] / result[3];
+        local.Z = result[2] / result[3];
+        return IsFinite((float)local.X) && IsFinite((float)local.Y) && IsFinite((float)local.Z);
+    }
+
+    private static bool TryIntersectLocalAabb(Vec3d origin, Vec3d direction, Vec3f[] corners, out double distance)
+    {
+        distance = 0;
+        if (corners.Length == 0) return false;
+
+        double minX = corners.Min(corner => corner.X);
+        double minY = corners.Min(corner => corner.Y);
+        double minZ = corners.Min(corner => corner.Z);
+        double maxX = corners.Max(corner => corner.X);
+        double maxY = corners.Max(corner => corner.Y);
+        double maxZ = corners.Max(corner => corner.Z);
+
+        double tMin = 0;
+        double tMax = double.MaxValue;
+        if (!UpdateRaySlab(origin.X, direction.X, minX, maxX, ref tMin, ref tMax)) return false;
+        if (!UpdateRaySlab(origin.Y, direction.Y, minY, maxY, ref tMin, ref tMax)) return false;
+        if (!UpdateRaySlab(origin.Z, direction.Z, minZ, maxZ, ref tMin, ref tMax)) return false;
+
+        distance = tMin >= 0 ? tMin : tMax;
+        return distance >= 0 && distance < double.MaxValue;
+    }
+
+    private static bool UpdateRaySlab(double origin, double direction, double min, double max, ref double tMin, ref double tMax)
+    {
+        const double epsilon = 0.000001;
+        if (Math.Abs(direction) < epsilon)
+        {
+            return origin >= min && origin <= max;
+        }
+
+        double t1 = (min - origin) / direction;
+        double t2 = (max - origin) / direction;
+        if (t1 > t2) (t1, t2) = (t2, t1);
+        tMin = Math.Max(tMin, t1);
+        tMax = Math.Min(tMax, t2);
+        return tMin <= tMax;
+    }
+
+    private static float GetProjectedBoundsArea(NVector2[] bounds)
+    {
+        if (bounds.Length == 0) return float.MaxValue;
+
+        float minX = bounds.Min(point => point.X);
+        float minY = bounds.Min(point => point.Y);
+        float maxX = bounds.Max(point => point.X);
+        float maxY = bounds.Max(point => point.Y);
+        return Math.Max(0.001f, (maxX - minX) * (maxY - minY));
     }
 
     private static void DrawVanillaViewportGizmoBounds(ImDrawListPtr drawList, VanillaGizmoProjection projection, uint boundsColor, uint helperColor)
     {
         if (projection.BoundsCorners.Length >= 8)
         {
-            NVector2[] points = projection.BoundsCorners;
-            DrawVanillaViewportLine(drawList, points[0], points[1], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[1], points[2], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[2], points[3], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[3], points[0], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[4], points[5], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[5], points[6], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[6], points[7], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[7], points[4], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[0], points[4], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[1], points[5], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[2], points[6], boundsColor, 2f);
-            DrawVanillaViewportLine(drawList, points[3], points[7], boundsColor, 2f);
+            DrawVanillaViewportBoxBounds(drawList, projection.BoundsCorners, boundsColor, 2f);
         }
 
         if (projection.HasVisualCenter && (projection.VisualCenter - projection.Center).Length() > 12f)
@@ -1399,6 +1575,24 @@ public sealed partial class DebugWindowManager
             DrawVanillaViewportLine(drawList, projection.Center, projection.VisualCenter, helperColor, 2f);
             drawList.AddCircleFilled(projection.VisualCenter, 4f, helperColor, 16);
         }
+    }
+
+    private static void DrawVanillaViewportBoxBounds(ImDrawListPtr drawList, NVector2[] points, uint color, float thickness)
+    {
+        if (points.Length < 8) return;
+
+        DrawVanillaViewportLine(drawList, points[0], points[1], color, thickness);
+        DrawVanillaViewportLine(drawList, points[1], points[2], color, thickness);
+        DrawVanillaViewportLine(drawList, points[2], points[3], color, thickness);
+        DrawVanillaViewportLine(drawList, points[3], points[0], color, thickness);
+        DrawVanillaViewportLine(drawList, points[4], points[5], color, thickness);
+        DrawVanillaViewportLine(drawList, points[5], points[6], color, thickness);
+        DrawVanillaViewportLine(drawList, points[6], points[7], color, thickness);
+        DrawVanillaViewportLine(drawList, points[7], points[4], color, thickness);
+        DrawVanillaViewportLine(drawList, points[0], points[4], color, thickness);
+        DrawVanillaViewportLine(drawList, points[1], points[5], color, thickness);
+        DrawVanillaViewportLine(drawList, points[2], points[6], color, thickness);
+        DrawVanillaViewportLine(drawList, points[3], points[7], color, thickness);
     }
 
     private void DrawVanillaViewportGizmoAxes(ImDrawListPtr drawList, VanillaGizmoProjection projection, TransformGizmoAxis hoveredAxis)
@@ -2816,7 +3010,7 @@ public sealed partial class DebugWindowManager
 
             if (inIkChain && ImGui.IsItemHovered())
             {
-                ImGui.SetTooltip("Selected for the manual IK chain. Ctrl+Click to remove it.");
+                ImGui.SetTooltip("Selected for the manual IK chain. Ctrl+Click here or click the body part in the viewport to remove it.");
             }
         }
 
@@ -3066,6 +3260,20 @@ public sealed partial class DebugWindowManager
                 : "IK Move disabled.";
         }
 
+        ImGui.SameLine();
+        bool viewportPick = _vanillaIkViewportPickMode;
+        if (ImGui.Checkbox("Viewport body-pick IK##vanilla-ik-viewport-pick", ref viewportPick))
+        {
+            _vanillaIkViewportPickMode = viewportPick;
+            _vanillaStatus = _vanillaIkViewportPickMode
+                ? "Viewport body-pick IK enabled. Click model body parts to add or remove chain bones."
+                : "Viewport body-pick IK disabled. Viewport clicks select body parts only.";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("When enabled, left-click body parts in the Orbit preview to add/remove them in the manual IK chain.");
+        }
+
         if (ImGui.Button("Clear IK chain##vanilla-ik-clear"))
         {
             _vanillaIkChainElementNames.Clear();
@@ -3121,6 +3329,10 @@ public sealed partial class DebugWindowManager
         {
             ImGui.TextDisabled("Set a target from the current end or edit target coordinates.");
         }
+
+        ImGui.TextDisabled(_vanillaIkViewportPickMode
+            ? "Orbit viewport: click body parts to build the IK chain. The list Ctrl+Click path still works."
+            : "Orbit viewport: click body parts to select them; Ctrl+Click in the element list still edits the IK chain.");
     }
 
     private void PruneVanillaIkChainElements(string[] allElements)
@@ -3143,7 +3355,7 @@ public sealed partial class DebugWindowManager
 
         if (_vanillaIkChainElementNames.Count == 0)
         {
-            error = "Ctrl+Click elements to build a manual IK chain.";
+            error = "Click body parts in the Orbit viewport, or Ctrl+Click elements in the list, to build a manual IK chain.";
             return false;
         }
 
@@ -3179,7 +3391,7 @@ public sealed partial class DebugWindowManager
 
         if (nodes.Count == 0)
         {
-            error = "Ctrl+Click elements to build a manual IK chain.";
+            error = "Click body parts in the Orbit viewport, or Ctrl+Click elements in the list, to build a manual IK chain.";
             return false;
         }
 
@@ -6822,6 +7034,14 @@ public sealed partial class DebugWindowManager
         NVector2[] BoundsCorners,
         bool HasVisualCenter,
         NVector2 VisualCenter);
+
+    private readonly record struct VanillaViewportElementHit(
+        string ElementName,
+        NVector2[] BoundsCorners,
+        NVector2 Center,
+        double Distance,
+        float ScreenArea,
+        int HierarchyDepth);
 
     private sealed record VanillaPreviewMeshSet(
         MultiTextureMeshRef Orbit,
