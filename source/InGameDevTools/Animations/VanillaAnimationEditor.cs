@@ -74,6 +74,11 @@ public sealed partial class DebugWindowManager
     private int _vanillaNewAnimationFrames = 30;
     private bool _vanillaNewAnimationMetadata = true;
     private readonly Dictionary<string, string> _vanillaSymmetryPairOverrides = new(StringComparer.OrdinalIgnoreCase);
+    private bool _vanillaLiveSymmetryEnabled;
+    private VanillaLiveSymmetryMode _vanillaLiveSymmetryMode = VanillaLiveSymmetryMode.HalfCycle;
+    private VanillaLiveSymmetryDriver _vanillaLiveSymmetryDriver = VanillaLiveSymmetryDriver.SelectedElement;
+    private int _vanillaLiveSymmetryPhaseFrames = -1;
+    private bool _vanillaLiveSymmetryPropagating;
     private bool _vanillaIkFollowMove;
     private string _vanillaIkLastSelectedElementName = "";
     private string _vanillaIkUpperElementName = "";
@@ -1305,7 +1310,7 @@ public sealed partial class DebugWindowManager
             }
             else
             {
-                ApplyVanillaViewportGizmoDrag(row, entry, element, _vanillaViewportGizmoDragMode, _vanillaViewportGizmoDragAxis, _vanillaViewportGizmoDragVector, projection.Scale);
+                ApplyVanillaViewportGizmoDrag(row, entry, keyFrame, element, _vanillaViewportGizmoDragMode, _vanillaViewportGizmoDragAxis, _vanillaViewportGizmoDragVector, projection.Scale);
             }
         }
 
@@ -1472,7 +1477,7 @@ public sealed partial class DebugWindowManager
         };
     }
 
-    private bool ApplyVanillaViewportGizmoDrag(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrameElement element, TransformGizmoMode mode, TransformGizmoAxis axis, NVector2 axisVector, float scale)
+    private bool ApplyVanillaViewportGizmoDrag(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, AnimationKeyFrameElement element, TransformGizmoMode mode, TransformGizmoAxis axis, NVector2 axisVector, float scale)
     {
         NVector2 direction = NormalizeOrDefault(axisVector, new NVector2(1f, 0f));
         NVector2 mouseDelta = ImGui.GetMousePos() - _vanillaViewportGizmoDragMouseStart;
@@ -1504,8 +1509,7 @@ public sealed partial class DebugWindowManager
         }
 
         SetVanillaGizmoAxisValue(element, mode, axis, value);
-        MarkVanillaDirty(entry.Document);
-        RefreshVanillaPreviewAfterEdit(row);
+        ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
         return true;
     }
 
@@ -2273,6 +2277,21 @@ public sealed partial class DebugWindowManager
         BuildVanillaPreviewScene(row, rebuildMesh: false);
     }
 
+    private void EnsureVanillaLiveSymmetryPlayback(VanillaBrowserRow row, VanillaAnimation animation)
+    {
+        if (!_vanillaLiveSymmetryEnabled || _vanillaLiveSymmetryMode != VanillaLiveSymmetryMode.HalfCycle) return;
+        if (_vanillaPreviewScene?.Key != row.Key) return;
+
+        int maxFrame = Math.Max(0, Math.Max(1, animation.QuantityFrames) - 1);
+        if (_vanillaSelection.LoopEndFrame <= _vanillaSelection.LoopStartFrame || _vanillaSelection.LoopStartFrame < 0 || _vanillaSelection.LoopEndFrame > maxFrame)
+        {
+            _vanillaSelection.LoopStartFrame = 0;
+            _vanillaSelection.LoopEndFrame = maxFrame;
+        }
+
+        _vanillaPreviewScene.Play();
+    }
+
     private void DisposeVanillaPreviewScene()
     {
         _vanillaPreviewScene?.Dispose();
@@ -2715,8 +2734,7 @@ public sealed partial class DebugWindowManager
         if (changed)
         {
             CompleteVanillaElementTransformGroups(element);
-            MarkVanillaDirty(document);
-            RefreshVanillaPreviewAfterEdit(row);
+            ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
         }
     }
 
@@ -2733,6 +2751,7 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SeparatorText("Symmetry");
+        DrawVanillaLiveSymmetryControls(row, animation);
         DrawVanillaSymmetryPairSelector(document, selectedElementName, allElements);
 
         bool hasPair = TryResolveVanillaSymmetryPair(document, selectedElementName, allElements, out string pairElementName, out VanillaSymmetrySide sourceSide, out bool manualPair);
@@ -2813,6 +2832,82 @@ public sealed partial class DebugWindowManager
         if (!hasAnimationLength)
         {
             ImGui.TextDisabled("Half-cycle bake needs a positive animation frame count.");
+        }
+    }
+
+    private void DrawVanillaLiveSymmetryControls(VanillaBrowserRow row, VanillaAnimation animation)
+    {
+        bool enabled = _vanillaLiveSymmetryEnabled;
+        if (ImGui.Checkbox("Live symmetry##vanilla-live-symmetry", ref enabled))
+        {
+            _vanillaLiveSymmetryEnabled = enabled;
+            if (_vanillaLiveSymmetryEnabled)
+            {
+                EnsureVanillaLiveSymmetryPlayback(row, animation);
+            }
+
+            _vanillaStatus = _vanillaLiveSymmetryEnabled
+                ? "Live symmetry enabled. Edits to driver elements mirror to their pair."
+                : "Live symmetry disabled.";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Writes mirrored pair keyframes as you edit the selected element.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.RadioButton("In-place##vanilla-live-symmetry-mode", _vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.InPlace))
+        {
+            _vanillaLiveSymmetryMode = VanillaLiveSymmetryMode.InPlace;
+            _vanillaStatus = "Live symmetry mode: in-place mirror.";
+        }
+
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Half-cycle gait##vanilla-live-symmetry-mode", _vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.HalfCycle))
+        {
+            _vanillaLiveSymmetryMode = VanillaLiveSymmetryMode.HalfCycle;
+            EnsureVanillaLiveSymmetryPlayback(row, animation);
+            _vanillaStatus = "Live symmetry mode: half-cycle gait.";
+        }
+
+        string[] driverOptions = ["Selected drives pair", "Left drives right", "Right drives left"];
+        int driverIndex = (int)_vanillaLiveSymmetryDriver;
+        ImGui.SetNextItemWidth(190);
+        if (ImGui.Combo("Driver##vanilla-live-symmetry-driver", ref driverIndex, driverOptions, driverOptions.Length))
+        {
+            _vanillaLiveSymmetryDriver = (VanillaLiveSymmetryDriver)Math.Clamp(driverIndex, 0, driverOptions.Length - 1);
+            _vanillaStatus = $"Live symmetry driver: {driverOptions[(int)_vanillaLiveSymmetryDriver]}.";
+        }
+
+        if (_vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.HalfCycle)
+        {
+            int maxPhase = Math.Max(0, Math.Max(1, animation.QuantityFrames) - 1);
+            int phase = _vanillaLiveSymmetryPhaseFrames >= 0
+                ? Math.Clamp(_vanillaLiveSymmetryPhaseFrames, 0, maxPhase)
+                : Math.Clamp(GetVanillaHalfCycleFrames(animation), 0, maxPhase);
+
+            ImGui.SetNextItemWidth(100);
+            if (ImGui.InputInt("Phase frames##vanilla-live-symmetry-phase", ref phase))
+            {
+                _vanillaLiveSymmetryPhaseFrames = Math.Clamp(phase, 0, maxPhase);
+                _vanillaStatus = $"Live symmetry phase: {_vanillaLiveSymmetryPhaseFrames} frame(s).";
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Half cycle##vanilla-live-symmetry-phase-reset"))
+            {
+                _vanillaLiveSymmetryPhaseFrames = -1;
+                _vanillaStatus = $"Live symmetry phase: half cycle ({GetVanillaLiveSymmetryPhaseFrames(animation)} frame(s)).";
+            }
+
+            int activePhase = GetVanillaLiveSymmetryPhaseFrames(animation);
+            ImGui.TextDisabled(_vanillaLiveSymmetryPhaseFrames < 0
+                ? $"Using half-cycle phase: {activePhase} frame(s)."
+                : $"Using custom phase: {activePhase} frame(s).");
+            if (_vanillaLiveSymmetryEnabled)
+            {
+                ImGui.TextDisabled("Half-cycle mode writes the pair at the shifted frame; playback shows the gait.");
+            }
         }
     }
 
@@ -3004,8 +3099,7 @@ public sealed partial class DebugWindowManager
         }
 
         ApplyVanillaIkSolvedElements(keyFrame, chain, solvedUpper, solvedLower);
-        MarkVanillaDirty(entry.Document);
-        RefreshVanillaPreviewAfterEdit(row);
+        ApplyVanillaElementEdit(row, entry, keyFrame, chain.UpperElementName, chain.LowerElementName);
         _vanillaStatus = $"Solved IK for {chain.UpperElementName} / {chain.LowerElementName} at frame {keyFrame.Frame}.";
     }
 
@@ -3042,6 +3136,129 @@ public sealed partial class DebugWindowManager
 
         MarkVanillaDirty(document);
         RefreshVanillaPreviewAfterEdit(row);
+    }
+
+    private VanillaSymmetryResult ApplyVanillaElementEdit(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame sourceKeyFrame, params string[] changedElementNames)
+    {
+        VanillaSymmetryResult symmetry = PropagateVanillaLiveSymmetry(entry.Document, entry.Animation, sourceKeyFrame, changedElementNames);
+        PreserveVanillaSelectedKeyFrame(entry.Animation, sourceKeyFrame);
+        MarkVanillaDirty(entry.Document);
+        RefreshVanillaPreviewAfterEdit(row);
+        EnsureVanillaLiveSymmetryPlayback(row, entry.Animation);
+
+        if (symmetry.Applied)
+        {
+            _vanillaStatus = symmetry.Message;
+        }
+
+        return symmetry;
+    }
+
+    private void PreserveVanillaSelectedKeyFrame(VanillaAnimation animation, AnimationKeyFrame sourceKeyFrame)
+    {
+        if (animation.KeyFrames == null || animation.KeyFrames.Length == 0) return;
+
+        int previousIndex = _vanillaSelection.KeyFrameIndex;
+        int currentIndex = Array.FindIndex(animation.KeyFrames, keyFrame => ReferenceEquals(keyFrame, sourceKeyFrame));
+        if (currentIndex < 0) return;
+
+        _vanillaSelection.KeyFrameIndex = currentIndex;
+        if (_vanillaViewportGizmoDragAxis != TransformGizmoAxis.None && _vanillaViewportGizmoDragKeyFrameIndex == previousIndex)
+        {
+            _vanillaViewportGizmoDragKeyFrameIndex = currentIndex;
+        }
+
+        if (_vanillaIkDragActive && _vanillaIkDragKeyFrameIndex == previousIndex)
+        {
+            _vanillaIkDragKeyFrameIndex = currentIndex;
+        }
+    }
+
+    private VanillaSymmetryResult PropagateVanillaLiveSymmetry(VanillaAnimationDocument document, VanillaAnimation animation, AnimationKeyFrame sourceKeyFrame, IEnumerable<string> changedElementNames)
+    {
+        if (!_vanillaLiveSymmetryEnabled || _vanillaLiveSymmetryPropagating)
+        {
+            return new(false, 0, 0, 0, "");
+        }
+
+        if (sourceKeyFrame.Elements == null || sourceKeyFrame.Elements.Count == 0)
+        {
+            return new(false, 0, 0, 0, "");
+        }
+
+        string[] allElements = BuildVanillaSymmetryElementUniverse(document, animation, sourceKeyFrame);
+        if (allElements.Length <= 1)
+        {
+            return new(false, 0, 0, 0, "");
+        }
+
+        var sourceSnapshots = new List<(string Name, AnimationKeyFrameElement Element)>();
+        foreach (string sourceName in changedElementNames.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (sourceKeyFrame.Elements.TryGetValue(sourceName, out AnimationKeyFrameElement? sourceElement) && sourceElement != null)
+            {
+                sourceSnapshots.Add((sourceName, CloneElement(sourceElement)));
+            }
+        }
+
+        if (sourceSnapshots.Count == 0)
+        {
+            return new(false, 0, 0, 0, "");
+        }
+
+        int phaseFrames = GetVanillaLiveSymmetryPhaseFrames(animation);
+        int targetFrame = _vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.InPlace
+            ? sourceKeyFrame.Frame
+            : GetVanillaPhaseTargetFrame(animation, sourceKeyFrame.Frame, phaseFrames);
+        int written = 0;
+        int created = 0;
+        int overwritten = 0;
+        int skipped = 0;
+
+        _vanillaLiveSymmetryPropagating = true;
+        try
+        {
+            foreach ((string sourceName, AnimationKeyFrameElement sourceElement) in sourceSnapshots)
+            {
+                if (!TryResolveVanillaSymmetryPair(document, sourceName, allElements, out string pairName, out VanillaSymmetrySide sourceSide, out _) ||
+                    string.Equals(sourceName, pairName, StringComparison.OrdinalIgnoreCase) ||
+                    !ShouldVanillaLiveSymmetryPropagateFrom(sourceSide))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                AnimationKeyFrame targetKeyFrame = GetOrCreateVanillaTargetKeyFrame(animation, targetFrame, out bool createdKeyFrame);
+                if (createdKeyFrame) created++;
+                targetKeyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
+                if (targetKeyFrame.Elements.ContainsKey(pairName)) overwritten++;
+                targetKeyFrame.Elements[pairName] = MirrorVanillaElement(sourceElement);
+                written++;
+            }
+        }
+        finally
+        {
+            _vanillaLiveSymmetryPropagating = false;
+        }
+
+        if (written > 0 && animation.KeyFrames != null)
+        {
+            animation.KeyFrames = animation.KeyFrames.OrderBy(keyFrame => keyFrame.Frame).ToArray();
+        }
+
+        return written == 0
+            ? new(false, 0, 0, 0, skipped > 0 ? "Live symmetry skipped all changed elements." : "")
+            : new(true, written, created, overwritten, $"Live symmetry wrote {written} mirrored pair(s) at frame {targetFrame}; created {created} keyframe(s), overwrote {overwritten} element(s).");
+    }
+
+    private bool ShouldVanillaLiveSymmetryPropagateFrom(VanillaSymmetrySide sourceSide)
+    {
+        return _vanillaLiveSymmetryDriver switch
+        {
+            VanillaLiveSymmetryDriver.LeftDrivesRight => sourceSide == VanillaSymmetrySide.Left,
+            VanillaLiveSymmetryDriver.RightDrivesLeft => sourceSide == VanillaSymmetrySide.Right,
+            _ => true
+        };
     }
 
     private static VanillaSymmetryResult MirrorVanillaElementInKeyFrame(AnimationKeyFrame keyFrame, string sourceElementName, string targetElementName, AnimationKeyFrameElement sourceElement)
@@ -3225,8 +3442,7 @@ public sealed partial class DebugWindowManager
         }
 
         ApplyVanillaIkSolvedElements(keyFrame, chain, solvedUpper, solvedLower);
-        MarkVanillaDirty(entry.Document);
-        RefreshVanillaPreviewAfterEdit(row);
+        ApplyVanillaElementEdit(row, entry, keyFrame, chain.UpperElementName, chain.LowerElementName);
         _vanillaStatus = $"IK Move solved {chain.UpperElementName} / {chain.LowerElementName}.";
         return true;
     }
@@ -4222,11 +4438,30 @@ public sealed partial class DebugWindowManager
         return Math.Max(1, (int)Math.Round(animation.QuantityFrames / 2.0, MidpointRounding.AwayFromZero));
     }
 
+    private int GetVanillaLiveSymmetryPhaseFrames(VanillaAnimation animation)
+    {
+        if (_vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.InPlace)
+        {
+            return 0;
+        }
+
+        int maxPhase = Math.Max(0, Math.Max(1, animation.QuantityFrames) - 1);
+        return _vanillaLiveSymmetryPhaseFrames >= 0
+            ? Math.Clamp(_vanillaLiveSymmetryPhaseFrames, 0, maxPhase)
+            : Math.Clamp(GetVanillaHalfCycleFrames(animation), 0, maxPhase);
+    }
+
     private static int GetVanillaHalfCycleTargetFrame(VanillaAnimation animation, int sourceFrame, int halfCycleFrames)
+    {
+        return GetVanillaPhaseTargetFrame(animation, sourceFrame, halfCycleFrames);
+    }
+
+    private static int GetVanillaPhaseTargetFrame(VanillaAnimation animation, int sourceFrame, int phaseFrames)
     {
         int frameCount = Math.Max(1, animation.QuantityFrames);
         int normalizedSourceFrame = ((sourceFrame % frameCount) + frameCount) % frameCount;
-        return (normalizedSourceFrame + halfCycleFrames) % frameCount;
+        int normalizedPhaseFrames = ((phaseFrames % frameCount) + frameCount) % frameCount;
+        return (normalizedSourceFrame + normalizedPhaseFrames) % frameCount;
     }
 
     private static AnimationKeyFrame GetOrCreateVanillaTargetKeyFrame(VanillaAnimation animation, int frameNumber, out bool created)
@@ -4516,6 +4751,19 @@ public sealed partial class DebugWindowManager
         Unknown,
         Left,
         Right
+    }
+
+    private enum VanillaLiveSymmetryMode
+    {
+        InPlace,
+        HalfCycle
+    }
+
+    private enum VanillaLiveSymmetryDriver
+    {
+        SelectedElement,
+        LeftDrivesRight,
+        RightDrivesLeft
     }
 
     private readonly record struct VanillaSymmetryPairCandidate(string ElementName, VanillaSymmetrySide SourceSide);
