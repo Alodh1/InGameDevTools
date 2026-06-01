@@ -10,7 +10,7 @@ namespace InGameDevTools.Utils;
 
 internal sealed class DevToolsPreview3DRenderer : IDisposable
 {
-    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad-v4";
+    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad-v5";
 
     private readonly ICoreClientAPI _api;
     private FrameBufferRef? _frameBuffer;
@@ -434,17 +434,20 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
 
     private sealed class EngineParticlePreview : IDisposable
     {
+        private const float AsyncParticleSpawnIntervalSeconds = 0.033f;
+        private const float AsyncParticlePhysicsStepSeconds = 0.0625f;
         private const int QuadPoolSize = 4096;
         private const int CubePoolSize = 2048;
         private readonly ICoreClientAPI _api;
         private bool _primed;
         private bool _updating;
+        private float _updateAccumulator;
 
         public EngineParticlePreview(ICoreClientAPI api, ClientMain client)
         {
             _api = api;
-            QuadPool = new ParticlePoolQuads(QuadPoolSize, client, offthread: true);
-            CubePool = new ParticlePoolCubes(CubePoolSize, client, offthread: true);
+            QuadPool = new ParticlePoolQuads(QuadPoolSize, client, offthread: false);
+            CubePool = new ParticlePoolCubes(CubePoolSize, client, offthread: false);
         }
 
         public IParticlePool QuadPool { get; }
@@ -475,7 +478,7 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
 
             if (spawned > 0 && !_updating)
             {
-                Update(cameraPosition, 0f);
+                Upload(cameraPosition);
             }
 
             return spawned;
@@ -483,24 +486,45 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
 
         public void Update(Vector3 cameraPosition, float deltaSeconds)
         {
+            float clampedDelta = Math.Clamp(deltaSeconds, 0f, 0.1f);
+            _updateAccumulator = Math.Min(1f, _updateAccumulator + clampedDelta);
+            int steps = 0;
+            while (_updateAccumulator >= AsyncParticleSpawnIntervalSeconds && steps < 8)
+            {
+                Tick(cameraPosition, AsyncParticlePhysicsStepSeconds);
+                _updateAccumulator -= AsyncParticleSpawnIntervalSeconds;
+                steps++;
+            }
+
+            if (steps == 0)
+            {
+                Upload(cameraPosition);
+            }
+
+            _primed = true;
+        }
+
+        private void Upload(Vector3 cameraPosition)
+        {
+            Tick(cameraPosition, 0f);
+        }
+
+        private void Tick(Vector3 cameraPosition, float deltaSeconds)
+        {
             Vec3d cameraPos = new(cameraPosition.X, cameraPosition.Y, cameraPosition.Z);
             _updating = true;
             try
             {
                 EngineParticleSpawnRedirect.RunWithPreview(this, () =>
                 {
-                    QuadPool.OnNewFrameOffThread(deltaSeconds, cameraPos);
-                    CubePool.OnNewFrameOffThread(deltaSeconds, cameraPos);
-                    QuadPool.OnNewFrame(deltaSeconds, cameraPos);
                     CubePool.OnNewFrame(deltaSeconds, cameraPos);
+                    QuadPool.OnNewFrame(deltaSeconds, cameraPos);
                 });
             }
             finally
             {
                 _updating = false;
             }
-
-            _primed = true;
         }
 
         private void Prime(Vector3 cameraPosition)
