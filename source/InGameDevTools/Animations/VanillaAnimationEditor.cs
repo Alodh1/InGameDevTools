@@ -1701,7 +1701,7 @@ public sealed partial class DebugWindowManager
         hit = default;
         if (pose.ForElement == null || string.IsNullOrWhiteSpace(pose.ForElement.Name)) return false;
 
-        Matrixf elementModel = BuildVanillaElementModelMatrix(camera.Model, pose);
+        Matrixf elementModel = AnimationElementPicking.BuildPoseModelMatrix(camera.Model, pose);
         if (!TryIntersectVanillaViewportElementBox(camera, elementModel, pose.ForElement, min, width, height, mouse, out double distance)) return false;
 
         NVector2[] bounds = BuildVanillaElementBounds3D(camera, elementModel, pose.ForElement, min, width, height, out bool hasVisualCenter, out NVector2 visualCenter);
@@ -1719,85 +1719,7 @@ public sealed partial class DebugWindowManager
 
     private static bool TryIntersectVanillaViewportElementBox(VanillaPreviewCameraState camera, Matrixf elementModel, ShapeElement element, NVector2 min, float width, float height, NVector2 mouse, out double distance)
     {
-        distance = 0;
-        Matrixf clipFromLocal = new();
-        clipFromLocal.Set(elementModel.Values);
-        clipFromLocal.ReverseMul(camera.ProjectionView.Values);
-
-        double[] inverseClipFromLocal = Mat4d.Create();
-        if (Mat4d.Invert(inverseClipFromLocal, ToDoubleMatrix(clipFromLocal.Values)) == null) return false;
-        if (!UnprojectVanillaViewportPoint(inverseClipFromLocal, min, width, height, mouse, -1.0, out Vec3d near)) return false;
-        if (!UnprojectVanillaViewportPoint(inverseClipFromLocal, min, width, height, mouse, 1.0, out Vec3d far)) return false;
-
-        Vec3d direction = Sub(far, near);
-        if (direction.LengthSq() < 0.000001) return false;
-        direction.Normalize();
-
-        Vec3f[] corners = GetElementLocalBoxCorners(element);
-        return TryIntersectLocalAabb(near, direction, corners, out distance);
-    }
-
-    private static double[] ToDoubleMatrix(float[] values)
-    {
-        double[] result = new double[values.Length];
-        for (int index = 0; index < values.Length; index++)
-        {
-            result[index] = values[index];
-        }
-
-        return result;
-    }
-
-    private static bool UnprojectVanillaViewportPoint(double[] inverseClipFromLocal, NVector2 min, float width, float height, NVector2 mouse, double clipZ, out Vec3d local)
-    {
-        local = new Vec3d();
-        double ndcX = 2.0 * (mouse.X - min.X) / Math.Max(1f, width) - 1.0;
-        double ndcY = 1.0 - 2.0 * (mouse.Y - min.Y) / Math.Max(1f, height);
-        double[] result = Mat4d.MulWithVec4(inverseClipFromLocal, [ndcX, ndcY, clipZ, 1.0]);
-        if (Math.Abs(result[3]) < 0.000001) return false;
-
-        local.X = result[0] / result[3];
-        local.Y = result[1] / result[3];
-        local.Z = result[2] / result[3];
-        return IsFinite((float)local.X) && IsFinite((float)local.Y) && IsFinite((float)local.Z);
-    }
-
-    private static bool TryIntersectLocalAabb(Vec3d origin, Vec3d direction, Vec3f[] corners, out double distance)
-    {
-        distance = 0;
-        if (corners.Length == 0) return false;
-
-        double minX = corners.Min(corner => corner.X);
-        double minY = corners.Min(corner => corner.Y);
-        double minZ = corners.Min(corner => corner.Z);
-        double maxX = corners.Max(corner => corner.X);
-        double maxY = corners.Max(corner => corner.Y);
-        double maxZ = corners.Max(corner => corner.Z);
-
-        double tMin = 0;
-        double tMax = double.MaxValue;
-        if (!UpdateRaySlab(origin.X, direction.X, minX, maxX, ref tMin, ref tMax)) return false;
-        if (!UpdateRaySlab(origin.Y, direction.Y, minY, maxY, ref tMin, ref tMax)) return false;
-        if (!UpdateRaySlab(origin.Z, direction.Z, minZ, maxZ, ref tMin, ref tMax)) return false;
-
-        distance = tMin >= 0 ? tMin : tMax;
-        return distance >= 0 && distance < double.MaxValue;
-    }
-
-    private static bool UpdateRaySlab(double origin, double direction, double min, double max, ref double tMin, ref double tMax)
-    {
-        const double epsilon = 0.000001;
-        if (Math.Abs(direction) < epsilon)
-        {
-            return origin >= min && origin <= max;
-        }
-
-        double t1 = (min - origin) / direction;
-        double t2 = (max - origin) / direction;
-        if (t1 > t2) (t1, t2) = (t2, t1);
-        tMin = Math.Max(tMin, t1);
-        tMax = Math.Min(tMax, t2);
-        return tMin <= tMax;
+        return AnimationElementPicking.TryIntersectScreenLocalBox(camera.ProjectionView, elementModel, element, min, width, height, mouse, out distance);
     }
 
     private static float GetProjectedBoundsArea(NVector2[] bounds)

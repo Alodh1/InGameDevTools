@@ -1,4 +1,3 @@
-using ImGuiNET;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.MathTools;
@@ -135,17 +134,27 @@ internal sealed class TransformGizmoRenderer : IRenderer
         if (args.Handled || args.Button != EnumMouseButton.Left) return;
         if (_debugManager.PointInsideDebugUi()) return;
 
-        if (IsShiftDown() && TryGetMouseRay(args.X, args.Y, out Vec3d rayOrigin, out Vec3d rayDirection) && _debugManager.TryPickRigPart(rayOrigin, rayDirection))
+        bool hasRay = TryGetMouseRay(args.X, args.Y, out Vec3d rayOrigin, out Vec3d rayDirection);
+        if (!ShouldDraw || !TryBuildState(out GizmoState state))
         {
-            args.Handled = true;
+            if (hasRay && _debugManager.TryPickRigPart(rayOrigin, rayDirection))
+            {
+                args.Handled = true;
+            }
+
             return;
         }
 
-        if (!ShouldDraw) return;
-        if (!TryBuildState(out GizmoState state)) return;
-
         TransformGizmoAxis picked = PickAxis(state, args.X, args.Y);
-        if (picked == TransformGizmoAxis.None) return;
+        if (picked == TransformGizmoAxis.None)
+        {
+            if (hasRay && _debugManager.TryPickRigPart(rayOrigin, rayDirection))
+            {
+                args.Handled = true;
+            }
+
+            return;
+        }
 
         _draggedAxis = picked;
         _hoveredAxis = picked;
@@ -1000,7 +1009,6 @@ internal sealed class TransformGizmoRenderer : IRenderer
     private static Vec3d Add(Vec3d left, Vec3d right) => new(left.X + right.X, left.Y + right.Y, left.Z + right.Z);
     private static Vec3d Sub(Vec3d left, Vec3d right) => new(left.X - right.X, left.Y - right.Y, left.Z - right.Z);
     private static Vec3d Scale(Vec3d value, double scale) => new(value.X * scale, value.Y * scale, value.Z * scale);
-    private static bool IsShiftDown() => ImGui.IsKeyDown(ImGuiKey.LeftShift) || ImGui.IsKeyDown(ImGuiKey.RightShift) || ImGui.GetIO().KeyShift;
 
     public void Dispose()
     {

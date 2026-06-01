@@ -141,7 +141,7 @@ public sealed partial class DebugWindowManager
         }
         ImGui.SameLine();
         ImGui.Checkbox("Two-bone IK on Move##rig", ref _rigIkFollowParents);
-        ImGui.TextDisabled("Shift-click a player body part to select it.");
+        ImGui.TextDisabled("Click a player body part in the world to select it.");
         if (_rigIkFollowParents)
         {
             ImGui.TextDisabled("Drag a hand/foot; shoulder/hip rotates and elbow/knee bends. Rotate-mode drags stay FK.");
@@ -1139,23 +1139,28 @@ public sealed partial class DebugWindowManager
     internal bool TryPickRigPart(Vec3d rayOrigin, Vec3d rayDirection)
     {
         if (!_rigPoseEditorEnabled || !_showAnimationEditor) return false;
+        EntityPlayer playerEntity = _api.World.Player.Entity;
+        if (playerEntity.AnimManager?.Animator is not AnimatorBase animator || animator.RootPoses == null) return false;
 
-        int bestIndex = -1;
-        double bestDistance = double.PositiveInfinity;
-
-        for (int index = 0; index < RigEditableParts.Length; index++)
+        Matrixf modelMatrix = new();
+        BuildPlayerModelMatrix(modelMatrix, playerEntity);
+        if (!AnimationElementPicking.TryPickWorldRay(
+                animator.RootPoses,
+                modelMatrix,
+                playerEntity.CameraPos,
+                rayOrigin,
+                rayDirection,
+                IsRigEditablePose,
+                out AnimationElementPickHit hit))
         {
-            if (!TryGetRigPartWorldBox(RigEditableParts[index], out Vec3d[] corners)) continue;
-            if (!TryIntersectRayBox(rayOrigin, rayDirection, corners, out double distance)) continue;
-            if (distance >= bestDistance) continue;
-
-            bestDistance = distance;
-            bestIndex = index;
+            return false;
         }
 
-        if (bestIndex < 0) return false;
+        if (!TryResolveRigEditablePart(hit.Pose, out EnumAnimatedElement part)) return false;
+        int partIndex = Array.IndexOf(RigEditableParts, part);
+        if (partIndex < 0) return false;
 
-        _rigPartIndex = bestIndex;
+        _rigPartIndex = partIndex;
         return true;
     }
 
@@ -1165,30 +1170,29 @@ public sealed partial class DebugWindowManager
         if (!TryGetRigPartPose(selectedPart, out EntityPlayer playerEntity, out ElementPose? pose)) return false;
         if (pose?.ForElement == null) return false;
 
-        return TryGetPoseWorldBox(playerEntity, pose, out corners);
+        Matrixf modelMatrix = new();
+        BuildPlayerModelMatrix(modelMatrix, playerEntity);
+        return AnimationElementPicking.TryGetPoseWorldBox(modelMatrix, playerEntity.CameraPos, pose, out corners);
     }
 
-    private static bool TryGetPoseWorldBox(EntityPlayer playerEntity, ElementPose pose, out Vec3d[] corners)
+    private static bool IsRigEditablePose(ElementPose pose)
     {
-        corners = Array.Empty<Vec3d>();
-        if (pose.ForElement == null) return false;
+        return TryResolveRigEditablePart(pose, out _);
+    }
 
-        Matrixf matrix = new();
-        BuildPlayerModelMatrix(matrix, playerEntity);
-        matrix.Mul(pose.AnimModelMatrix);
-
-        Vec3f[] localCorners = GetElementLocalBoxCorners(pose.ForElement);
-        corners = new Vec3d[localCorners.Length];
-        Vec3d camera = playerEntity.CameraPos;
-
-        for (int index = 0; index < localCorners.Length; index++)
+    private static bool TryResolveRigEditablePart(ElementPose pose, out EnumAnimatedElement part)
+    {
+        part = EnumAnimatedElement.Unknown;
+        if (pose is ExtendedElementPose extendedPose)
         {
-            Vec3f local = localCorners[index];
-            Vec4f relative = matrix.TransformVector(new Vec4f(local.X, local.Y, local.Z, 1f));
-            corners[index] = new Vec3d(camera.X + relative.X, camera.Y + relative.Y, camera.Z + relative.Z);
+            part = extendedPose.ElementNameEnum;
+        }
+        else if (!Enum.TryParse(pose.ForElement?.Name, out part))
+        {
+            return false;
         }
 
-        return true;
+        return RigEditableParts.Contains(part);
     }
 
     private bool TryGetRigPartPose(EnumAnimatedElement selectedPart, out EntityPlayer playerEntity, out ElementPose? pose)
@@ -1262,41 +1266,7 @@ public sealed partial class DebugWindowManager
 
     private static Vec3f[] GetElementLocalBoxCorners(ShapeElement element)
     {
-        Vec3f center = GetElementLocalCenter(element);
-        float halfX = 0.12f;
-        float halfY = 0.12f;
-        float halfZ = 0.12f;
-
-        if (element.From != null && element.To != null && element.From.Length >= 3 && element.To.Length >= 3)
-        {
-            halfX = Math.Max(0.08f, (float)Math.Abs(element.To[0] - element.From[0]) / 32f);
-            halfY = Math.Max(0.08f, (float)Math.Abs(element.To[1] - element.From[1]) / 32f);
-            halfZ = Math.Max(0.08f, (float)Math.Abs(element.To[2] - element.From[2]) / 32f);
-        }
-
-        const float padding = 0.035f;
-        halfX += padding;
-        halfY += padding;
-        halfZ += padding;
-
-        float minX = center.X - halfX;
-        float minY = center.Y - halfY;
-        float minZ = center.Z - halfZ;
-        float maxX = center.X + halfX;
-        float maxY = center.Y + halfY;
-        float maxZ = center.Z + halfZ;
-
-        return
-        [
-            new Vec3f(minX, minY, minZ),
-            new Vec3f(maxX, minY, minZ),
-            new Vec3f(maxX, maxY, minZ),
-            new Vec3f(minX, maxY, minZ),
-            new Vec3f(minX, minY, maxZ),
-            new Vec3f(maxX, minY, maxZ),
-            new Vec3f(maxX, maxY, maxZ),
-            new Vec3f(minX, maxY, maxZ)
-        ];
+        return AnimationElementPicking.GetElementLocalBoxCorners(element);
     }
 
     private bool TryGetRigPartWorldInfo(EnumAnimatedElement selectedPart, out RigPoseWorldInfo info)
@@ -1371,57 +1341,6 @@ public sealed partial class DebugWindowManager
         double z = Math.Abs(element.To[2] - element.From[2]) / 16.0;
         double length = Math.Max(x, Math.Max(y, z));
         return length > 0.0001 ? length : 0;
-    }
-
-    private static bool TryIntersectRayBox(Vec3d origin, Vec3d direction, Vec3d[] corners, out double distance)
-    {
-        distance = double.PositiveInfinity;
-        if (corners.Length < 8) return false;
-
-        ReadOnlySpan<(int A, int B, int C)> triangles =
-        [
-            (0, 1, 2), (0, 2, 3),
-            (4, 6, 5), (4, 7, 6),
-            (0, 4, 5), (0, 5, 1),
-            (1, 5, 6), (1, 6, 2),
-            (2, 6, 7), (2, 7, 3),
-            (3, 7, 4), (3, 4, 0)
-        ];
-
-        bool hit = false;
-        foreach ((int a, int b, int c) in triangles)
-        {
-            if (!TryIntersectRayTriangle(origin, direction, corners[a], corners[b], corners[c], out double triangleDistance)) continue;
-            if (triangleDistance >= distance) continue;
-
-            distance = triangleDistance;
-            hit = true;
-        }
-
-        return hit;
-    }
-
-    private static bool TryIntersectRayTriangle(Vec3d origin, Vec3d direction, Vec3d a, Vec3d b, Vec3d c, out double distance)
-    {
-        distance = 0;
-        const double epsilon = 0.0000001;
-        Vec3d edge1 = Sub(b, a);
-        Vec3d edge2 = Sub(c, a);
-        Vec3d h = direction.Cross(edge2);
-        double det = Dot(edge1, h);
-        if (det > -epsilon && det < epsilon) return false;
-
-        double invDet = 1.0 / det;
-        Vec3d s = Sub(origin, a);
-        double u = invDet * Dot(s, h);
-        if (u < 0 || u > 1) return false;
-
-        Vec3d q = s.Cross(edge1);
-        double v = invDet * Dot(direction, q);
-        if (v < 0 || u + v > 1) return false;
-
-        distance = invDet * Dot(edge2, q);
-        return distance >= 0;
     }
 
     private static double Distance(Vec3d left, Vec3d right) => Sub(left, right).Length();
