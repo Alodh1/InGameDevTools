@@ -31,6 +31,9 @@ public sealed partial class DebugWindowManager
     private bool _vanillaShowDirtyOnly;
     private bool _vanillaOverwriteExport;
     private string _vanillaEntityFilter = "";
+    private VanillaEntitySelectorMode _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Grouped;
+    private bool _vanillaShowHiddenEntities;
+    private bool _vanillaSingleVariantEdit;
     private string _vanillaStatus = "";
     private string _vanillaLastEditedDocumentKey = "";
     private int _vanillaTimelineDragKeyframe = -1;
@@ -592,15 +595,57 @@ public sealed partial class DebugWindowManager
     private void DrawVanillaEntitySelector()
     {
         ImGui.SeparatorText("Entity");
+
+        bool grouped = _vanillaEntitySelectorMode == VanillaEntitySelectorMode.Grouped;
+        if (ImGui.RadioButton("Grouped##vanilla-entity-mode", grouped))
+        {
+            CommitPendingVanillaHistory();
+            _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Grouped;
+            _vanillaSingleVariantEdit = false;
+            _vanillaIndex.ClearSelection();
+            ResetVanillaEntitySelectionState();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Collapse variants using source assets and animation compatibility.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Exact##vanilla-entity-mode", !grouped))
+        {
+            CommitPendingVanillaHistory();
+            _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Exact;
+            _vanillaSingleVariantEdit = true;
+            _vanillaIndex.ClearSelection();
+            ResetVanillaEntitySelectionState();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Show one row per loaded runtime entity type.");
+        }
+
+        bool showHidden = _vanillaShowHiddenEntities;
+        if (ImGui.Checkbox("Show hidden/helper##vanilla-show-hidden-entities", ref showHidden))
+        {
+            CommitPendingVanillaHistory();
+            _vanillaShowHiddenEntities = showHidden;
+            _vanillaIndex.ClearSelection();
+            ResetVanillaEntitySelectionState();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Include entities marked by their source metadata as hidden, helper, debug, test, internal, technical, or bot-like.");
+        }
+
         ImGui.InputTextWithHint("##vanilla-entity-filter", "filter entities", ref _vanillaEntityFilter, 240);
 
-        IReadOnlyList<VanillaEntityOption> options = _vanillaIndex.EntityOptions;
+        IReadOnlyList<VanillaEntityOption> options = _vanillaIndex.GetEntityOptions(_vanillaEntitySelectorMode, _vanillaShowHiddenEntities);
         string entityFilter = _vanillaEntityFilter.Trim();
         List<int> visible = [];
         for (int index = 0; index < options.Count; index++)
         {
             if (!ImGuiLayoutHelper.MatchesDomain(_vanillaDomainFilter, options[index].Domain)) continue;
-            if (string.IsNullOrWhiteSpace(entityFilter) || options[index].Label.Contains(entityFilter, StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrWhiteSpace(entityFilter) || options[index].SearchText.Contains(entityFilter, StringComparison.OrdinalIgnoreCase))
             {
                 visible.Add(index);
             }
@@ -611,17 +656,12 @@ public sealed partial class DebugWindowManager
         {
             foreach (int index in visible)
             {
-                bool selected = index == _vanillaIndex.SelectedEntityIndex;
+                bool selected = _vanillaIndex.IsSelectedEntityOption(options[index]);
                 if (ImGui.Selectable($"{options[index].Label}##vanilla-entity-{index}", selected))
                 {
                     CommitPendingVanillaHistory();
-                    _vanillaIndex.SelectEntity(_api, index);
-                    InvalidateVanillaBrowserRows();
-                    _vanillaHistory.ClearAll();
-                    _vanillaLastEditedDocumentKey = "";
-                    _vanillaSelection.Clear();
-                    DisposeVanillaPreviewScene();
-                    _vanillaStatus = "Preview not loaded. Select an animation and press Load preview when ready.";
+                    _vanillaIndex.SelectEntity(_api, options, index, 0, ShouldVanillaUseGroupEdit(options[index]));
+                    ResetVanillaEntitySelectionState();
                 }
 
                 if (selected)
@@ -631,29 +671,78 @@ public sealed partial class DebugWindowManager
 
                 if (ImGui.IsItemHovered())
                 {
-                    ImGui.SetTooltip(options[index].FullLabel);
+                    ImGui.SetTooltip(options[index].Tooltip);
                 }
             }
 
             ImGui.EndCombo();
         }
 
+        if (_vanillaIndex.SelectedEntityOption is { } selectedOption && selectedOption.Members.Count > 1)
+        {
+            bool singleVariant = _vanillaSingleVariantEdit || _vanillaEntitySelectorMode == VanillaEntitySelectorMode.Exact;
+            bool canGroupEdit = _vanillaEntitySelectorMode == VanillaEntitySelectorMode.Grouped;
+            if (!canGroupEdit) ImGui.BeginDisabled();
+            if (ImGui.RadioButton("Group edit##vanilla-edit-scope", !singleVariant))
+            {
+                CommitPendingVanillaHistory();
+                _vanillaSingleVariantEdit = false;
+                _vanillaIndex.ReloadSelectedEntity(_api, groupEdit: true);
+                ResetVanillaEntitySelectionState();
+            }
+            if (!canGroupEdit) ImGui.EndDisabled();
+
+            ImGui.SameLine();
+            if (ImGui.RadioButton("Single variant##vanilla-edit-scope", singleVariant))
+            {
+                CommitPendingVanillaHistory();
+                _vanillaSingleVariantEdit = true;
+                _vanillaIndex.ReloadSelectedEntity(_api, groupEdit: false);
+                ResetVanillaEntitySelectionState();
+            }
+
+            string[] memberLabels = selectedOption.Members.Select(member => member.Label).ToArray();
+            int memberIndex = Math.Clamp(_vanillaIndex.SelectedMemberIndex, 0, Math.Max(0, memberLabels.Length - 1));
+            if (memberLabels.Length > 0 && ImGui.Combo("Preview variant##vanilla-entity-member", ref memberIndex, memberLabels, memberLabels.Length))
+            {
+                CommitPendingVanillaHistory();
+                _vanillaIndex.SelectEntity(_api, selectedOption, memberIndex, ShouldVanillaUseGroupEdit(selectedOption));
+                ResetVanillaEntitySelectionState();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("The viewport uses this variant. Group edit still applies compatible edits to the whole group.");
+            }
+        }
+
         if (_vanillaIndex.HasSelectedEntity && ImGui.Button("Reload selected entity##vanilla", new NVector2(-1, 0)))
         {
             CommitPendingVanillaHistory();
-            _vanillaIndex.ReloadSelectedEntity(_api);
-            InvalidateVanillaBrowserRows();
-            _vanillaHistory.ClearAll();
-            _vanillaLastEditedDocumentKey = "";
-            _vanillaSelection.Clear();
-            DisposeVanillaPreviewScene();
-            _vanillaStatus = "Preview not loaded. Select an animation and press Load preview when ready.";
+            _vanillaIndex.ReloadSelectedEntity(_api, ShouldVanillaUseGroupEdit(_vanillaIndex.SelectedEntityOption));
+            ResetVanillaEntitySelectionState();
         }
+    }
+
+    private bool ShouldVanillaUseGroupEdit(VanillaEntityOption? option)
+    {
+        return _vanillaEntitySelectorMode == VanillaEntitySelectorMode.Grouped &&
+            !_vanillaSingleVariantEdit &&
+            option?.Members.Count > 1;
+    }
+
+    private void ResetVanillaEntitySelectionState()
+    {
+        InvalidateVanillaBrowserRows();
+        _vanillaHistory.ClearAll();
+        _vanillaLastEditedDocumentKey = "";
+        _vanillaSelection.Clear();
+        DisposeVanillaPreviewScene();
+        _vanillaStatus = "Preview not loaded. Select an animation and press Load preview when ready.";
     }
 
     private IEnumerable<string> GetVanillaDomains()
     {
-        return _vanillaIndex.EntityOptions.Select(option => option.Domain)
+        return _vanillaIndex.AllEntityDomains
             .Concat(_vanillaIndex.Documents.Select(document => document.Domain));
     }
 
@@ -4448,65 +4537,672 @@ public sealed partial class DebugWindowManager
         double LowerLength,
         Vec3d PoleHint);
 
-    private sealed record VanillaEntityOption(EntityProperties EntityType, string Label, string FullLabel, string Domain);
+    private enum VanillaEntitySelectorMode
+    {
+        Grouped,
+        Exact
+    }
+
+    private sealed record VanillaEntityOption(
+        IReadOnlyList<VanillaEntityMember> Members,
+        string Label,
+        string Tooltip,
+        string Domain,
+        string SearchText,
+        string GroupKey,
+        string GroupKind,
+        int HiddenCount)
+    {
+        public VanillaEntityMember Representative => Members.Count > 0 ? Members[0] : throw new InvalidOperationException("Entity option has no members.");
+    }
+
+    private sealed record VanillaEntityMember(
+        EntityProperties EntityType,
+        string Label,
+        string FullLabel,
+        string Domain,
+        VanillaEntitySourceInfo? Source,
+        string MetadataSignature,
+        string ShapeSignature,
+        bool Hidden,
+        string HiddenReason)
+    {
+        public string Code => EntityType.Code?.ToString() ?? FullLabel;
+    }
+
+    private sealed record VanillaEntitySourceInfo(
+        AssetLocation Location,
+        string AssetPath,
+        string SourceCode,
+        JObject? SourceJson,
+        bool HasVariantGroups,
+        bool Hidden,
+        string HiddenReason)
+    {
+        public string Key => $"{Location.Domain}:{AssetPath}";
+    }
+
+    private sealed record VanillaGroupTargets(IReadOnlyList<EntityProperties> Targets, int Skipped);
 
     private sealed class VanillaAnimationIndexService
     {
         private readonly List<VanillaAnimationDocument> _documents = [];
         private readonly Dictionary<string, List<VanillaShapeAnimationEntry>> _shapeAnimationsByCode = new(StringComparer.OrdinalIgnoreCase);
-        private readonly List<VanillaEntityOption> _entityOptions = [];
+        private readonly List<VanillaEntityOption> _groupedEntityOptions = [];
+        private readonly List<VanillaEntityOption> _groupedVisibleEntityOptions = [];
+        private readonly List<VanillaEntityOption> _exactEntityOptions = [];
+        private readonly List<VanillaEntityOption> _exactVisibleEntityOptions = [];
+        private readonly List<string> _allEntityDomains = [];
         private bool _entityListReady;
 
         public IReadOnlyList<VanillaAnimationDocument> Documents => _documents;
-        public IReadOnlyList<VanillaEntityOption> EntityOptions => _entityOptions;
-        public int SelectedEntityIndex { get; private set; } = -1;
-        public string? SelectedEntityLabel => SelectedEntityIndex >= 0 && SelectedEntityIndex < _entityOptions.Count ? _entityOptions[SelectedEntityIndex].Label : null;
-        public bool HasSelectedEntity => SelectedEntityIndex >= 0 && SelectedEntityIndex < _entityOptions.Count;
+        public IEnumerable<string> AllEntityDomains => _allEntityDomains;
+        public VanillaEntityOption? SelectedEntityOption { get; private set; }
+        public int SelectedMemberIndex { get; private set; } = -1;
+        public string? SelectedEntityLabel => SelectedEntityOption?.Label;
+        public bool HasSelectedEntity => SelectedEntityOption != null && SelectedMemberIndex >= 0;
         public string Status { get; private set; } = "Select an entity to index its vanilla animations.";
+
+        public IReadOnlyList<VanillaEntityOption> GetEntityOptions(VanillaEntitySelectorMode mode, bool showHidden)
+        {
+            return mode switch
+            {
+                VanillaEntitySelectorMode.Exact => showHidden ? _exactEntityOptions : _exactVisibleEntityOptions,
+                _ => showHidden ? _groupedEntityOptions : _groupedVisibleEntityOptions
+            };
+        }
+
+        public bool IsSelectedEntityOption(VanillaEntityOption option)
+        {
+            return ReferenceEquals(option, SelectedEntityOption);
+        }
 
         public void EnsureEntityList(ICoreClientAPI api)
         {
             if (_entityListReady) return;
 
-            _entityOptions.Clear();
+            _groupedEntityOptions.Clear();
+            _groupedVisibleEntityOptions.Clear();
+            _exactEntityOptions.Clear();
+            _exactVisibleEntityOptions.Clear();
+            _allEntityDomains.Clear();
+
+            VanillaEntitySourceIndex sourceIndex = VanillaEntitySourceIndex.Build(api);
+            List<VanillaEntityMember> members = [];
             foreach (EntityProperties entityType in api.World.EntityTypes ?? [])
             {
                 string? code = entityType.Code?.ToString();
                 if (string.IsNullOrWhiteSpace(code)) continue;
                 string domain = entityType.Code?.Domain ?? "game";
-                _entityOptions.Add(new(entityType, ImGuiLayoutHelper.CompactAssetCode(code), code, domain));
+                VanillaEntitySourceInfo? source = sourceIndex.Resolve(entityType);
+                bool hidden = source?.Hidden == true;
+                string hiddenReason = source?.HiddenReason ?? "";
+                members.Add(new(
+                    entityType,
+                    ImGuiLayoutHelper.CompactAssetCode(code),
+                    code,
+                    domain,
+                    source,
+                    BuildMetadataCompatibilitySignature(entityType),
+                    BuildShapeCompatibilitySignature(entityType),
+                    hidden,
+                    hiddenReason));
             }
 
-            _entityOptions.Sort((left, right) => string.Compare(left.Label, right.Label, StringComparison.OrdinalIgnoreCase));
+            _allEntityDomains.AddRange(members.Select(member => member.Domain).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(domain => domain, StringComparer.OrdinalIgnoreCase));
+            _exactEntityOptions.AddRange(members.Select(member => BuildEntityOption([member], "exact", "Exact runtime entity")));
+            _groupedEntityOptions.AddRange(BuildGroupedEntityOptions(members));
+            _exactEntityOptions.Sort(CompareEntityOptions);
+            _groupedEntityOptions.Sort(CompareEntityOptions);
+            _exactVisibleEntityOptions.AddRange(_exactEntityOptions.Where(option => option.Members.Any(member => !member.Hidden)));
+            _groupedVisibleEntityOptions.AddRange(BuildVisibleEntityOptions(_groupedEntityOptions));
             _entityListReady = true;
-            Status = $"Loaded {_entityOptions.Count} entity types. Select one to index its animations.";
+            Status = $"Loaded {members.Count} entity types into {_groupedEntityOptions.Count} group(s). Select one to index its animations.";
         }
 
-        public void SelectEntity(ICoreClientAPI api, int index)
+        public void SelectEntity(ICoreClientAPI api, IReadOnlyList<VanillaEntityOption> options, int index, int memberIndex, bool groupEdit)
         {
             EnsureEntityList(api);
-            if (index < 0 || index >= _entityOptions.Count)
+            if (index < 0 || index >= options.Count)
             {
                 ClearSelection();
                 return;
             }
 
-            SelectedEntityIndex = index;
-            IndexSelectedEntity(api, _entityOptions[index].EntityType);
+            SelectEntity(api, options[index], memberIndex, groupEdit);
         }
 
-        public void ReloadSelectedEntity(ICoreClientAPI api)
+        public void SelectEntity(ICoreClientAPI api, VanillaEntityOption option, int memberIndex, bool groupEdit)
+        {
+            EnsureEntityList(api);
+            if (option.Members.Count == 0)
+            {
+                ClearSelection();
+                return;
+            }
+
+            SelectedEntityOption = option;
+            SelectedMemberIndex = Math.Clamp(memberIndex, 0, option.Members.Count - 1);
+            IndexSelectedEntity(api, option, SelectedMemberIndex, groupEdit);
+        }
+
+        public void ReloadSelectedEntity(ICoreClientAPI api, bool groupEdit)
         {
             if (!HasSelectedEntity) return;
-            IndexSelectedEntity(api, _entityOptions[SelectedEntityIndex].EntityType);
+            IndexSelectedEntity(api, SelectedEntityOption!, SelectedMemberIndex, groupEdit);
         }
 
-        private void ClearSelection()
+        public void ClearSelection()
         {
-            SelectedEntityIndex = -1;
+            SelectedEntityOption = null;
+            SelectedMemberIndex = -1;
             _documents.Clear();
             _shapeAnimationsByCode.Clear();
             Status = "Select an entity to index its vanilla animations.";
+        }
+
+        private static IEnumerable<VanillaEntityOption> BuildGroupedEntityOptions(IReadOnlyList<VanillaEntityMember> members)
+        {
+            List<VanillaEntityOption> options = [];
+            HashSet<EntityProperties> grouped = [];
+
+            foreach (IGrouping<string, VanillaEntityMember> sourceGroup in members
+                .Where(member => member.Source != null)
+                .GroupBy(member => member.Source!.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                List<VanillaEntityMember> groupMembers = sourceGroup.OrderBy(member => member.Label, StringComparer.OrdinalIgnoreCase).ToList();
+                if (groupMembers.Count > 1 || groupMembers[0].Source?.HasVariantGroups == true)
+                {
+                    options.Add(BuildEntityOption(groupMembers, "source", "Source family"));
+                    foreach (VanillaEntityMember member in groupMembers) grouped.Add(member.EntityType);
+                }
+            }
+
+            List<VanillaEntityMember> remaining = members.Where(member => !grouped.Contains(member.EntityType)).ToList();
+            foreach (IGrouping<string, VanillaEntityMember> signatureGroup in remaining
+                .Where(member => !string.IsNullOrWhiteSpace(BuildCompatibleEntityGroupKey(member)))
+                .GroupBy(BuildCompatibleEntityGroupKey, StringComparer.Ordinal))
+            {
+                List<VanillaEntityMember> groupMembers = signatureGroup.OrderBy(member => member.Label, StringComparer.OrdinalIgnoreCase).ToList();
+                if (groupMembers.Count <= 1) continue;
+                options.Add(BuildEntityOption(groupMembers, "compatible", "Compatible animation signature"));
+                foreach (VanillaEntityMember member in groupMembers) grouped.Add(member.EntityType);
+            }
+
+            foreach (VanillaEntityMember member in members.Where(member => !grouped.Contains(member.EntityType)))
+            {
+                options.Add(BuildEntityOption([member], "single", "Single runtime entity"));
+            }
+
+            return options;
+        }
+
+        private static IEnumerable<VanillaEntityOption> BuildVisibleEntityOptions(IEnumerable<VanillaEntityOption> options)
+        {
+            foreach (VanillaEntityOption option in options)
+            {
+                List<VanillaEntityMember> visibleMembers = option.Members.Where(member => !member.Hidden).ToList();
+                if (visibleMembers.Count == 0) continue;
+                yield return visibleMembers.Count == option.Members.Count
+                    ? option
+                    : BuildEntityOption(visibleMembers, option.GroupKind, option.GroupKind, option.HiddenCount + option.Members.Count - visibleMembers.Count);
+            }
+        }
+
+        private static VanillaEntityOption BuildEntityOption(IReadOnlyList<VanillaEntityMember> members, string groupKeyPrefix, string groupKind, int extraHiddenCount = 0)
+        {
+            List<VanillaEntityMember> sorted = members.OrderBy(member => member.Label, StringComparer.OrdinalIgnoreCase).ToList();
+            int hiddenCount = sorted.Count(member => member.Hidden) + extraHiddenCount;
+            string domain = BuildGroupDomain(sorted);
+            string label = sorted.Count == 1
+                ? sorted[0].Label
+                : $"{BuildGroupBaseLabel(sorted)} ({sorted.Count})";
+            string groupKey = $"{groupKeyPrefix}:{string.Join("|", sorted.Select(member => member.FullLabel))}";
+            string tooltip = BuildEntityOptionTooltip(sorted, groupKind, hiddenCount);
+            string search = $"{label} {tooltip} {string.Join(' ', sorted.Select(member => $"{member.Label} {member.FullLabel} {member.Source?.AssetPath} {member.Source?.SourceCode}"))}";
+            return new(sorted, label, tooltip, domain, search, groupKey, groupKind, hiddenCount);
+        }
+
+        private static string BuildEntityOptionTooltip(IReadOnlyList<VanillaEntityMember> members, string groupKind, int hiddenCount)
+        {
+            StringBuilder builder = new();
+            builder.Append(groupKind).AppendLine();
+            builder.Append("Members: ").Append(members.Count);
+            if (hiddenCount > 0) builder.Append(" (hidden/helper: ").Append(hiddenCount).Append(')');
+            builder.AppendLine();
+
+            string[] sourceAssets = members
+                .Select(member => member.Source?.Key)
+                .Where(source => !string.IsNullOrWhiteSpace(source))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(6)
+                .ToArray()!;
+            if (sourceAssets.Length > 0)
+            {
+                builder.Append("Source: ").Append(string.Join(", ", sourceAssets)).AppendLine();
+            }
+
+            foreach (VanillaEntityMember member in members.Take(24))
+            {
+                builder.Append("- ").Append(member.FullLabel);
+                if (member.Hidden && !string.IsNullOrWhiteSpace(member.HiddenReason))
+                {
+                    builder.Append(" (").Append(member.HiddenReason).Append(')');
+                }
+                builder.AppendLine();
+            }
+
+            if (members.Count > 24)
+            {
+                builder.Append("... ").Append(members.Count - 24).Append(" more");
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private static string BuildGroupDomain(IReadOnlyList<VanillaEntityMember> members)
+        {
+            string[] domains = members.Select(member => member.Domain).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            return domains.Length == 1 ? domains[0] : "";
+        }
+
+        private static string BuildGroupBaseLabel(IReadOnlyList<VanillaEntityMember> members)
+        {
+            VanillaEntitySourceInfo? commonSource = members[0].Source;
+            if (commonSource != null && members.All(member => member.Source?.Key == commonSource.Key))
+            {
+                string sourceCode = commonSource.SourceCode.Contains(':', StringComparison.Ordinal)
+                    ? commonSource.SourceCode
+                    : $"{commonSource.Location.Domain}:{commonSource.SourceCode}";
+                return ImGuiLayoutHelper.CompactAssetCode(sourceCode);
+            }
+
+            string prefix = GetCommonPrefix(members.Select(member => member.Label)).TrimEnd('-', '_', '/', ' ');
+            return prefix.Length >= 3 ? prefix : members[0].Label;
+        }
+
+        private static string GetCommonPrefix(IEnumerable<string> values)
+        {
+            using IEnumerator<string> enumerator = values.GetEnumerator();
+            if (!enumerator.MoveNext()) return "";
+            string prefix = enumerator.Current;
+            while (enumerator.MoveNext() && prefix.Length > 0)
+            {
+                string value = enumerator.Current;
+                int length = Math.Min(prefix.Length, value.Length);
+                int index = 0;
+                while (index < length && char.ToUpperInvariant(prefix[index]) == char.ToUpperInvariant(value[index])) index++;
+                prefix = prefix[..index];
+            }
+
+            return prefix;
+        }
+
+        private static string BuildCompatibleEntityGroupKey(VanillaEntityMember member)
+        {
+            return string.IsNullOrWhiteSpace(member.MetadataSignature) || string.IsNullOrWhiteSpace(member.ShapeSignature)
+                ? ""
+                : $"{member.MetadataSignature}\n--shape--\n{member.ShapeSignature}";
+        }
+
+        private static int CompareEntityOptions(VanillaEntityOption left, VanillaEntityOption right)
+        {
+            return string.Compare(left.Label, right.Label, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string BuildMetadataCompatibilitySignature(EntityProperties entityType)
+        {
+            AnimationMetaData[] animations = entityType.Client?.Animations ?? [];
+            if (animations.Length == 0) return "";
+            StringBuilder builder = new();
+            for (int index = 0; index < animations.Length; index++)
+            {
+                AnimationMetaData animation = animations[index];
+                builder.Append(index)
+                    .Append(':')
+                    .Append(animation.Code ?? "")
+                    .Append("->")
+                    .Append(animation.Animation ?? "")
+                    .Append('|');
+            }
+
+            return builder.ToString();
+        }
+
+        private static string BuildShapeCompatibilitySignature(EntityProperties entityType)
+        {
+            Shape? shape = entityType.Client?.LoadedShapeForEntity ?? entityType.Client?.LoadedShape;
+            VanillaAnimation[] animations = shape?.Animations ?? [];
+            if (animations.Length == 0) return "";
+
+            StringBuilder builder = new();
+            for (int index = 0; index < animations.Length; index++)
+            {
+                VanillaAnimation animation = animations[index];
+                builder.Append(index)
+                    .Append(':')
+                    .Append(animation.Code ?? animation.Name ?? "")
+                    .Append(':')
+                    .Append(animation.QuantityFrames)
+                    .Append(':');
+
+                foreach (AnimationKeyFrame keyFrame in animation.KeyFrames ?? [])
+                {
+                    builder.Append(keyFrame.Frame).Append('[');
+                    if (keyFrame.Elements != null)
+                    {
+                        foreach (string elementName in keyFrame.Elements.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
+                        {
+                            builder.Append(elementName).Append(',');
+                        }
+                    }
+                    builder.Append(']');
+                }
+
+                builder.Append('|');
+            }
+
+            return builder.ToString();
+        }
+
+        private sealed class VanillaEntitySourceIndex
+        {
+            private static readonly string[] TechnicalMetadataMarkers =
+            [
+                "bot",
+                "debug",
+                "dev",
+                "helper",
+                "hidden",
+                "internal",
+                "technical",
+                "test"
+            ];
+
+            private readonly Dictionary<string, VanillaEntitySourceInfo> _sourcesByCode = new(StringComparer.OrdinalIgnoreCase);
+            private readonly List<VanillaEntitySourceInfo> _sources = [];
+
+            public static VanillaEntitySourceIndex Build(ICoreClientAPI api)
+            {
+                VanillaEntitySourceIndex index = new();
+                foreach (IAsset asset in api.Assets.AllAssets.Values)
+                {
+                    if (asset?.Location == null) continue;
+                    string assetPath = asset.Location.Path.Replace('\\', '/');
+                    if (!assetPath.StartsWith("entities/", StringComparison.OrdinalIgnoreCase) ||
+                        !assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    JObject? json = TryParseJsonObject(ReadAssetText(asset));
+                    string? sourceCode = json?["code"]?.ToString();
+                    if (json == null || string.IsNullOrWhiteSpace(sourceCode)) continue;
+
+                    bool hidden = TryGetHiddenReason(json, out string hiddenReason);
+                    VanillaEntitySourceInfo source = new(
+                        new AssetLocation(asset.Location.Domain, assetPath),
+                        assetPath,
+                        StripCodeDomain(sourceCode),
+                        json,
+                        json["variantgroups"] is JArray { Count: > 0 },
+                        hidden,
+                        hiddenReason);
+                    index._sources.Add(source);
+
+                    index.Register(source, source.SourceCode);
+                    foreach (string entityCode in ExpandEntityCodes(api, source.Location.Domain, json, source.SourceCode))
+                    {
+                        index.Register(source, entityCode);
+                    }
+                }
+
+                index._sources.Sort((left, right) => right.SourceCode.Length.CompareTo(left.SourceCode.Length));
+                return index;
+            }
+
+            public VanillaEntitySourceInfo? Resolve(EntityProperties entityType)
+            {
+                if (entityType.Code == null) return null;
+                string fullCode = NormalizeEntityCode(entityType.Code.Domain, entityType.Code.Path);
+                if (_sourcesByCode.TryGetValue(fullCode, out VanillaEntitySourceInfo? exact))
+                {
+                    return exact;
+                }
+
+                string path = entityType.Code.Path;
+                foreach (VanillaEntitySourceInfo source in _sources)
+                {
+                    if (string.Equals(path, source.SourceCode, StringComparison.OrdinalIgnoreCase) ||
+                        path.StartsWith(source.SourceCode + "-", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return source;
+                    }
+                }
+
+                return null;
+            }
+
+            private void Register(VanillaEntitySourceInfo source, string code)
+            {
+                if (string.IsNullOrWhiteSpace(code)) return;
+                _sourcesByCode[NormalizeEntityCode(source.Location.Domain, code)] = source;
+            }
+
+            private static IEnumerable<string> ExpandEntityCodes(ICoreClientAPI api, string domain, JObject sourceJson, string sourceCode)
+            {
+                if (sourceJson["variantgroups"] is not JArray groups || groups.Count == 0)
+                {
+                    yield return sourceCode;
+                    yield break;
+                }
+
+                List<VanillaVariantGroup> variantGroups = [];
+                foreach (JObject group in groups.OfType<JObject>())
+                {
+                    string? groupCode = group["code"]?.ToString();
+                    if (string.IsNullOrWhiteSpace(groupCode)) continue;
+                    List<string> states = ResolveVariantStates(api, domain, group).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    if (states.Count == 0) yield break;
+                    variantGroups.Add(new(groupCode, states));
+                }
+
+                if (variantGroups.Count == 0)
+                {
+                    yield return sourceCode;
+                    yield break;
+                }
+
+                foreach (Dictionary<string, string> combination in BuildVariantCombinations(variantGroups))
+                {
+                    yield return BuildVariantCode(sourceCode, variantGroups, combination);
+                }
+            }
+
+            private static IEnumerable<string> ResolveVariantStates(ICoreClientAPI api, string domain, JObject group)
+            {
+                if (group["states"] is JArray states)
+                {
+                    foreach (JToken state in states)
+                    {
+                        string? value = state.ToString();
+                        if (!string.IsNullOrWhiteSpace(value)) yield return value;
+                    }
+                }
+
+                string? loadFromProperties = group["loadFromProperties"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(loadFromProperties))
+                {
+                    foreach (string value in LoadWorldPropertyStates(api, domain, loadFromProperties))
+                    {
+                        yield return value;
+                    }
+                }
+            }
+
+            private static IEnumerable<string> LoadWorldPropertyStates(ICoreClientAPI api, string domain, string loadFromProperties)
+            {
+                string path = EnsureJsonPath($"worldproperties/{loadFromProperties.Trim().TrimStart('/')}");
+                foreach (string candidateDomain in new[] { domain, "game" }.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    IAsset? asset = api.Assets.TryGet(new AssetLocation(candidateDomain, path), true);
+                    JObject? json = TryParseJsonObject(ReadAssetText(asset));
+                    if (json?["variants"] is not JArray variants) continue;
+
+                    foreach (JToken variant in variants)
+                    {
+                        string? code = variant.Type == JTokenType.String
+                            ? variant.ToString()
+                            : variant["Code"]?.ToString() ?? variant["code"]?.ToString();
+                        if (!string.IsNullOrWhiteSpace(code)) yield return code;
+                    }
+
+                    yield break;
+                }
+            }
+
+            private static IEnumerable<Dictionary<string, string>> BuildVariantCombinations(IReadOnlyList<VanillaVariantGroup> groups)
+            {
+                List<Dictionary<string, string>> combinations = [new(StringComparer.OrdinalIgnoreCase)];
+                foreach (VanillaVariantGroup group in groups)
+                {
+                    List<Dictionary<string, string>> next = [];
+                    foreach (Dictionary<string, string> combination in combinations)
+                    {
+                        foreach (string state in group.States)
+                        {
+                            Dictionary<string, string> copy = new(combination, StringComparer.OrdinalIgnoreCase)
+                            {
+                                [group.Code] = state
+                            };
+                            next.Add(copy);
+                        }
+                    }
+
+                    combinations = next;
+                }
+
+                return combinations;
+            }
+
+            private static string BuildVariantCode(string sourceCode, IReadOnlyList<VanillaVariantGroup> groups, IReadOnlyDictionary<string, string> states)
+            {
+                string code = sourceCode;
+                List<string> suffixes = [];
+                foreach (VanillaVariantGroup group in groups)
+                {
+                    if (!states.TryGetValue(group.Code, out string? state)) continue;
+                    string placeholder = "{" + group.Code + "}";
+                    if (code.Contains(placeholder, StringComparison.OrdinalIgnoreCase))
+                    {
+                        code = ReplaceInvariant(code, placeholder, state);
+                    }
+                    else
+                    {
+                        suffixes.Add(state);
+                    }
+                }
+
+                return suffixes.Count == 0 ? code : $"{code}-{string.Join('-', suffixes)}";
+            }
+
+            private static bool TryGetHiddenReason(JObject source, out string reason)
+            {
+                List<string> evidence = [];
+                if (source["tags"] is JArray tags)
+                {
+                    foreach (string tag in tags.Select(token => token.ToString()))
+                    {
+                        if (HasTechnicalMarker(tag)) evidence.Add($"tag:{tag}");
+                    }
+                }
+
+                string? className = source["class"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(className) && HasTechnicalMarker(className))
+                {
+                    evidence.Add($"class:{className}");
+                }
+
+                if (source["attributes"] is JObject attributes)
+                {
+                    foreach (JProperty property in attributes.Properties())
+                    {
+                        if (HasTechnicalMarker(property.Name))
+                        {
+                            evidence.Add($"attribute:{property.Name}");
+                        }
+                    }
+                }
+
+                reason = string.Join(", ", evidence.Take(3));
+                return evidence.Count > 0;
+            }
+
+            private static bool HasTechnicalMarker(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value)) return false;
+                return EnumerateMetadataTokens(value).Any(token => TechnicalMetadataMarkers.Contains(token, StringComparer.Ordinal));
+            }
+
+            private static IEnumerable<string> EnumerateMetadataTokens(string value)
+            {
+                StringBuilder token = new();
+                char previous = '\0';
+                foreach (char ch in value)
+                {
+                    if (!char.IsLetterOrDigit(ch))
+                    {
+                        if (token.Length > 0)
+                        {
+                            yield return token.ToString();
+                            token.Clear();
+                        }
+                        previous = '\0';
+                        continue;
+                    }
+
+                    if (char.IsUpper(ch) && token.Length > 0 && char.IsLower(previous))
+                    {
+                        yield return token.ToString();
+                        token.Clear();
+                    }
+
+                    token.Append(char.ToLowerInvariant(ch));
+                    previous = ch;
+                }
+
+                if (token.Length > 0)
+                {
+                    yield return token.ToString();
+                }
+            }
+
+            private static string NormalizeEntityCode(string defaultDomain, string code)
+            {
+                string trimmed = StripCodeDomain(code);
+                string domain = code.Contains(':', StringComparison.Ordinal) ? code[..code.IndexOf(':')] : defaultDomain;
+                return $"{domain}:{trimmed}";
+            }
+
+            private static string StripCodeDomain(string code)
+            {
+                int separator = code.IndexOf(':');
+                return separator >= 0 ? code[(separator + 1)..] : code;
+            }
+
+            private static string ReplaceInvariant(string value, string oldValue, string newValue)
+            {
+                int index = value.IndexOf(oldValue, StringComparison.OrdinalIgnoreCase);
+                while (index >= 0)
+                {
+                    value = value[..index] + newValue + value[(index + oldValue.Length)..];
+                    index = value.IndexOf(oldValue, index + newValue.Length, StringComparison.OrdinalIgnoreCase);
+                }
+
+                return value;
+            }
+
+            private sealed record VanillaVariantGroup(string Code, IReadOnlyList<string> States);
         }
 
         public VanillaShapeAnimationEntry? ResolveShapeAnimation(string animationCode)
@@ -4537,8 +5233,10 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        private void IndexSelectedEntity(ICoreClientAPI api, EntityProperties entityType)
+        private void IndexSelectedEntity(ICoreClientAPI api, VanillaEntityOption option, int memberIndex, bool groupEdit)
         {
+            VanillaEntityMember selectedMember = option.Members[Math.Clamp(memberIndex, 0, option.Members.Count - 1)];
+            EntityProperties entityType = selectedMember.EntityType;
             try
             {
                 _documents.Clear();
@@ -4547,10 +5245,15 @@ public sealed partial class DebugWindowManager
                 AnimationMetaData[]? metadata = entityType.Client?.Animations;
                 Shape? shape = entityType.Client?.LoadedShapeForEntity ?? entityType.Client?.LoadedShape;
                 string entityCode = entityType.Code?.ToString() ?? $"entity-{entityType.Id}";
+                string groupLabel = groupEdit && option.Members.Count > 1 ? option.Label : ImGuiLayoutHelper.CompactAssetCode(entityCode);
 
-                JObject? entitySourceJson = TryLoadJson(api, GetEntityAssetLocation(entityType));
+                JObject? entitySourceJson = selectedMember.Source?.SourceJson ?? TryLoadJson(api, GetEntityAssetLocation(entityType));
+                AssetLocation? entityAssetLocation = selectedMember.Source?.Location ?? GetEntityAssetLocation(entityType);
                 AssetLocation? shapeAssetLocation = GetShapeAssetLocation(entityType);
                 JObject? shapeSourceJson = TryLoadJson(api, shapeAssetLocation);
+                IReadOnlyList<VanillaEntityMember> editMembers = groupEdit ? option.Members : [selectedMember];
+                VanillaGroupTargets shapeTargets = BuildGroupTargets(editMembers, selectedMember, VanillaDocumentKind.Shape);
+                VanillaGroupTargets metadataTargets = BuildGroupTargets(editMembers, selectedMember, VanillaDocumentKind.EntityMetadata);
 
                 VanillaAnimationDocument? shapeDocument = null;
                 if (shape?.Animations != null && shape.Animations.Length > 0)
@@ -4564,7 +5267,11 @@ public sealed partial class DebugWindowManager
                         EntityCode = entityCode,
                         EntityType = entityType,
                         Shape = shape,
-                        SourceJson = shapeSourceJson
+                        SourceJson = shapeSourceJson,
+                        GroupLabel = groupLabel,
+                        RuntimeTargetEntities = shapeTargets.Targets,
+                        RuntimeSkippedMembers = shapeTargets.Skipped,
+                        RuntimeGroupKind = option.GroupKind
                     };
 
                     for (int index = 0; index < shape.Animations.Length; index++)
@@ -4583,13 +5290,17 @@ public sealed partial class DebugWindowManager
                 VanillaAnimationDocument metadataDocument = new()
                 {
                     Kind = VanillaDocumentKind.EntityMetadata,
-                    Domain = entityType.Code?.Domain ?? "game",
-                    AssetPath = GetEntityAssetLocation(entityType)?.Path ?? $"entities/{entityType.Code?.Path ?? entityCode}.json",
+                    Domain = entityAssetLocation?.Domain ?? entityType.Code?.Domain ?? "game",
+                    AssetPath = entityAssetLocation?.Path ?? $"entities/{entityType.Code?.Path ?? entityCode}.json",
                     DisplayPath = entityCode,
                     EntityCode = entityCode,
                     EntityType = entityType,
                     Shape = shape,
-                    SourceJson = entitySourceJson
+                    SourceJson = entitySourceJson,
+                    GroupLabel = groupLabel,
+                    RuntimeTargetEntities = metadataTargets.Targets,
+                    RuntimeSkippedMembers = metadataTargets.Skipped,
+                    RuntimeGroupKind = option.GroupKind
                 };
 
                 if (metadata != null)
@@ -4608,7 +5319,10 @@ public sealed partial class DebugWindowManager
 
                 int shapeCount = shapeDocument?.ShapeAnimations.Count ?? 0;
                 int metadataCount = metadataDocument.MetadataEntries.Count;
-                Status = $"Indexed {entityCode}: {shapeCount} shape animations, {metadataCount} metadata entries.";
+                string targetStatus = groupEdit && option.Members.Count > 1
+                    ? $" Group edit targets: metadata {metadataTargets.Targets.Count}/{editMembers.Count}, shape {shapeTargets.Targets.Count}/{editMembers.Count}."
+                    : "";
+                Status = $"Indexed {entityCode}: {shapeCount} shape animations, {metadataCount} metadata entries.{targetStatus}";
             }
             catch (Exception exception)
             {
@@ -4617,6 +5331,34 @@ public sealed partial class DebugWindowManager
                 Status = $"Could not index {entityType.Code}: {exception.Message}";
                 LoggerUtil.Warn(api, this, $"Could not index vanilla entity animation '{entityType.Code}': {exception}");
             }
+        }
+
+        private static VanillaGroupTargets BuildGroupTargets(IReadOnlyList<VanillaEntityMember> members, VanillaEntityMember selected, VanillaDocumentKind kind)
+        {
+            string selectedSignature = kind == VanillaDocumentKind.Shape ? selected.ShapeSignature : selected.MetadataSignature;
+            List<EntityProperties> targets = [];
+            int skipped = 0;
+            foreach (VanillaEntityMember member in members)
+            {
+                string signature = kind == VanillaDocumentKind.Shape ? member.ShapeSignature : member.MetadataSignature;
+                if (!string.IsNullOrWhiteSpace(selectedSignature) &&
+                    string.Equals(signature, selectedSignature, StringComparison.Ordinal))
+                {
+                    targets.Add(member.EntityType);
+                }
+                else
+                {
+                    skipped++;
+                }
+            }
+
+            if (targets.Count == 0)
+            {
+                targets.Add(selected.EntityType);
+                skipped = Math.Max(0, members.Count - 1);
+            }
+
+            return new(targets, skipped);
         }
 
         private void RegisterShapeAnimation(VanillaShapeAnimationEntry entry)
@@ -4646,8 +5388,8 @@ public sealed partial class DebugWindowManager
         private static JObject? TryLoadJson(ICoreClientAPI api, AssetLocation? location)
         {
             if (location == null) return null;
-            IAsset? asset = api.Assets.TryGet(location);
-            return asset == null ? null : TryParseObject(asset.ToText());
+            IAsset? asset = api.Assets.TryGet(location, true);
+            return TryParseJsonObject(ReadAssetText(asset));
         }
     }
 
@@ -4661,6 +5403,10 @@ public sealed partial class DebugWindowManager
         public EntityProperties? EntityType { get; init; }
         public Shape? Shape { get; init; }
         public JObject? SourceJson { get; init; }
+        public string GroupLabel { get; init; } = "";
+        public IReadOnlyList<EntityProperties> RuntimeTargetEntities { get; init; } = [];
+        public int RuntimeSkippedMembers { get; init; }
+        public string RuntimeGroupKind { get; init; } = "";
         public List<VanillaShapeAnimationEntry> ShapeAnimations { get; } = [];
         public List<VanillaAnimationMetaEntry> MetadataEntries { get; } = [];
         public string HistoryKey => $"{Kind}:{Domain}:{AssetPath}:{EntityCode}";
@@ -6591,18 +7337,6 @@ public sealed partial class DebugWindowManager
             };
 
             File.WriteAllText(outputPath + ".ingamedevtools-manifest.json", manifest.ToString(Formatting.Indented));
-        }
-    }
-
-    private static JObject? TryParseObject(string text)
-    {
-        try
-        {
-            return JObject.Parse(text);
-        }
-        catch
-        {
-            return null;
         }
     }
 

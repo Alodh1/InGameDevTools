@@ -52,6 +52,12 @@ public sealed partial class DebugWindowManager
         {
             ImGui.TextWrapped("Enable Runtime apply in the top toolbar to apply edits automatically.");
         }
+
+        int targetCount = GetVanillaRuntimeEntityTargets(document).Count();
+        if (targetCount > 1 || document.RuntimeSkippedMembers > 0)
+        {
+            ImGui.TextDisabled($"Group targets: {targetCount}{(document.RuntimeSkippedMembers > 0 ? $"; skipped incompatible: {document.RuntimeSkippedMembers}" : "")}");
+        }
     }
 
     private void ApplyAllDirtyVanillaLive(bool force = false)
@@ -171,19 +177,28 @@ public sealed partial class DebugWindowManager
 
     private DebugWindowManager.LivePatchSnapshot CaptureVanillaMetadataLiveSnapshot(VanillaAnimationDocument document)
     {
-        EntityClientProperties client = document.EntityType?.Client ?? throw new InvalidOperationException("Entity has no client properties.");
-        AnimationMetaData[] original = CloneAnimationMetaDataArray(client.Animations);
+        List<VanillaMetadataRuntimeSnapshot> snapshots = GetVanillaRuntimeEntityTargets(document)
+            .Where(entityType => entityType.Client != null)
+            .Select(entityType => new VanillaMetadataRuntimeSnapshot(entityType, entityType.Client!, CloneAnimationMetaDataArray(entityType.Client!.Animations)))
+            .ToList();
+        if (snapshots.Count == 0)
+        {
+            throw new InvalidOperationException("Entity has no client properties.");
+        }
 
         string backupPath = Path.Combine("assets", document.Domain, document.AssetPath.Replace('/', Path.DirectorySeparatorChar));
         return new(
             () =>
             {
-                client.Animations = CloneAnimationMetaDataArray(original);
-                RebuildRuntimeMetadataLookups(client);
-                RefreshLoadedEntityAnimators(document.EntityType, out _);
+                foreach (VanillaMetadataRuntimeSnapshot snapshot in snapshots)
+                {
+                    snapshot.Client.Animations = CloneAnimationMetaDataArray(snapshot.Animations);
+                    RebuildRuntimeMetadataLookups(snapshot.Client);
+                    RefreshLoadedEntityAnimators(snapshot.EntityType, out _);
+                }
             },
             backupPath,
-            () => SerializeVanillaMetadataBackup(original),
+            () => SerializeVanillaMetadataBackup(snapshots.FirstOrDefault()?.Animations ?? []),
             "animations");
     }
 
@@ -201,15 +216,37 @@ public sealed partial class DebugWindowManager
             return;
         }
 
-        EntityClientProperties client = document.EntityType?.Client ?? throw new InvalidOperationException("Entity has no client properties.");
-        client.Animations = document.MetadataEntries.Select(entry => CloneAnimationMetaData(entry.Metadata)).ToArray();
-        RebuildRuntimeMetadataLookups(client);
+        AnimationMetaData[] editedMetadata = document.MetadataEntries.Select(entry => CloneAnimationMetaData(entry.Metadata)).ToArray();
+        bool applied = false;
+        foreach (EntityProperties entityType in GetVanillaRuntimeEntityTargets(document))
+        {
+            EntityClientProperties? client = entityType.Client;
+            if (client == null) continue;
+            client.Animations = CloneAnimationMetaDataArray(editedMetadata);
+            RebuildRuntimeMetadataLookups(client);
+            applied = true;
+        }
+
+        if (!applied)
+        {
+            throw new InvalidOperationException("Entity has no client properties.");
+        }
     }
 
     private string BuildVanillaAppliedStatus(VanillaAnimationDocument document)
     {
-        int refreshed = RefreshLoadedEntityAnimators(document.EntityType, out int matched);
-        string baseStatus = $"Live applied {document.DisplayPath}.";
+        int refreshed = 0;
+        int matched = 0;
+        foreach (EntityProperties entityType in GetVanillaRuntimeEntityTargets(document))
+        {
+            refreshed += RefreshLoadedEntityAnimators(entityType, out int targetMatched);
+            matched += targetMatched;
+        }
+
+        int targetCount = GetVanillaRuntimeEntityTargets(document).Count();
+        string baseStatus = targetCount > 1
+            ? $"Live applied {document.DisplayPath} to {targetCount} compatible group target(s){(document.RuntimeSkippedMembers > 0 ? $"; skipped {document.RuntimeSkippedMembers}" : "")}."
+            : $"Live applied {document.DisplayPath}.";
         if (matched == 0) return $"{baseStatus} Applied to future starts only.";
         if (refreshed < matched) return $"{baseStatus} Refreshed {refreshed}/{matched} loaded entities; some apply to future starts only.";
         return $"{baseStatus} Refreshed {refreshed} loaded entity instance(s).";
@@ -220,14 +257,35 @@ public sealed partial class DebugWindowManager
         HashSet<Shape> seen = [];
         foreach (Shape? shape in new[]
         {
-            document.Shape,
-            document.EntityType?.Client?.LoadedShape,
-            document.EntityType?.Client?.LoadedShapeForEntity
+            document.Shape
         })
         {
             if (shape == null || !seen.Add(shape)) continue;
             yield return shape;
         }
+
+        foreach (EntityProperties entityType in GetVanillaRuntimeEntityTargets(document))
+        {
+            foreach (Shape? shape in new[]
+            {
+                entityType.Client?.LoadedShape,
+                entityType.Client?.LoadedShapeForEntity
+            })
+            {
+                if (shape == null || !seen.Add(shape)) continue;
+                yield return shape;
+            }
+        }
+    }
+
+    private static IEnumerable<EntityProperties> GetVanillaRuntimeEntityTargets(VanillaAnimationDocument document)
+    {
+        if (document.RuntimeTargetEntities.Count > 0)
+        {
+            return document.RuntimeTargetEntities;
+        }
+
+        return document.EntityType != null ? [document.EntityType] : [];
     }
 
     private void PrepareRuntimeShapeAnimations(Shape shape, string label)
@@ -404,4 +462,5 @@ public sealed partial class DebugWindowManager
     }
 
     private sealed record VanillaShapeRuntimeSnapshot(Shape Shape, VanillaAnimation[] Animations);
+    private sealed record VanillaMetadataRuntimeSnapshot(EntityProperties EntityType, EntityClientProperties Client, AnimationMetaData[] Animations);
 }
