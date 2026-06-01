@@ -10,7 +10,7 @@ namespace InGameDevTools.Utils;
 
 internal sealed class DevToolsPreview3DRenderer : IDisposable
 {
-    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad-v2";
+    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad-v3";
 
     private readonly ICoreClientAPI _api;
     private FrameBufferRef? _frameBuffer;
@@ -237,6 +237,11 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
 
     public int ParticleCount => _particlePreview?.ParticleCount ?? 0;
 
+    public int ParticleCountFor(EnumParticleModel model)
+    {
+        return _particlePreview?.ParticleCountFor(model) ?? 0;
+    }
+
     public void ResetParticles()
     {
         _particlePreview?.Dispose();
@@ -441,6 +446,11 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         public IParticlePool QuadPool { get; }
         public IParticlePool CubePool { get; }
         public int ParticleCount => QuadPool.QuantityAlive + CubePool.QuantityAlive;
+
+        public int ParticleCountFor(EnumParticleModel model)
+        {
+            return model == EnumParticleModel.Quad ? QuadPool.QuantityAlive : CubePool.QuantityAlive;
+        }
 
         public int Spawn(IParticlePropertiesProvider particleProperties, Vector3 cameraPosition)
         {
@@ -649,7 +659,7 @@ void main()
     previewColor.a *= 1.0 - clamp(length(edgeFade) * 10.0, 0.0, 1.0);
     if (previewColor.a < 0.002) discard;
 
-    float alpha = clamp(max(previewColor.a, glowLevel * 0.08), 0.0, 1.0);
+    float alpha = clamp(previewColor.a, 0.0, 1.0);
     vec3 rgb = previewColor.rgb * max(1.0, glowLevel);
     outColor = vec4(clamp(rgb, vec3(0.0), vec3(1.0)), alpha);
 }

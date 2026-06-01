@@ -1557,6 +1557,8 @@ public class ParticleEffectsManager
         return value.Replace(':', '_').Replace('/', '_').Replace('\\', '_').Replace('#', '_');
     }
 
+    private const float RuntimePreviewTickIntervalSeconds = 0.033f;
+
     private string _particleFilter = "";
     private bool _previewLoop = true;
     private ParticlePreviewMode _previewMode = ParticlePreviewMode.RuntimeBlockTick;
@@ -1740,14 +1742,23 @@ public class ParticleEffectsManager
 
         DrawManualReferencePicker(id, key);
 
+        bool runtimeRateControlsDisabled = useRuntimePreview;
         ImGui.SetNextItemWidth(110);
+        if (runtimeRateControlsDisabled) ImGui.BeginDisabled();
         ImGui.SliderFloat($"Rate##particle-preview-{id}", ref _previewEmitRate, 0.05f, 20f, "%.2f/s");
+        if (runtimeRateControlsDisabled) ImGui.EndDisabled();
         ImGui.SameLine();
         ImGui.SetNextItemWidth(110);
+        if (runtimeRateControlsDisabled) ImGui.BeginDisabled();
         ImGui.SliderFloat($"Intensity##particle-preview-{id}", ref _previewIntensity, 0.05f, 8f, "%.2f");
+        if (runtimeRateControlsDisabled) ImGui.EndDisabled();
         ImGui.SameLine();
         ImGui.SetNextItemWidth(110);
         ImGui.SliderFloat($"Speed##particle-preview-{id}", ref _previewTimeScale, 0.05f, 4f, "%.2fx");
+        if (useRuntimePreview)
+        {
+            ImGui.TextDisabled($"Runtime block tick uses the engine {RuntimePreviewTickIntervalSeconds:0.000}s async cadence; rate and intensity are ignored.");
+        }
 
         ImGui.SetNextItemWidth(110);
         ImGui.SliderFloat($"World offset##particle-preview-{id}", ref _previewWorldOffset, 0.25f, 12f, "%.2f");
@@ -1785,14 +1796,13 @@ public class ParticleEffectsManager
         {
             if (useRuntimePreview && runtimePreviewBlock != null)
             {
-                const float runtimeTickInterval = 0.025f;
                 _previewEmitAccumulator += dt;
                 int ticks = 0;
-                while (_previewEmitAccumulator >= runtimeTickInterval && ticks < 8)
+                while (_previewEmitAccumulator >= RuntimePreviewTickIntervalSeconds && ticks < 8)
                 {
                     EmitRuntimeBlockPreviewTick(selectedVariant, emitters, runtimePreviewBlock, _previewIntensity, runtimePreviewSource);
-                    _previewRuntimeSeconds += runtimeTickInterval;
-                    _previewEmitAccumulator -= runtimeTickInterval;
+                    _previewRuntimeSeconds += RuntimePreviewTickIntervalSeconds;
+                    _previewEmitAccumulator -= RuntimePreviewTickIntervalSeconds;
                     ticks++;
                 }
             }
@@ -2645,9 +2655,8 @@ public class ParticleEffectsManager
     {
         if (useRuntimePreview && runtimePreviewBlock != null)
         {
-            const float runtimeTickInterval = 0.025f;
             int spawned = EmitRuntimeBlockPreviewTick(selectedVariant, emitters, runtimePreviewBlock, intensity, runtimePreviewSource);
-            _previewRuntimeSeconds += runtimeTickInterval;
+            _previewRuntimeSeconds += RuntimePreviewTickIntervalSeconds;
             return spawned;
         }
 
@@ -2714,7 +2723,6 @@ public class ParticleEffectsManager
             previewRenderer,
             _previewTarget,
             worldToPreviewOffset,
-            Math.Max(0.05f, intensity),
             new Vec3f(_previewVelocityX, _previewVelocityY, _previewVelocityZ),
             _previewWindEnabled);
 
@@ -2730,7 +2738,7 @@ public class ParticleEffectsManager
                 _previewRuntimeSeconds);
 
             int spawned = previewManager.Flush();
-            _previewStatus = $"Runtime tick preview: {runtimePreviewSource}, captured {previewManager.CapturedCount} provider(s), spawned {spawned} particle(s).";
+            _previewStatus = $"Runtime tick preview ({RuntimePreviewTickIntervalSeconds:0.000}s cadence): {runtimePreviewSource}, captured {previewManager.CapturedCount} provider(s), spawned {spawned} particle(s).";
             return spawned;
         }
         catch (Exception exception)
@@ -2849,7 +2857,6 @@ public class ParticleEffectsManager
     private static void ApplyRuntimePreviewParticleModifiers(
         AdvancedParticleProperties particleProperties,
         Vec3d worldToPreviewOffset,
-        float intensity,
         Vec3f extraVelocity,
         bool windEnabled)
     {
@@ -2864,8 +2871,6 @@ public class ParticleEffectsManager
         {
             particleProperties.WindAffectednesAtPos = 0f;
         }
-
-        ScaleNatFloat(particleProperties.Quantity, intensity);
     }
 
     private Vector3 GetPreviewGameWindVector(AdvancedParticleProperties particleProperties)
@@ -3009,7 +3014,6 @@ public class ParticleEffectsManager
         DevToolsPreview3DRenderer previewRenderer,
         Vector3 cameraPosition,
         Vec3d worldToPreviewOffset,
-        float intensity,
         Vec3f extraVelocity,
         bool windEnabled) : IAsyncParticleManager
     {
@@ -3028,7 +3032,7 @@ public class ParticleEffectsManager
 
         public int ParticlesAlive(EnumParticleModel model)
         {
-            return 0;
+            return previewRenderer.ParticleCountFor(model);
         }
 
         public int Flush()
@@ -3041,7 +3045,7 @@ public class ParticleEffectsManager
             if (particleProperties is AdvancedParticleProperties advancedParticleProperties)
             {
                 AdvancedParticleProperties clone = advancedParticleProperties.Clone();
-                ApplyRuntimePreviewParticleModifiers(clone, worldToPreviewOffset, intensity, extraVelocity, windEnabled);
+                ApplyRuntimePreviewParticleModifiers(clone, worldToPreviewOffset, extraVelocity, windEnabled);
                 return clone;
             }
 
