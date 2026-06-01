@@ -652,7 +652,7 @@ public sealed partial class DebugWindowManager : IDisposable
     private static readonly string[] TimelineTrackNames = new[] { "Player", "Item", "Sound", "Particle", "Callback" };
     private static readonly MethodInfo? ProcessPlayerKeyFramesMethod = typeof(Animation).GetMethod("ProcessPlayerKeyFrames", BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null);
     internal TransformGizmoMode GizmoMode { get; private set; } = TransformGizmoMode.Move;
-    internal TransformGizmoSpace GizmoSpace { get; private set; } = TransformGizmoSpace.Local;
+    internal TransformGizmoSpace GizmoSpace { get; private set; } = TransformGizmoSpace.World;
     internal bool IncludeGizmoInIncrement { get; private set; } = true;
     internal float TransformGizmoIncrement { get; private set; } = 0.1f;
     internal static bool DebugPoseFreezeActive { get; private set; }

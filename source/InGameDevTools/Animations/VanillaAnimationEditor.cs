@@ -67,6 +67,7 @@ public sealed partial class DebugWindowManager
     private NVector2 _vanillaViewportGizmoDragCenter;
     private double _vanillaViewportGizmoDragLastAngleRadians;
     private double _vanillaViewportGizmoDragAccumulatedDegrees;
+    private double _vanillaViewportGizmoDragRingScreenSign = -1.0;
     private double _vanillaViewportGizmoDragStartValue;
     private string _vanillaViewportGizmoDragRowKey = "";
     private int _vanillaViewportGizmoDragKeyFrameIndex = -1;
@@ -1344,6 +1345,9 @@ public sealed partial class DebugWindowManager
             _vanillaViewportGizmoDragCenter = projection.Center;
             _vanillaViewportGizmoDragLastAngleRadians = GetVanillaViewportGizmoMouseAngle(projection.Center, _vanillaViewportGizmoDragMouseStart);
             _vanillaViewportGizmoDragAccumulatedDegrees = 0;
+            _vanillaViewportGizmoDragRingScreenSign = GizmoMode == TransformGizmoMode.Rotate
+                ? GetVanillaViewportGizmoRingScreenSign(projection, hoveredAxis)
+                : -1.0;
             _vanillaViewportGizmoDragStartValue = GetVanillaGizmoAxisValue(element, GizmoMode, hoveredAxis);
             _vanillaViewportGizmoDragRowKey = row.Key;
             _vanillaViewportGizmoDragKeyFrameIndex = _vanillaSelection.KeyFrameIndex;
@@ -1723,6 +1727,27 @@ public sealed partial class DebugWindowManager
         };
     }
 
+    private static double GetVanillaViewportGizmoRingScreenSign(VanillaGizmoProjection projection, TransformGizmoAxis axis)
+    {
+        NVector2[] points = axis switch
+        {
+            TransformGizmoAxis.X => projection.RingX,
+            TransformGizmoAxis.Y => projection.RingY,
+            TransformGizmoAxis.Z => projection.RingZ,
+            _ => []
+        };
+
+        for (int index = 1; index < points.Length; index++)
+        {
+            NVector2 from = points[index - 1] - projection.Center;
+            NVector2 to = points[index] - projection.Center;
+            float cross = from.X * to.Y - from.Y * to.X;
+            if (Math.Abs(cross) > 0.001f) return Math.Sign(cross);
+        }
+
+        return -1.0;
+    }
+
     private bool ApplyVanillaViewportGizmoDrag(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, AnimationKeyFrameElement element, TransformGizmoMode mode, TransformGizmoAxis axis, NVector2 axisVector, float scale)
     {
         NVector2 direction = NormalizeOrDefault(axisVector, new NVector2(1f, 0f));
@@ -1770,7 +1795,8 @@ public sealed partial class DebugWindowManager
         double angle = Math.Atan2(radial.Y, radial.X);
         double delta = NormalizeVanillaRadians(angle - _vanillaViewportGizmoDragLastAngleRadians);
         _vanillaViewportGizmoDragLastAngleRadians = angle;
-        _vanillaViewportGizmoDragAccumulatedDegrees -= delta * 180.0 / Math.PI;
+        double sign = Math.Abs(_vanillaViewportGizmoDragRingScreenSign) < 0.001 ? -1.0 : _vanillaViewportGizmoDragRingScreenSign;
+        _vanillaViewportGizmoDragAccumulatedDegrees += delta * 180.0 / Math.PI / sign;
         return _vanillaViewportGizmoDragAccumulatedDegrees;
     }
 
@@ -1785,7 +1811,7 @@ public sealed partial class DebugWindowManager
         ImGui.SameLine();
         if (ImGui.RadioButton("Off##vanilla-gizmo-mode", GizmoMode == TransformGizmoMode.None)) GizmoMode = TransformGizmoMode.None;
 
-        if (GizmoSpace == TransformGizmoSpace.Parent) GizmoSpace = TransformGizmoSpace.Local;
+        if (GizmoSpace == TransformGizmoSpace.Parent) GizmoSpace = TransformGizmoSpace.World;
         if (ImGui.RadioButton("World axes##vanilla-gizmo-space", GizmoSpace == TransformGizmoSpace.World)) GizmoSpace = TransformGizmoSpace.World;
         ImGui.SameLine();
         if (ImGui.RadioButton("Local axes##vanilla-gizmo-space", GizmoSpace == TransformGizmoSpace.Local)) GizmoSpace = TransformGizmoSpace.Local;
@@ -1851,19 +1877,46 @@ public sealed partial class DebugWindowManager
         if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint, min, width, height, out NVector2 center)) return false;
 
         float modelAxisLength = Math.Clamp(Math.Max(Math.Max(scene.ModelWidth, scene.ModelHeight), scene.ModelDepth) * 0.16f, 0.12f, 0.85f);
-        if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint + new NVector3(modelAxisLength, 0f, 0f), min, width, height, out NVector2 axisXEnd)) return false;
-        if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint + new NVector3(0f, modelAxisLength, 0f), min, width, height, out NVector2 axisYEnd)) return false;
-        if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint + new NVector3(0f, 0f, modelAxisLength), min, width, height, out NVector2 axisZEnd)) return false;
-        NVector2 axisX = axisXEnd - center;
-        NVector2 axisY = axisYEnd - center;
-        NVector2 axisZ = axisZEnd - center;
-        float pixelScale = Math.Max(1f, (axisX.Length() + axisY.Length() + axisZ.Length()) / Math.Max(0.001f, modelAxisLength * 3f));
         float modelRingRadius = Math.Clamp(modelAxisLength * 0.95f, 0.10f, 0.80f);
-        NVector2[] bounds = BuildVanillaElementBounds3D(camera, elementModel, pose.ForElement, min, width, height, out bool hasVisualCenter, out NVector2 visualCenter);
+        NVector2 axisX;
+        NVector2 axisY;
+        NVector2 axisZ;
+        NVector2[] ringX;
+        NVector2[] ringY;
+        NVector2[] ringZ;
+        if (GizmoSpace == TransformGizmoSpace.World)
+        {
+            NVector3 centerWorld = TransformVanillaPreviewPoint(elementModel, elementPoint);
+            NVector3 worldX = TransformVanillaPreviewDirection(camera.Model, new NVector3(modelAxisLength, 0f, 0f));
+            NVector3 worldY = TransformVanillaPreviewDirection(camera.Model, new NVector3(0f, modelAxisLength, 0f));
+            NVector3 worldZ = TransformVanillaPreviewDirection(camera.Model, new NVector3(0f, 0f, modelAxisLength));
+            if (!ProjectVanillaPreviewWorldPoint(camera, centerWorld + worldX, min, width, height, out NVector2 axisXEnd)) return false;
+            if (!ProjectVanillaPreviewWorldPoint(camera, centerWorld + worldY, min, width, height, out NVector2 axisYEnd)) return false;
+            if (!ProjectVanillaPreviewWorldPoint(camera, centerWorld + worldZ, min, width, height, out NVector2 axisZEnd)) return false;
+            axisX = axisXEnd - center;
+            axisY = axisYEnd - center;
+            axisZ = axisZEnd - center;
 
-        NVector2[] ringX = BuildVanillaViewportGizmoRing(camera, elementModel, elementPoint, modelRingRadius, min, width, height, TransformGizmoAxis.X);
-        NVector2[] ringY = BuildVanillaViewportGizmoRing(camera, elementModel, elementPoint, modelRingRadius, min, width, height, TransformGizmoAxis.Y);
-        NVector2[] ringZ = BuildVanillaViewportGizmoRing(camera, elementModel, elementPoint, modelRingRadius, min, width, height, TransformGizmoAxis.Z);
+            float ringScale = modelRingRadius / Math.Max(0.0001f, modelAxisLength);
+            ringX = BuildVanillaViewportGizmoRingWorld(camera, centerWorld, worldY * ringScale, worldZ * ringScale, min, width, height);
+            ringY = BuildVanillaViewportGizmoRingWorld(camera, centerWorld, worldX * ringScale, worldZ * ringScale, min, width, height);
+            ringZ = BuildVanillaViewportGizmoRingWorld(camera, centerWorld, worldX * ringScale, worldY * ringScale, min, width, height);
+        }
+        else
+        {
+            if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint + new NVector3(modelAxisLength, 0f, 0f), min, width, height, out NVector2 axisXEnd)) return false;
+            if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint + new NVector3(0f, modelAxisLength, 0f), min, width, height, out NVector2 axisYEnd)) return false;
+            if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint + new NVector3(0f, 0f, modelAxisLength), min, width, height, out NVector2 axisZEnd)) return false;
+            axisX = axisXEnd - center;
+            axisY = axisYEnd - center;
+            axisZ = axisZEnd - center;
+            ringX = BuildVanillaViewportGizmoRing(camera, elementModel, elementPoint, modelRingRadius, min, width, height, TransformGizmoAxis.X);
+            ringY = BuildVanillaViewportGizmoRing(camera, elementModel, elementPoint, modelRingRadius, min, width, height, TransformGizmoAxis.Y);
+            ringZ = BuildVanillaViewportGizmoRing(camera, elementModel, elementPoint, modelRingRadius, min, width, height, TransformGizmoAxis.Z);
+        }
+
+        float pixelScale = Math.Max(1f, (axisX.Length() + axisY.Length() + axisZ.Length()) / Math.Max(0.001f, modelAxisLength * 3f));
+        NVector2[] bounds = BuildVanillaElementBounds3D(camera, elementModel, pose.ForElement, min, width, height, out bool hasVisualCenter, out NVector2 visualCenter);
         if (GizmoMode == TransformGizmoMode.Rotate && (ringX.Length == 0 || ringY.Length == 0 || ringZ.Length == 0)) return false;
 
         projection = new(
@@ -2074,6 +2127,23 @@ public sealed partial class DebugWindowManager
         return points;
     }
 
+    private static NVector2[] BuildVanillaViewportGizmoRingWorld(VanillaPreviewCameraState camera, NVector3 centerWorld, NVector3 axisAWorld, NVector3 axisBWorld, NVector2 min, float width, float height)
+    {
+        const int segments = 72;
+        NVector2[] points = new NVector2[segments + 1];
+        for (int i = 0; i <= segments; i++)
+        {
+            float angle = (float)(i / (double)segments * Math.PI * 2.0);
+            NVector3 world = centerWorld + axisAWorld * (float)Math.Cos(angle) + axisBWorld * (float)Math.Sin(angle);
+            if (!ProjectVanillaPreviewWorldPoint(camera, world, min, width, height, out points[i]))
+            {
+                return [];
+            }
+        }
+
+        return points;
+    }
+
     private static Matrixf BuildVanillaGuiModelMatrix(float posX, float posY, float posZ, float guiSize, float entityScale, float rotX, float rotY, float rotZ)
     {
         Matrixf matrix = new();
@@ -2231,10 +2301,12 @@ public sealed partial class DebugWindowManager
 
     private static bool ProjectVanillaPreviewPoint(Matrixf localToWorld, VanillaPreviewCameraState camera, NVector3 point, NVector2 min, float width, float height, out NVector2 screen)
     {
-        Matrixf mvp = new();
-        mvp.Set(localToWorld.Values);
-        mvp.ReverseMul(camera.ProjectionView.Values);
-        Vec4f clip = mvp.TransformVector(new Vec4f(point.X, point.Y, point.Z, 1f));
+        return ProjectVanillaPreviewWorldPoint(camera, TransformVanillaPreviewPoint(localToWorld, point), min, width, height, out screen);
+    }
+
+    private static bool ProjectVanillaPreviewWorldPoint(VanillaPreviewCameraState camera, NVector3 worldPoint, NVector2 min, float width, float height, out NVector2 screen)
+    {
+        Vec4f clip = camera.ProjectionView.TransformVector(new Vec4f(worldPoint.X, worldPoint.Y, worldPoint.Z, 1f));
         if (!IsFinite(clip.W) || clip.W <= 0.001f)
         {
             screen = default;
@@ -2259,6 +2331,18 @@ public sealed partial class DebugWindowManager
         }
 
         return ndcX > -2f && ndcX < 2f && ndcY > -2f && ndcY < 2f;
+    }
+
+    private static NVector3 TransformVanillaPreviewPoint(Matrixf matrix, NVector3 point)
+    {
+        Vec4f transformed = matrix.TransformVector(new Vec4f(point.X, point.Y, point.Z, 1f));
+        return new NVector3(transformed.X, transformed.Y, transformed.Z);
+    }
+
+    private static NVector3 TransformVanillaPreviewDirection(Matrixf matrix, NVector3 direction)
+    {
+        Vec4f transformed = matrix.TransformVector(new Vec4f(direction.X, direction.Y, direction.Z, 0f));
+        return new NVector3(transformed.X, transformed.Y, transformed.Z);
     }
 
     private static bool IsFinite(float value)
@@ -2397,6 +2481,7 @@ public sealed partial class DebugWindowManager
         _vanillaViewportGizmoDragCenter = NVector2.Zero;
         _vanillaViewportGizmoDragLastAngleRadians = 0;
         _vanillaViewportGizmoDragAccumulatedDegrees = 0;
+        _vanillaViewportGizmoDragRingScreenSign = -1.0;
         _vanillaViewportGizmoDragRowKey = "";
         _vanillaViewportGizmoDragKeyFrameIndex = -1;
         _vanillaViewportGizmoDragElementName = "";
