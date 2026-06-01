@@ -17,6 +17,9 @@ public sealed partial class DebugWindowManager
     private readonly List<TransformAssetEntry> _visibleTransformAssets = [];
     private readonly Dictionary<string, ModelTransform> _transformDrafts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _transformDirtyKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _transformFamilyKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _transformFamilyDisplayKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _transformFamilyCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ImGuiThreePanelLayoutState _transformsLayout = new(0.24f, 0.32f);
     private DevToolsPreview3DRenderer? _transformsPreviewRenderer;
     private DevToolsPreviewMesh? _transformPreviewMesh;
@@ -27,6 +30,7 @@ public sealed partial class DebugWindowManager
     private int _transformsAssetIndex;
     private int _transformsTypeFilter;
     private bool _transformsDirtyOnly;
+    private bool _transformGroupEdit;
     private bool _transformUseTypedSlot;
     private int _transformDirectSlotIndex;
     private int _transformTypedMapIndex;
@@ -40,6 +44,16 @@ public sealed partial class DebugWindowManager
     private float _transformPreviewDistance = 4.5f;
     private Vector3 _transformPreviewTarget = new(0.5f, 0.5f, 0.5f);
     private Vector3 _transformPreviewAnchor = Vector3.Zero;
+    private TransformGizmoAxis _transformViewportGizmoDragAxis = TransformGizmoAxis.None;
+    private TransformGizmoMode _transformViewportGizmoDragMode = TransformGizmoMode.None;
+    private NVector2 _transformViewportGizmoDragMouseStart;
+    private NVector2 _transformViewportGizmoDragVector = new(1f, 0f);
+    private NVector2 _transformViewportGizmoDragCenter;
+    private double _transformViewportGizmoDragLastAngleRadians;
+    private double _transformViewportGizmoDragAccumulatedDegrees;
+    private double _transformViewportGizmoDragRingScreenSign = -1.0;
+    private float _transformViewportGizmoDragStartValue;
+    private string _transformViewportGizmoDragSlotKey = "";
     private string _transformsStatus = "";
     private bool _transformsIndexed;
 
@@ -103,6 +117,7 @@ public sealed partial class DebugWindowManager
         }
 
         _transformAssets.Sort((left, right) => string.Compare(left.Label, right.Label, StringComparison.OrdinalIgnoreCase));
+        RebuildTransformFamilyIndex();
         RebuildVisibleTransformAssets();
         _transformsIndexed = true;
     }
@@ -133,6 +148,96 @@ public sealed partial class DebugWindowManager
         }
 
         _transformsAssetIndex = Math.Clamp(_transformsAssetIndex, 0, Math.Max(0, _visibleTransformAssets.Count - 1));
+    }
+
+    private void RebuildTransformFamilyIndex()
+    {
+        _transformFamilyKeys.Clear();
+        _transformFamilyDisplayKeys.Clear();
+        _transformFamilyCounts.Clear();
+
+        Dictionary<string, int> candidateCounts = new(StringComparer.OrdinalIgnoreCase);
+        foreach (TransformAssetEntry entry in _transformAssets)
+        {
+            foreach ((string key, _) in GetTransformFallbackFamilyCandidates(entry))
+            {
+                candidateCounts[key] = candidateCounts.TryGetValue(key, out int count) ? count + 1 : 1;
+            }
+        }
+
+        foreach (TransformAssetEntry entry in _transformAssets)
+        {
+            string familyKey;
+            string displayPath;
+            if (TryGetTransformMetadataFamily(entry, out familyKey, out displayPath))
+            {
+                // Metadata-declared grouping is authoritative.
+            }
+            else
+            {
+                (familyKey, displayPath) = GetTransformFallbackFamilyCandidates(entry)
+                    .FirstOrDefault(candidate => candidateCounts.TryGetValue(candidate.Key, out int count) && count > 1);
+                if (string.IsNullOrWhiteSpace(familyKey))
+                {
+                    displayPath = entry.Collectible.Code?.Path ?? "unknown";
+                    familyKey = BuildTransformFamilyKey(entry, displayPath);
+                }
+            }
+
+            _transformFamilyKeys[entry.Key] = familyKey;
+            _transformFamilyDisplayKeys[entry.Key] = $"{(entry.IsBlock ? "Block" : "Item")} | {ImGuiLayoutHelper.CompactAssetCode($"{entry.Domain}:{displayPath}")}";
+            _transformFamilyCounts[familyKey] = _transformFamilyCounts.TryGetValue(familyKey, out int existing) ? existing + 1 : 1;
+        }
+    }
+
+    private static bool TryGetTransformMetadataFamily(TransformAssetEntry entry, out string familyKey, out string displayPath)
+    {
+        familyKey = "";
+        displayPath = "";
+        if (entry.Collectible.Attributes?.Token is not JObject attributes ||
+            attributes["handbook"] is not JObject handbook ||
+            handbook["groupBy"] is not JArray groupBy)
+        {
+            return false;
+        }
+
+        string? pattern = groupBy.Values<string>().FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+        if (string.IsNullOrWhiteSpace(pattern)) return false;
+
+        displayPath = NormalizeTransformFamilyPattern(pattern);
+        if (string.IsNullOrWhiteSpace(displayPath)) return false;
+
+        familyKey = BuildTransformFamilyKey(entry, displayPath);
+        return true;
+    }
+
+    private static IEnumerable<(string Key, string DisplayPath)> GetTransformFallbackFamilyCandidates(TransformAssetEntry entry)
+    {
+        string path = entry.Collectible.Code?.Path ?? "unknown";
+        for (int index = path.Length - 1; index > 0; index--)
+        {
+            char character = path[index];
+            if (character != '-' && character != '_' && character != '/') continue;
+
+            string prefix = path[..index].TrimEnd('-', '_', '/');
+            if (string.IsNullOrWhiteSpace(prefix)) continue;
+            yield return (BuildTransformFamilyKey(entry, prefix), prefix);
+        }
+    }
+
+    private static string BuildTransformFamilyKey(TransformAssetEntry entry, string familyPath)
+    {
+        return $"{(entry.IsBlock ? "block" : "item")}:{entry.Domain}:{familyPath}";
+    }
+
+    private static string NormalizeTransformFamilyPattern(string pattern)
+    {
+        string value = pattern.Trim();
+        int colon = value.IndexOf(':');
+        if (colon >= 0) value = value[(colon + 1)..];
+        int star = value.IndexOf('*');
+        if (star >= 0) value = value[..star];
+        return value.TrimEnd('-', '/', '_');
     }
 
     private void DrawTransformsBrowser(NVector2 size)
@@ -269,7 +374,10 @@ public sealed partial class DebugWindowManager
         }
 
         drawList.PushClipRect(min, max, true);
-        DrawTransformPreviewAxes(drawList, camera);
+        if (!DrawTransformViewportGizmo(asset, slot, transform, drawList, camera, min, max, hovered))
+        {
+            DrawTransformPreviewAxes(drawList, camera);
+        }
         drawList.PopClipRect();
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(min + new NVector2(12f, 10f), text, $"{asset.Label} / {slot.DisplayName}");
@@ -300,10 +408,11 @@ public sealed partial class DebugWindowManager
 
             if (!exists && ImGui.Button("Create slot##transform-create-slot"))
             {
-                MarkTransformDirty(asset, slot);
+                ApplyTransformDraftEdit(asset, slot, transform);
             }
 
             DrawTransformReferenceSelector(slot);
+            DrawTransformScopeControls(asset, slot);
             DrawTransformLiveControls(asset, slot, transform);
 
             ImGui.SeparatorText("Values");
@@ -338,7 +447,7 @@ public sealed partial class DebugWindowManager
                 transform.Rotation.Set(rotation.X, rotation.Y, rotation.Z);
                 transform.Origin.Set(origin.X, origin.Y, origin.Z);
                 transform.ScaleXYZ.Set(Math.Max(0.001f, scale.X), Math.Max(0.001f, scale.Y), Math.Max(0.001f, scale.Z));
-                MarkTransformDirty(asset, slot);
+                ApplyTransformDraftEdit(asset, slot, transform);
             }
 
             DrawTransformGizmoControls(
@@ -347,13 +456,13 @@ public sealed partial class DebugWindowManager
                 GetGizmoContextForTransformCode(slot.AttributeCode),
                 value =>
                 {
-                    MarkTransformDirty(asset, slot);
-                });
+                    ApplyTransformDraftEdit(asset, slot, value);
+                },
+                registerActive: false);
 
             if (ImGui.Button("Reset default##transform-reset"))
             {
-                _transformDrafts[slot.Key] = CreateDefaultTransformForSlot(asset, slot.AttributeCode);
-                MarkTransformDirty(asset, slot);
+                ResetTransformDraftToDefault(asset, slot);
             }
             ImGui.SameLine();
             if (ImGui.Button("Copy JSON##transform-copy"))
@@ -448,6 +557,36 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void DrawTransformScopeControls(TransformAssetEntry asset, TransformSlotSelection slot)
+    {
+        ImGui.SeparatorText("Edit scope");
+        string familyKey = GetTransformFamilyKey(asset);
+        int familyCount = _transformFamilyCounts.TryGetValue(familyKey, out int count) ? count : 1;
+        string familyDisplay = GetTransformFamilyDisplayKey(asset);
+        ImGui.TextWrapped(familyDisplay);
+        ImGui.TextDisabled($"{familyCount} compatible asset(s) for {slot.DisplayName}");
+
+        bool groupEdit = _transformGroupEdit;
+        if (familyCount <= 1) ImGui.BeginDisabled();
+        if (ImGui.Checkbox("Group edit##transform-group-edit", ref groupEdit))
+        {
+            _transformGroupEdit = groupEdit;
+            _transformsStatus = _transformGroupEdit
+                ? $"Group edit enabled for {familyDisplay}."
+                : "Transform edits apply only to the selected asset.";
+        }
+        if (familyCount <= 1) ImGui.EndDisabled();
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Groups use attributes.handbook.groupBy when present; otherwise they use the longest shared code prefix with matching assets.");
+        }
+
+        ImGui.TextDisabled(_transformGroupEdit && familyCount > 1
+            ? $"Editing all {familyCount} family members."
+            : "Editing selected asset only.");
+    }
+
     private void DrawTransformLiveControls(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform)
     {
         string liveKey = $"transform:{asset.Key}";
@@ -499,7 +638,16 @@ public sealed partial class DebugWindowManager
             return;
         }
 
-        ApplyTransformLive(asset, slot, GetTransformDraft(asset, slot), force);
+        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot).ToList();
+        foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
+        {
+            ApplyTransformLive(targetAsset, targetSlot, GetTransformDraft(targetAsset, targetSlot), force);
+        }
+
+        if (targets.Count > 1)
+        {
+            _liveApplyManager.LastStatus = $"Live applied {slot.DisplayName} to {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s).";
+        }
     }
 
     private void ClearTransformLiveApplyState()
@@ -619,6 +767,423 @@ public sealed partial class DebugWindowManager
         DrawTransformPreviewLine(drawList, camera, _transformPreviewAnchor, _transformPreviewAnchor + new Vector3(0, 0, 1.5f), axisZ, 2f);
     }
 
+    private bool DrawTransformViewportGizmo(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform, ImDrawListPtr drawList, DevToolsPreviewCamera camera, NVector2 min, NVector2 max, bool hovered)
+    {
+        if (GizmoMode == TransformGizmoMode.None)
+        {
+            ClearTransformViewportGizmoDrag();
+            return false;
+        }
+
+        Vector3 center = GetTransformViewportGizmoCenter();
+        float axisLength = GetTransformViewportGizmoAxisLength();
+        GetTransformViewportGizmoAxes(transform, out Vector3 axisX, out Vector3 axisY, out Vector3 axisZ);
+        if (!camera.Project(center, out NVector2 centerScreen, out _)) return false;
+
+        NVector2 xScreen = ProjectTransformViewportAxis(camera, center, axisX, axisLength);
+        NVector2 yScreen = ProjectTransformViewportAxis(camera, center, axisY, axisLength);
+        NVector2 zScreen = ProjectTransformViewportAxis(camera, center, axisZ, axisLength);
+        TransformGizmoAxis hoveredAxis = hovered ? PickTransformViewportGizmoAxis(camera, center, axisX, axisY, axisZ, axisLength) : TransformGizmoAxis.None;
+        if (hoveredAxis != TransformGizmoAxis.None) ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+
+        if (hovered && hoveredAxis != TransformGizmoAxis.None && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            _transformViewportGizmoDragAxis = hoveredAxis;
+            _transformViewportGizmoDragMode = GizmoMode;
+            _transformViewportGizmoDragMouseStart = ImGui.GetMousePos();
+            _transformViewportGizmoDragVector = GetTransformViewportGizmoDragVector(camera, center, hoveredAxis, axisX, axisY, axisZ, axisLength, centerScreen);
+            _transformViewportGizmoDragCenter = centerScreen;
+            _transformViewportGizmoDragLastAngleRadians = GetTransformViewportMouseAngle(centerScreen, _transformViewportGizmoDragMouseStart);
+            _transformViewportGizmoDragAccumulatedDegrees = 0;
+            _transformViewportGizmoDragRingScreenSign = GizmoMode == TransformGizmoMode.Rotate
+                ? GetTransformViewportRingScreenSign(camera, center, hoveredAxis, axisX, axisY, axisZ, axisLength)
+                : -1.0;
+            _transformViewportGizmoDragStartValue = GetTransformGizmoAxisValue(transform, GizmoMode, hoveredAxis);
+            _transformViewportGizmoDragSlotKey = slot.Key;
+        }
+
+        if (_transformViewportGizmoDragAxis != TransformGizmoAxis.None)
+        {
+            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left) || !string.Equals(_transformViewportGizmoDragSlotKey, slot.Key, StringComparison.OrdinalIgnoreCase))
+            {
+                ClearTransformViewportGizmoDrag();
+            }
+            else
+            {
+                ApplyTransformViewportGizmoDrag(asset, slot, transform, camera);
+                hoveredAxis = _transformViewportGizmoDragAxis;
+            }
+        }
+
+        uint red = ImGui.ColorConvertFloat4ToU32(new NVector4(0.85f, 0.25f, 0.16f, 0.95f));
+        uint green = ImGui.ColorConvertFloat4ToU32(new NVector4(0.32f, 0.9f, 0.34f, 0.95f));
+        uint blue = ImGui.ColorConvertFloat4ToU32(new NVector4(0.25f, 0.42f, 0.95f, 0.95f));
+        uint white = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.96f, 0.78f, 1f));
+        uint xColor = hoveredAxis == TransformGizmoAxis.X ? white : red;
+        uint yColor = hoveredAxis == TransformGizmoAxis.Y ? white : green;
+        uint zColor = hoveredAxis == TransformGizmoAxis.Z ? white : blue;
+        drawList.AddCircleFilled(centerScreen, 4.5f, white, 16);
+
+        if (GizmoMode == TransformGizmoMode.Rotate)
+        {
+            DrawTransformViewportGizmoRing(drawList, camera, center, axisY, axisZ, axisLength, xColor);
+            DrawTransformViewportGizmoRing(drawList, camera, center, axisX, axisZ, axisLength, yColor);
+            DrawTransformViewportGizmoRing(drawList, camera, center, axisX, axisY, axisLength, zColor);
+            return true;
+        }
+
+        DrawTransformViewportGizmoAxis(drawList, centerScreen, xScreen, xColor);
+        DrawTransformViewportGizmoAxis(drawList, centerScreen, yScreen, yColor);
+        DrawTransformViewportGizmoAxis(drawList, centerScreen, zScreen, zColor);
+        if (GizmoMode == TransformGizmoMode.Scale)
+        {
+            DrawTransformViewportGizmoCube(drawList, centerScreen + xScreen, xColor);
+            DrawTransformViewportGizmoCube(drawList, centerScreen + yScreen, yColor);
+            DrawTransformViewportGizmoCube(drawList, centerScreen + zScreen, zColor);
+        }
+        else
+        {
+            DrawTransformViewportGizmoArrow(drawList, centerScreen, xScreen, xColor);
+            DrawTransformViewportGizmoArrow(drawList, centerScreen, yScreen, yColor);
+            DrawTransformViewportGizmoArrow(drawList, centerScreen, zScreen, zColor);
+        }
+
+        return true;
+    }
+
+    private Vector3 GetTransformViewportGizmoCenter()
+    {
+        return _transformPreviewMesh?.Bounds.Center ?? _transformPreviewAnchor;
+    }
+
+    private float GetTransformViewportGizmoAxisLength()
+    {
+        DevToolsPreviewBounds bounds = _transformPreviewMesh?.Bounds ?? _transformReferenceMesh?.Bounds ?? DevToolsPreviewBounds.Empty;
+        return bounds.IsValid ? Math.Clamp(bounds.Radius * 0.75f, 0.25f, 1.2f) : 0.7f;
+    }
+
+    private void GetTransformViewportGizmoAxes(ModelTransform transform, out Vector3 axisX, out Vector3 axisY, out Vector3 axisZ)
+    {
+        axisX = Vector3.UnitX;
+        axisY = Vector3.UnitY;
+        axisZ = Vector3.UnitZ;
+        if (GizmoSpace == TransformGizmoSpace.World) return;
+
+        Matrixf rotation = new();
+        rotation.Identity();
+        rotation.Rotate(transform.Rotation.X * GameMath.DEG2RAD, transform.Rotation.Y * GameMath.DEG2RAD, transform.Rotation.Z * GameMath.DEG2RAD);
+        axisX = NormalizeOrDefault(TransformDirection(rotation, Vector3.UnitX), Vector3.UnitX);
+        axisY = NormalizeOrDefault(TransformDirection(rotation, Vector3.UnitY), Vector3.UnitY);
+        axisZ = NormalizeOrDefault(TransformDirection(rotation, Vector3.UnitZ), Vector3.UnitZ);
+    }
+
+    private static Vector3 TransformDirection(Matrixf matrix, Vector3 direction)
+    {
+        Vec4f transformed = matrix.TransformVector(new Vec4f(direction.X, direction.Y, direction.Z, 0f));
+        return new Vector3(transformed.X, transformed.Y, transformed.Z);
+    }
+
+    private static Vector3 NormalizeOrDefault(Vector3 value, Vector3 fallback)
+    {
+        return value.LengthSquared < 0.000001f ? fallback : Vector3.Normalize(value);
+    }
+
+    private static NVector2 ProjectTransformViewportAxis(DevToolsPreviewCamera camera, Vector3 center, Vector3 axis, float axisLength)
+    {
+        return camera.Project(center + axis * axisLength, out NVector2 end, out _) &&
+               camera.Project(center, out NVector2 start, out _)
+            ? end - start
+            : new NVector2(1f, 0f);
+    }
+
+    private TransformGizmoAxis PickTransformViewportGizmoAxis(DevToolsPreviewCamera camera, Vector3 center, Vector3 axisX, Vector3 axisY, Vector3 axisZ, float axisLength)
+    {
+        NVector2 mouse = ImGui.GetMousePos();
+        if (!camera.Project(center, out NVector2 centerScreen, out _)) return TransformGizmoAxis.None;
+        if (GizmoMode == TransformGizmoMode.Rotate)
+        {
+            float dx = DistanceToTransformViewportRing(camera, center, axisY, axisZ, axisLength, mouse);
+            float dy = DistanceToTransformViewportRing(camera, center, axisX, axisZ, axisLength, mouse);
+            float dz = DistanceToTransformViewportRing(camera, center, axisX, axisY, axisLength, mouse);
+            float min = Math.Min(dx, Math.Min(dy, dz));
+            if (min > 14f) return TransformGizmoAxis.None;
+            if (min == dx) return TransformGizmoAxis.X;
+            if (min == dy) return TransformGizmoAxis.Y;
+            return TransformGizmoAxis.Z;
+        }
+
+        TransformGizmoAxis picked = TransformGizmoAxis.None;
+        float best = 14f;
+        Test(TransformGizmoAxis.X, axisX);
+        Test(TransformGizmoAxis.Y, axisY);
+        Test(TransformGizmoAxis.Z, axisZ);
+        return picked;
+
+        void Test(TransformGizmoAxis axis, Vector3 direction)
+        {
+            NVector2 screenAxis = ProjectTransformViewportAxis(camera, center, direction, axisLength);
+            float distance = DistancePointToTransformViewportSegment(mouse, centerScreen, centerScreen + screenAxis);
+            if (distance >= best) return;
+            best = distance;
+            picked = axis;
+        }
+    }
+
+    private static float DistanceToTransformViewportRing(DevToolsPreviewCamera camera, Vector3 center, Vector3 axisA, Vector3 axisB, float radius, NVector2 mouse)
+    {
+        const int segments = 72;
+        if (!camera.Project(center + axisA * radius, out NVector2 previous, out _)) return float.MaxValue;
+        float best = float.MaxValue;
+        for (int i = 1; i <= segments; i++)
+        {
+            float angle = (float)(i / (double)segments * Math.PI * 2.0);
+            Vector3 point = center + axisA * ((float)Math.Cos(angle) * radius) + axisB * ((float)Math.Sin(angle) * radius);
+            if (!camera.Project(point, out NVector2 projected, out _)) continue;
+            best = Math.Min(best, DistancePointToTransformViewportSegment(mouse, previous, projected));
+            previous = projected;
+        }
+
+        return best;
+    }
+
+    private NVector2 GetTransformViewportGizmoDragVector(DevToolsPreviewCamera camera, Vector3 center, TransformGizmoAxis axis, Vector3 axisX, Vector3 axisY, Vector3 axisZ, float axisLength, NVector2 centerScreen)
+    {
+        if (GizmoMode == TransformGizmoMode.Rotate)
+        {
+            NVector2 radial = ImGui.GetMousePos() - centerScreen;
+            NVector2 tangent = new(-radial.Y, radial.X);
+            return NormalizeTransformScreenVector(tangent, GetProjectedTransformViewportAxis(camera, center, axis, axisX, axisY, axisZ, axisLength));
+        }
+
+        return NormalizeTransformScreenVector(GetProjectedTransformViewportAxis(camera, center, axis, axisX, axisY, axisZ, axisLength), new NVector2(1f, 0f));
+    }
+
+    private static NVector2 GetProjectedTransformViewportAxis(DevToolsPreviewCamera camera, Vector3 center, TransformGizmoAxis axis, Vector3 axisX, Vector3 axisY, Vector3 axisZ, float axisLength)
+    {
+        return axis switch
+        {
+            TransformGizmoAxis.X => ProjectTransformViewportAxis(camera, center, axisX, axisLength),
+            TransformGizmoAxis.Y => ProjectTransformViewportAxis(camera, center, axisY, axisLength),
+            TransformGizmoAxis.Z => ProjectTransformViewportAxis(camera, center, axisZ, axisLength),
+            _ => ProjectTransformViewportAxis(camera, center, axisX, axisLength)
+        };
+    }
+
+    private static NVector2 NormalizeTransformScreenVector(NVector2 value, NVector2 fallback)
+    {
+        float length = value.Length();
+        return length < 0.001f || !float.IsFinite(length) ? fallback : value / length;
+    }
+
+    private static double GetTransformViewportMouseAngle(NVector2 center, NVector2 mouse)
+    {
+        NVector2 radial = mouse - center;
+        return Math.Atan2(radial.Y, radial.X);
+    }
+
+    private double UpdateTransformViewportGizmoRingDrag()
+    {
+        NVector2 radial = ImGui.GetMousePos() - _transformViewportGizmoDragCenter;
+        if (radial.LengthSquared() < 16f) return _transformViewportGizmoDragAccumulatedDegrees;
+
+        double angle = GetTransformViewportMouseAngle(_transformViewportGizmoDragCenter, ImGui.GetMousePos());
+        double delta = NormalizeTransformViewportRadians(angle - _transformViewportGizmoDragLastAngleRadians);
+        _transformViewportGizmoDragLastAngleRadians = angle;
+        double sign = Math.Abs(_transformViewportGizmoDragRingScreenSign) < 0.001 ? -1.0 : _transformViewportGizmoDragRingScreenSign;
+        _transformViewportGizmoDragAccumulatedDegrees += delta * 180.0 / Math.PI / sign;
+        return _transformViewportGizmoDragAccumulatedDegrees;
+    }
+
+    private static double NormalizeTransformViewportRadians(double radians)
+    {
+        while (radians > Math.PI) radians -= Math.PI * 2.0;
+        while (radians < -Math.PI) radians += Math.PI * 2.0;
+        return radians;
+    }
+
+    private static double GetTransformViewportRingScreenSign(DevToolsPreviewCamera camera, Vector3 center, TransformGizmoAxis axis, Vector3 axisX, Vector3 axisY, Vector3 axisZ, float axisLength)
+    {
+        Vector3 axisA = axis == TransformGizmoAxis.X ? axisY : axisX;
+        Vector3 axisB = axis == TransformGizmoAxis.Z ? axisY : axisZ;
+        if (axis == TransformGizmoAxis.Y) axisB = axisZ;
+        if (!camera.Project(center, out NVector2 centerScreen, out _)) return -1.0;
+        NVector2 previous = default;
+        bool hasPrevious = false;
+        for (int i = 0; i <= 72; i++)
+        {
+            float angle = (float)(i / 72.0 * Math.PI * 2.0);
+            Vector3 point = center + axisA * ((float)Math.Cos(angle) * axisLength) + axisB * ((float)Math.Sin(angle) * axisLength);
+            if (!camera.Project(point, out NVector2 projected, out _)) continue;
+            if (hasPrevious)
+            {
+                NVector2 from = previous - centerScreen;
+                NVector2 to = projected - centerScreen;
+                float cross = from.X * to.Y - from.Y * to.X;
+                if (Math.Abs(cross) > 0.001f) return Math.Sign(cross);
+            }
+
+            previous = projected;
+            hasPrevious = true;
+        }
+
+        return -1.0;
+    }
+
+    private void ApplyTransformViewportGizmoDrag(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform, DevToolsPreviewCamera camera)
+    {
+        NVector2 direction = NormalizeTransformScreenVector(_transformViewportGizmoDragVector, new NVector2(1f, 0f));
+        NVector2 mouseDelta = ImGui.GetMousePos() - _transformViewportGizmoDragMouseStart;
+        double projected = NVector2.Dot(mouseDelta, direction);
+        float value = _transformViewportGizmoDragStartValue;
+
+        switch (_transformViewportGizmoDragMode)
+        {
+            case TransformGizmoMode.Move:
+                value += (float)(projected / Math.Max(1f, camera.FocalLength) * _transformPreviewDistance);
+                value = (float)SnapTransformGizmoValue(value, Math.Max(0.0001, TransformGizmoIncrement));
+                break;
+            case TransformGizmoMode.Scale:
+                value = Math.Clamp(value + (float)(projected * 0.01f), 0.001f, 100f);
+                value = (float)SnapTransformGizmoValue(value, Math.Max(0.0001, TransformGizmoIncrement));
+                break;
+            case TransformGizmoMode.Rotate:
+                value = NormalizeTransformDegrees(value + (float)UpdateTransformViewportGizmoRingDrag());
+                value = NormalizeTransformDegrees((float)SnapTransformGizmoValue(value, Math.Max(0.0001, TransformGizmoIncrement)));
+                break;
+            default:
+                return;
+        }
+
+        if (Math.Abs(value - GetTransformGizmoAxisValue(transform, _transformViewportGizmoDragMode, _transformViewportGizmoDragAxis)) < 0.0001f) return;
+        SetTransformGizmoAxisValue(transform, _transformViewportGizmoDragMode, _transformViewportGizmoDragAxis, value);
+        ApplyTransformDraftEdit(asset, slot, transform);
+    }
+
+    private static float GetTransformGizmoAxisValue(ModelTransform transform, TransformGizmoMode mode, TransformGizmoAxis axis)
+    {
+        return mode switch
+        {
+            TransformGizmoMode.Move => axis switch
+            {
+                TransformGizmoAxis.X => transform.Translation.X,
+                TransformGizmoAxis.Y => transform.Translation.Y,
+                TransformGizmoAxis.Z => transform.Translation.Z,
+                _ => 0
+            },
+            TransformGizmoMode.Rotate => axis switch
+            {
+                TransformGizmoAxis.X => transform.Rotation.X,
+                TransformGizmoAxis.Y => transform.Rotation.Y,
+                TransformGizmoAxis.Z => transform.Rotation.Z,
+                _ => 0
+            },
+            TransformGizmoMode.Scale => axis switch
+            {
+                TransformGizmoAxis.X => transform.ScaleXYZ.X,
+                TransformGizmoAxis.Y => transform.ScaleXYZ.Y,
+                TransformGizmoAxis.Z => transform.ScaleXYZ.Z,
+                _ => 1
+            },
+            _ => 0
+        };
+    }
+
+    private static void SetTransformGizmoAxisValue(ModelTransform transform, TransformGizmoMode mode, TransformGizmoAxis axis, float value)
+    {
+        switch (mode)
+        {
+            case TransformGizmoMode.Move:
+                if (axis == TransformGizmoAxis.X) transform.Translation.X = value;
+                if (axis == TransformGizmoAxis.Y) transform.Translation.Y = value;
+                if (axis == TransformGizmoAxis.Z) transform.Translation.Z = value;
+                break;
+            case TransformGizmoMode.Rotate:
+                if (axis == TransformGizmoAxis.X) transform.Rotation.X = value;
+                if (axis == TransformGizmoAxis.Y) transform.Rotation.Y = value;
+                if (axis == TransformGizmoAxis.Z) transform.Rotation.Z = value;
+                break;
+            case TransformGizmoMode.Scale:
+                if (axis == TransformGizmoAxis.X) transform.ScaleXYZ.X = Math.Max(0.001f, value);
+                if (axis == TransformGizmoAxis.Y) transform.ScaleXYZ.Y = Math.Max(0.001f, value);
+                if (axis == TransformGizmoAxis.Z) transform.ScaleXYZ.Z = Math.Max(0.001f, value);
+                break;
+        }
+    }
+
+    private double SnapTransformGizmoValue(double value, double step)
+    {
+        return IncludeGizmoInIncrement ? Math.Round(value / step) * step : value;
+    }
+
+    private static float NormalizeTransformDegrees(float value)
+    {
+        while (value > 180f) value -= 360f;
+        while (value < -180f) value += 360f;
+        return value;
+    }
+
+    private void ClearTransformViewportGizmoDrag()
+    {
+        _transformViewportGizmoDragAxis = TransformGizmoAxis.None;
+        _transformViewportGizmoDragMode = TransformGizmoMode.None;
+        _transformViewportGizmoDragVector = new NVector2(1f, 0f);
+        _transformViewportGizmoDragCenter = NVector2.Zero;
+        _transformViewportGizmoDragLastAngleRadians = 0;
+        _transformViewportGizmoDragAccumulatedDegrees = 0;
+        _transformViewportGizmoDragRingScreenSign = -1.0;
+        _transformViewportGizmoDragSlotKey = "";
+    }
+
+    private static void DrawTransformViewportGizmoAxis(ImDrawListPtr drawList, NVector2 center, NVector2 axis, uint color)
+    {
+        DrawTransformViewportLine(drawList, center, center + axis, color, 2.4f);
+    }
+
+    private static void DrawTransformViewportGizmoArrow(ImDrawListPtr drawList, NVector2 center, NVector2 axis, uint color)
+    {
+        NVector2 tip = center + axis;
+        NVector2 dir = NormalizeTransformScreenVector(axis, new NVector2(1f, 0f));
+        NVector2 normal = new(-dir.Y, dir.X);
+        drawList.AddTriangleFilled(tip, tip - dir * 13f + normal * 5.5f, tip - dir * 13f - normal * 5.5f, color);
+    }
+
+    private static void DrawTransformViewportGizmoCube(ImDrawListPtr drawList, NVector2 center, uint color)
+    {
+        NVector2 half = new(5.5f, 5.5f);
+        drawList.AddRectFilled(center - half, center + half, color, 1.5f);
+    }
+
+    private static void DrawTransformViewportGizmoRing(ImDrawListPtr drawList, DevToolsPreviewCamera camera, Vector3 center, Vector3 axisA, Vector3 axisB, float radius, uint color)
+    {
+        const int segments = 72;
+        if (!camera.Project(center + axisA * radius, out NVector2 previous, out _)) return;
+        for (int i = 1; i <= segments; i++)
+        {
+            float angle = (float)(i / (double)segments * Math.PI * 2.0);
+            Vector3 point = center + axisA * ((float)Math.Cos(angle) * radius) + axisB * ((float)Math.Sin(angle) * radius);
+            if (camera.Project(point, out NVector2 projected, out _))
+            {
+                DrawTransformViewportLine(drawList, previous, projected, color, 2.4f);
+                previous = projected;
+            }
+        }
+    }
+
+    private static void DrawTransformViewportLine(ImDrawListPtr drawList, NVector2 start, NVector2 end, uint color, float thickness)
+    {
+        if (!float.IsFinite(start.X) || !float.IsFinite(start.Y) || !float.IsFinite(end.X) || !float.IsFinite(end.Y)) return;
+        drawList.AddLine(start, end, color, thickness);
+    }
+
+    private static float DistancePointToTransformViewportSegment(NVector2 point, NVector2 a, NVector2 b)
+    {
+        NVector2 ab = b - a;
+        float lengthSq = ab.LengthSquared();
+        if (lengthSq <= 0.0001f) return (point - a).Length();
+        float t = Math.Clamp(NVector2.Dot(point - a, ab) / lengthSq, 0f, 1f);
+        return (point - (a + ab * t)).Length();
+    }
+
     private static void DrawTransformPreviewLine(ImDrawListPtr drawList, DevToolsPreviewCamera camera, Vector3 start, Vector3 end, uint color, float thickness)
     {
         if (!camera.Project(start, out NVector2 a, out _) || !camera.Project(end, out NVector2 b, out _)) return;
@@ -725,6 +1290,82 @@ public sealed partial class DebugWindowManager
         {
             ApplyTransformLive(asset, slot, GetTransformDraft(asset, slot));
         }
+    }
+
+    private void ApplyTransformDraftEdit(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform)
+    {
+        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot).ToList();
+        foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
+        {
+            _transformDrafts[targetSlot.Key] = ReferenceEquals(targetSlot, slot) || targetSlot.Key.Equals(slot.Key, StringComparison.OrdinalIgnoreCase)
+                ? transform
+                : transform.Clone();
+            _transformDirtyKeys.Add(targetSlot.Key);
+        }
+
+        _transformPreviewCacheKey = "";
+        RebuildVisibleTransformAssets();
+        if (_liveApplyManager.AutoApply)
+        {
+            foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
+            {
+                ApplyTransformLive(targetAsset, targetSlot, GetTransformDraft(targetAsset, targetSlot));
+            }
+        }
+
+        _transformsStatus = targets.Count > 1
+            ? $"Edited {slot.DisplayName} for {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s)."
+            : $"Edited {slot.DisplayName} for {asset.Label}.";
+    }
+
+    private void ResetTransformDraftToDefault(TransformAssetEntry asset, TransformSlotSelection slot)
+    {
+        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot).ToList();
+        foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
+        {
+            _transformDrafts[targetSlot.Key] = CreateDefaultTransformForSlot(targetAsset, targetSlot.AttributeCode);
+            _transformDirtyKeys.Add(targetSlot.Key);
+        }
+
+        _transformPreviewCacheKey = "";
+        RebuildVisibleTransformAssets();
+        if (_liveApplyManager.AutoApply)
+        {
+            foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
+            {
+                ApplyTransformLive(targetAsset, targetSlot, GetTransformDraft(targetAsset, targetSlot));
+            }
+        }
+
+        _transformsStatus = targets.Count > 1
+            ? $"Reset {slot.DisplayName} defaults for {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s)."
+            : $"Reset {slot.DisplayName} default for {asset.Label}.";
+    }
+
+    private IEnumerable<(TransformAssetEntry Asset, TransformSlotSelection Slot)> GetTransformEditTargets(TransformAssetEntry asset, TransformSlotSelection slot)
+    {
+        if (!_transformGroupEdit)
+        {
+            yield return (asset, slot);
+            yield break;
+        }
+
+        string familyKey = GetTransformFamilyKey(asset);
+        foreach (TransformAssetEntry target in _transformAssets)
+        {
+            if (!string.Equals(GetTransformFamilyKey(target), familyKey, StringComparison.OrdinalIgnoreCase)) continue;
+            yield return (target, new TransformSlotSelection(target, slot.AttributeCode, slot.TypedKey));
+        }
+    }
+
+    private string GetTransformFamilyKey(TransformAssetEntry asset)
+    {
+        return _transformFamilyKeys.TryGetValue(asset.Key, out string? key) ? key : BuildTransformFamilyKey(asset, asset.Collectible.Code?.Path ?? "unknown");
+    }
+
+    private string GetTransformFamilyDisplayKey(TransformAssetEntry asset)
+    {
+        return _transformFamilyDisplayKeys.TryGetValue(asset.Key, out string? display) ? display : asset.Label;
     }
 
     private TransformSlotSelection? GetSelectedTransformSlot(TransformAssetEntry? asset)

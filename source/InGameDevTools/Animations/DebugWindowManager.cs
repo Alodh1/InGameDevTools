@@ -3257,7 +3257,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _activeGizmoContext = TransformGizmoContext.Free;
     }
 
-    private void DrawTransformGizmoControls(string id, ModelTransform transform, TransformGizmoContext context, Action<ModelTransform>? apply, BlockPos? blockPos = null, Vec3d? worldCenter = null, TransformGizmoAxes? worldAxes = null, TransformGizmoAxes? parentAxes = null, bool allowMove = true, bool allowScale = true, bool allowRotate = true, Action? dragStarted = null, Action? dragEnded = null)
+    private void DrawTransformGizmoControls(string id, ModelTransform transform, TransformGizmoContext context, Action<ModelTransform>? apply, BlockPos? blockPos = null, Vec3d? worldCenter = null, TransformGizmoAxes? worldAxes = null, TransformGizmoAxes? parentAxes = null, bool allowMove = true, bool allowScale = true, bool allowRotate = true, Action? dragStarted = null, Action? dragEnded = null, bool registerActive = true)
     {
         ImGui.SeparatorText("Gizmo");
 
@@ -3306,6 +3306,8 @@ public sealed partial class DebugWindowManager : IDisposable
         }
 
         ImGui.TextDisabled("Drag colored axes in-world.");
+
+        if (!registerActive) return;
 
         _activeGizmoTransform = transform;
         _activeGizmoContext = context;
