@@ -416,11 +416,15 @@ public class ParticleEffectsManager
             obj.Property("vertexFlags", StringComparison.OrdinalIgnoreCase) != null;
     }
 
-    private static void NormalizeParticleProperties(AdvancedParticleProperties particleProperties)
+    private static void NormalizeParticleProperties(AdvancedParticleProperties particleProperties, bool stripVelocityEvolve = false)
     {
-        // VS 1.22 can crash clients when VelocityEvolve is present on network-spawned particles.
-        // Strip it at load time too, so old JSON assets cannot reintroduce the crash.
-        particleProperties.VelocityEvolve = null;
+        if (stripVelocityEvolve)
+        {
+            // VS 1.22 can crash clients when VelocityEvolve is present on network-spawned particles.
+            // Keep it in editor/preview data, but remove it from the runtime spawn copy.
+            particleProperties.VelocityEvolve = null;
+        }
+
         particleProperties.Velocity = EnsureNatFloatArray(particleProperties.Velocity, 3, 0f, 0.5f);
         particleProperties.PosOffset = EnsureNatFloatArray(particleProperties.PosOffset, 3, 0f, 0f);
         particleProperties.HsvaColor = EnsureHsvaNatFloatArray(particleProperties.HsvaColor);
@@ -1610,24 +1614,29 @@ public class ParticleEffectsManager
         ParticlePreviewPlacement placement = GetPreviewPlacement(key);
         ParticleReferenceModel? referenceModel = _previewShowReferenceModel ? placement.ReferenceModel : null;
         Vector3 previewOrigin = placement.ParticleOrigin;
+        List<DevToolsPreviewMeshInstance> meshInstances = [];
         if (referenceModel?.Mesh != null)
         {
             Matrixf identity = new();
             identity.Identity();
-            int textureId = EnsurePreviewRenderer3D().RenderToTexture(
-                max.X - min.X,
-                max.Y - min.Y,
-                previewCamera,
-                [new DevToolsPreviewMeshInstance(referenceModel.Mesh, identity)],
-                out string? skipReason);
-            if (textureId > 0)
-            {
-                drawList.AddImage(new IntPtr(textureId), min, max, new System.Numerics.Vector2(0f, 1f), new System.Numerics.Vector2(1f, 0f));
-            }
-            else if (!string.IsNullOrWhiteSpace(skipReason))
-            {
-                drawList.AddText(min + new System.Numerics.Vector2(12f, 90f), text, $"Reference render skipped: {skipReason}");
-            }
+            meshInstances.Add(new DevToolsPreviewMeshInstance(referenceModel.Mesh, identity));
+        }
+
+        List<DevToolsPreviewParticleInstance> previewParticles = BuildPreviewParticleInstances(_previewParticles);
+        int textureId = EnsurePreviewRenderer3D().RenderToTexture(
+            max.X - min.X,
+            max.Y - min.Y,
+            previewCamera,
+            meshInstances,
+            previewParticles,
+            out string? skipReason);
+        if (textureId > 0)
+        {
+            drawList.AddImage(new IntPtr(textureId), min, max, new System.Numerics.Vector2(0f, 1f), new System.Numerics.Vector2(1f, 0f));
+        }
+        else if (!string.IsNullOrWhiteSpace(skipReason))
+        {
+            drawList.AddText(min + new System.Numerics.Vector2(12f, 90f), text, $"Preview render skipped: {skipReason}");
         }
 
         drawList.PushClipRect(min, max, true);
@@ -1658,37 +1667,6 @@ public class ParticleEffectsManager
             }
         }
 
-        List<ParticlePreviewDrawParticle> drawParticles = [];
-        foreach (ParticlePreviewParticle particle in _previewParticles)
-        {
-            if (!ProjectPreviewPoint(previewCamera, particle.Position, out System.Numerics.Vector2 point, out float depth)) continue;
-            drawParticles.Add(new(particle, point, depth));
-        }
-
-        foreach (ParticlePreviewDrawParticle projected in drawParticles.OrderByDescending(particle => particle.Depth))
-        {
-            ParticlePreviewParticle particle = projected.Particle;
-            float particleSize = Math.Clamp(GetPreviewParticleSize(particle) * previewCamera.FocalLength / Math.Max(0.05f, projected.Depth), 1.5f, 96f);
-            System.Numerics.Vector2 point = projected.ScreenPosition;
-            uint color = PreviewColor(particle);
-            int glow = new VertexFlags(particle.VertexFlags).GlowLevel;
-
-            if (glow > 0)
-            {
-                float glowSize = particleSize + Math.Clamp(glow / 255f * 8f, 2f, 8f);
-                uint glowColor = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(1f, 0.88f, 0.42f, Math.Clamp(glow / 255f * 0.45f, 0.08f, 0.45f)));
-                drawList.AddCircleFilled(point, glowSize, glowColor, 18);
-            }
-
-            if (particle.ParticleModel == EnumParticleModel.Cube)
-            {
-                drawList.AddRectFilled(point - new System.Numerics.Vector2(particleSize, particleSize), point + new System.Numerics.Vector2(particleSize, particleSize), color, 1f);
-            }
-            else
-            {
-                drawList.AddCircleFilled(point, particleSize, color, 18);
-            }
-        }
         drawList.PopClipRect();
 
         drawList.AddText(min + new System.Numerics.Vector2(12f, 10f), text, $"{_previewParticles.Count} preview particles");
@@ -2388,8 +2366,8 @@ public class ParticleEffectsManager
 
     private ParticlePreviewParticle? CreatePreviewParticle(AdvancedParticleProperties particleProperties, int emitterIndex, Vector3 origin)
     {
-        int rgbaColor = GetPreviewRgbaColor(particleProperties);
-        if (rgbaColor == 0) return null;
+        ParticlePreviewColor previewColor = GetPreviewParticleColor(particleProperties);
+        if (previewColor.Alpha == 0) return null;
 
         Vector3 velocity = new(
             SampleNatFloat(GetNatFloat(particleProperties.Velocity, 0)) + _previewVelocityX,
@@ -2411,10 +2389,10 @@ public class ParticleEffectsManager
             Bounciness = particleProperties.Bounciness,
             SizeMultiplier = Math.Max(0.01f, SampleNatFloat(particleProperties.Size)),
             ParticleHeight = particleProperties.ParticleModel == EnumParticleModel.Cube ? 0.0625f : 0.5f,
-            ColorRed = (byte)rgbaColor,
-            ColorGreen = (byte)(rgbaColor >> 8),
-            ColorBlue = (byte)(rgbaColor >> 16),
-            ColorAlpha = (byte)(rgbaColor >> 24),
+            ColorRed = previewColor.Red,
+            ColorGreen = previewColor.Green,
+            ColorBlue = previewColor.Blue,
+            ColorAlpha = previewColor.Alpha,
             VertexFlags = particleProperties.VertexFlags,
             SelfPropelled = particleProperties.SelfPropelled,
             TerrainCollision = particleProperties.TerrainCollision,
@@ -2707,11 +2685,23 @@ public class ParticleEffectsManager
         return values != null && index >= 0 && index < values.Length ? values[index] : null;
     }
 
-    private int GetPreviewRgbaColor(AdvancedParticleProperties particleProperties)
+    private ParticlePreviewColor GetPreviewParticleColor(AdvancedParticleProperties particleProperties)
     {
+        if (_api is ICoreClientAPI clientApi)
+        {
+            try
+            {
+                return ParticlePreviewColor.FromRgba(particleProperties.GetRgbaColor(clientApi));
+            }
+            catch
+            {
+                // Fall through to the local sampler for partially initialized preview-only particles.
+            }
+        }
+
         if (particleProperties.HsvaColor == null)
         {
-            return particleProperties.Color;
+            return ParticlePreviewColor.FromRgba(particleProperties.Color);
         }
 
         int hsvRgba = ColorUtil.HsvToRgba(
@@ -2719,14 +2709,33 @@ public class ParticleEffectsManager
             (byte)GameMath.Clamp(SampleNatFloat(GetNatFloat(particleProperties.HsvaColor, 1)), 0f, 255f),
             (byte)GameMath.Clamp(SampleNatFloat(GetNatFloat(particleProperties.HsvaColor, 2)), 0f, 255f),
             (byte)GameMath.Clamp(SampleNatFloat(GetNatFloat(particleProperties.HsvaColor, 3)), 0f, 255f));
-        int red = hsvRgba & 0xFF;
-        int green = (hsvRgba >> 8) & 0xFF;
-        int blue = (hsvRgba >> 16) & 0xFF;
-        int alpha = (hsvRgba >> 24) & 0xFF;
-        return (red << 16) | (green << 8) | blue | (alpha << 24);
+        return ParticlePreviewColor.FromRgba(hsvRgba);
     }
 
-    private static uint PreviewColor(ParticlePreviewParticle particle)
+    private static List<DevToolsPreviewParticleInstance> BuildPreviewParticleInstances(IEnumerable<ParticlePreviewParticle> particles)
+    {
+        List<DevToolsPreviewParticleInstance> instances = [];
+        foreach (ParticlePreviewParticle particle in particles)
+        {
+            Vector4 color = PreviewColorVector(particle);
+            if (color.W <= 0.001f) continue;
+
+            float size = GetPreviewParticleSize(particle);
+            if (!float.IsFinite(size) || size <= 0f) continue;
+
+            int glow = new VertexFlags(particle.VertexFlags).GlowLevel;
+            instances.Add(new DevToolsPreviewParticleInstance(
+                particle.Position,
+                size,
+                color,
+                particle.ParticleModel == EnumParticleModel.Cube,
+                glow));
+        }
+
+        return instances;
+    }
+
+    private static Vector4 PreviewColorVector(ParticlePreviewParticle particle)
     {
         float sequence = GetPreviewSequence(particle);
         byte alpha = particle.ColorAlpha;
@@ -2738,7 +2747,7 @@ public class ParticleEffectsManager
         byte red = (byte)GameMath.Clamp(particle.ColorRed + EvaluateEvolvingNatFloat(particle.RedEvolve, particle.ColorRed, sequence), 0f, 255f);
         byte green = (byte)GameMath.Clamp(particle.ColorGreen + EvaluateEvolvingNatFloat(particle.GreenEvolve, particle.ColorGreen, sequence), 0f, 255f);
         byte blue = (byte)GameMath.Clamp(particle.ColorBlue + EvaluateEvolvingNatFloat(particle.BlueEvolve, particle.ColorBlue, sequence), 0f, 255f);
-        return ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(red / 255f, green / 255f, blue / 255f, alpha / 255f));
+        return new Vector4(red / 255f, green / 255f, blue / 255f, alpha / 255f);
     }
 
     private static float GetPreviewParticleSize(ParticlePreviewParticle particle)
@@ -2778,30 +2787,21 @@ public class ParticleEffectsManager
         return value.MaxValue.HasValue ? Math.Min(value.MaxValue.Value, result) : result;
     }
 
-    private readonly struct ParticlePreviewCamera(
-        Vector3 position,
-        Vector3 forward,
-        Vector3 right,
-        Vector3 up,
-        System.Numerics.Vector2 center,
-        float focalLength)
+    private readonly struct ParticlePreviewColor(byte red, byte green, byte blue, byte alpha)
     {
-        public readonly Vector3 Position = position;
-        public readonly Vector3 Forward = forward;
-        public readonly Vector3 Right = right;
-        public readonly Vector3 Up = up;
-        public readonly System.Numerics.Vector2 Center = center;
-        public readonly float FocalLength = focalLength;
-    }
+        public readonly byte Red = red;
+        public readonly byte Green = green;
+        public readonly byte Blue = blue;
+        public readonly byte Alpha = alpha;
 
-    private readonly struct ParticlePreviewDrawParticle(
-        ParticlePreviewParticle particle,
-        System.Numerics.Vector2 screenPosition,
-        float depth)
-    {
-        public readonly ParticlePreviewParticle Particle = particle;
-        public readonly System.Numerics.Vector2 ScreenPosition = screenPosition;
-        public readonly float Depth = depth;
+        public static ParticlePreviewColor FromRgba(int rgba)
+        {
+            return new(
+                (byte)(rgba & 0xFF),
+                (byte)((rgba >> 8) & 0xFF),
+                (byte)((rgba >> 16) & 0xFF),
+                (byte)((rgba >> 24) & 0xFF));
+        }
     }
 
     private sealed class ParticleEffectFamilyBuilder(string key, string displayKey, string domain, string searchText, string tooltip)
@@ -3082,7 +3082,8 @@ public class ParticleEffectsManager
         AdvancedParticleProperties effect;
         try
         {
-            effect = Get(packet.Code);
+            effect = Get(packet.Code).Clone();
+            NormalizeParticleProperties(effect, stripVelocityEvolve: true);
         }
         catch (Exception exception)
         {
@@ -3092,23 +3093,14 @@ public class ParticleEffectsManager
 
         effect.basePos = new(packet.Position[0], packet.Position[1], packet.Position[2]);
 
-        NatFloat velocityX = effect.Velocity[0].Clone();
-        NatFloat velocityY = effect.Velocity[1].Clone();
-        NatFloat velocityZ = effect.Velocity[2].Clone();
         effect.Velocity[0].avg += packet.Velocity[0];
         effect.Velocity[1].avg += packet.Velocity[1];
         effect.Velocity[2].avg += packet.Velocity[2];
 
-        NatFloat quantity = effect.Quantity.Clone();
         effect.Quantity.avg *= packet.Intensity;
         effect.Quantity.var *= packet.Intensity;
 
         _api.World.SpawnParticles(effect, player);
-
-        effect.Quantity = quantity;
-        effect.Velocity[0] = velocityX;
-        effect.Velocity[1] = velocityY;
-        effect.Velocity[2] = velocityZ;
     }
     private static Vector3 FromCameraReferenceFrame(Entity player, Vector3 position)
     {
@@ -3315,10 +3307,6 @@ public static class ParticleEditor
         NatFloat velocityZ = particleProperties.Velocity[2];
         NatFloatEditor(id, "Velocity.Z", ref velocityZ);
         particleProperties.Velocity[2] = velocityZ;
-
-        // Disabled intentionally: VS 1.22 can crash clients when VelocityEvolve is present
-        // on network-spawned AdvancedParticleProperties.
-        particleProperties.VelocityEvolve = null;
 
         ImGui.Unindent();
     }
