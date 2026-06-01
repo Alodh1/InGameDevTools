@@ -23,6 +23,28 @@ public sealed partial class DebugWindowManager
 {
     private const double VanillaIkSolveTolerance = 0.01;
     private const double VanillaIkSolveImprovementEpsilon = 0.001;
+    private const int VanillaIkAutoMaxChainLength = 4;
+    private const int VanillaIkAutoAbsoluteMaxChainLength = 8;
+    private const int VanillaIkAutoMaxAdjustmentBones = 4;
+    private const int VanillaIkAutoHubChildThreshold = 3;
+
+    private static readonly string[] VanillaIkTrunkNameTokens =
+    [
+        "root",
+        "body",
+        "torso",
+        "trunk",
+        "lowertorso",
+        "uppertorso",
+        "pelvis",
+        "hip",
+        "hips",
+        "spine",
+        "neck",
+        "chest",
+        "abdomen",
+        "waist"
+    ];
 
     private readonly VanillaAnimationIndexService _vanillaIndex = new();
     private readonly VanillaAnimationSelection _vanillaSelection = new();
@@ -96,6 +118,9 @@ public sealed partial class DebugWindowManager
     private float _vanillaIkTargetX;
     private float _vanillaIkTargetY;
     private float _vanillaIkTargetZ;
+    private int _vanillaIkAutoRootExtraBones;
+    private int _vanillaIkAutoEndExtraBones;
+    private string _vanillaIkAutoAdjustmentElementName = "";
     private bool _vanillaIkDragActive;
     private string _vanillaIkDragRowKey = "";
     private int _vanillaIkDragKeyFrameIndex = -1;
@@ -3477,7 +3502,7 @@ public sealed partial class DebugWindowManager
             _vanillaIkMode = VanillaIkChainMode.AutoLimb;
             _vanillaIkHasTarget = false;
             ClearVanillaViewportGizmoDrag();
-            _vanillaStatus = "IK mode: auto limb. Select a paired limb part; torso/root ancestors are ignored.";
+            _vanillaStatus = "IK mode: auto limb. Select any element; the chain is detected from the shape hierarchy.";
         }
 
         ImGui.SameLine();
@@ -3520,6 +3545,11 @@ public sealed partial class DebugWindowManager
             {
                 ImGui.TextDisabled($"IK Move handle: {chain.EndElementName}.");
             }
+            ImGui.TextDisabled($"End effector: distal end of {chain.EndElementName}.");
+            if (_vanillaIkMode == VanillaIkChainMode.AutoLimb)
+            {
+                DrawVanillaAutoIkChainAdjusters(selectedElementName);
+            }
         }
         else
         {
@@ -3557,8 +3587,52 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.TextDisabled(_vanillaIkMode == VanillaIkChainMode.AutoLimb
-            ? "Orbit viewport: click body parts to select them. IK automatically uses paired limb chains and ignores torso/root ancestors."
+            ? "Orbit viewport: click body parts to select them. IK detects limb chains structurally and stops before body hubs."
             : "Manual override: click body parts or Ctrl+Click elements to add/remove IK chain bones.");
+    }
+
+    private void DrawVanillaAutoIkChainAdjusters(string selectedElementName)
+    {
+        NormalizeVanillaIkAutoAdjustmentSelection(selectedElementName);
+
+        ImGui.TextDisabled("Auto chain length:");
+        ImGui.SameLine();
+        if (ImGui.SmallButton("- root##vanilla-ik-auto-root-minus"))
+        {
+            AdjustVanillaAutoIkChainLength(ref _vanillaIkAutoRootExtraBones, -1, "root");
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("+ root##vanilla-ik-auto-root-plus"))
+        {
+            AdjustVanillaAutoIkChainLength(ref _vanillaIkAutoRootExtraBones, 1, "root");
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("- end##vanilla-ik-auto-end-minus"))
+        {
+            AdjustVanillaAutoIkChainLength(ref _vanillaIkAutoEndExtraBones, -1, "end");
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("+ end##vanilla-ik-auto-end-plus"))
+        {
+            AdjustVanillaAutoIkChainLength(ref _vanillaIkAutoEndExtraBones, 1, "end");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Extends the auto end effector farther down the selected element's child path.");
+        }
+    }
+
+    private void AdjustVanillaAutoIkChainLength(ref int value, int delta, string side)
+    {
+        int next = Math.Clamp(value + delta, 0, VanillaIkAutoMaxAdjustmentBones);
+        if (next == value) return;
+
+        value = next;
+        _vanillaIkHasTarget = false;
+        ClearVanillaViewportGizmoDrag();
+        _vanillaStatus = side == "root"
+            ? $"Auto IK root expansion: {value} extra bone(s)."
+            : $"Auto IK end extension: {value} extra bone(s).";
     }
 
     private void PruneVanillaIkChainElements(string[] allElements)
@@ -3602,9 +3676,11 @@ public sealed partial class DebugWindowManager
 
         if (string.IsNullOrWhiteSpace(selectedElementName))
         {
-            error = "Select a paired limb element for auto IK.";
+            error = "Select an element for auto IK.";
             return false;
         }
+
+        NormalizeVanillaIkAutoAdjustmentSelection(selectedElementName);
 
         Shape? shape = document.Shape;
         if (shape?.Elements == null || shape.Elements.Length == 0)
@@ -3619,43 +3695,238 @@ public sealed partial class DebugWindowManager
             return false;
         }
 
-        string[] allElements = BuildVanillaSymmetryElementUniverse(document, animation, keyFrame);
-        int startIndex = -1;
-        for (int index = 0; index < path.Count; index++)
+        ShapeElement selected = path[^1];
+        string resolvedSelectedName = string.IsNullOrWhiteSpace(selected.Name) ? selectedElementName.Trim() : selected.Name!;
+        int selectedIndex = path.Count - 1;
+        if (IsVanillaIkStructuralHub(selected, selectedIndex == 0, out string selectedHubReason))
         {
-            string elementName = path[index].Name ?? "";
-            if (string.IsNullOrWhiteSpace(elementName)) continue;
-            if (!TryResolveVanillaSymmetryPair(document, elementName, allElements, out _, out VanillaSymmetrySide sourceSide, out _)) continue;
-            if (sourceSide == VanillaSymmetrySide.Unknown) continue;
+            if (TryGetVanillaIkLongestChildPath(selected, GetVanillaIkAutoMaxChainLength(), out List<ShapeElement> childPath, out string childNote) &&
+                TryBuildVanillaIkChainNames(childPath, out string[] childNames))
+            {
+                warning = $"Selected {resolvedSelectedName} is {selectedHubReason}; auto uses child limb {childNames[0]}.";
+                if (!string.IsNullOrWhiteSpace(childNote)) warning += $" {childNote}";
+                chain = new VanillaIkManualChain(childNames, childNames[^1], string.Join(" -> ", childNames));
+                return true;
+            }
 
-            startIndex = index;
-            break;
+            warning = $"Selected {resolvedSelectedName} is {selectedHubReason}; auto uses a one-bone chain.";
+            chain = new VanillaIkManualChain([resolvedSelectedName], resolvedSelectedName, resolvedSelectedName);
+            return true;
         }
 
-        if (startIndex < 0)
+        int detectedStartIndex = FindVanillaIkStructuralChainStart(path, selectedIndex, out string stopReason);
+        int startIndex = Math.Max(0, detectedStartIndex - _vanillaIkAutoRootExtraBones);
+        int maxChainLength = GetVanillaIkAutoMaxChainLength();
+        if (selectedIndex - startIndex + 1 > maxChainLength)
         {
-            error = "No paired limb chain found; use Manual override.";
-            return false;
+            startIndex = Math.Max(0, selectedIndex - maxChainLength + 1);
         }
 
-        string[] orderedNames = path
-            .Skip(startIndex)
-            .Select(element => element.Name ?? "")
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .ToArray();
+        var chainElements = path.Skip(startIndex).Take(selectedIndex - startIndex + 1).ToList();
+        int remaining = Math.Max(0, maxChainLength - chainElements.Count);
+        AppendVanillaIkLongestDescendantPath(chainElements, selected, remaining, out string extensionNote);
+
+        if (!TryBuildVanillaIkChainNames(chainElements, out string[] orderedNames))
+        {
+            orderedNames = BuildVanillaIkFallbackChainNames(path, selectedElementName);
+            warning = "Auto IK could not build a named structural path; using a fallback chain.";
+        }
+
         if (orderedNames.Length == 0)
         {
-            error = "No paired limb chain found; use Manual override.";
+            error = $"IK element {selectedElementName} has no usable named chain.";
             return false;
         }
 
-        if (startIndex == 0)
+        if (string.IsNullOrWhiteSpace(warning))
         {
-            warning = "Auto chain starts at a root paired element; verify this is intended.";
+            warning = string.IsNullOrWhiteSpace(stopReason)
+                ? "Auto chain used the nearest structural path."
+                : $"Auto chain stopped before {stopReason}.";
+            if (_vanillaIkAutoRootExtraBones > 0) warning += $" Root expanded by {_vanillaIkAutoRootExtraBones}.";
+            if (!string.IsNullOrWhiteSpace(extensionNote)) warning += $" {extensionNote}";
+        }
+        if (orderedNames.Length == 1 && !warning.Contains("one-bone", StringComparison.OrdinalIgnoreCase))
+        {
+            warning += " Using a one-bone chain.";
         }
 
         chain = new VanillaIkManualChain(orderedNames, orderedNames[^1], string.Join(" -> ", orderedNames));
         return true;
+    }
+
+    private void NormalizeVanillaIkAutoAdjustmentSelection(string selectedElementName)
+    {
+        string normalized = selectedElementName?.Trim() ?? "";
+        if (string.Equals(_vanillaIkAutoAdjustmentElementName, normalized, StringComparison.OrdinalIgnoreCase)) return;
+
+        _vanillaIkAutoAdjustmentElementName = normalized;
+        _vanillaIkAutoRootExtraBones = 0;
+        _vanillaIkAutoEndExtraBones = 0;
+    }
+
+    private int GetVanillaIkAutoMaxChainLength()
+    {
+        return Math.Clamp(
+            VanillaIkAutoMaxChainLength + _vanillaIkAutoRootExtraBones + _vanillaIkAutoEndExtraBones,
+            1,
+            VanillaIkAutoAbsoluteMaxChainLength);
+    }
+
+    private static int FindVanillaIkStructuralChainStart(IReadOnlyList<ShapeElement> path, int selectedIndex, out string stopReason)
+    {
+        stopReason = "";
+        for (int index = selectedIndex - 1; index >= 0; index--)
+        {
+            if (!IsVanillaIkStructuralHub(path[index], index == 0, out string reason)) continue;
+
+            string name = string.IsNullOrWhiteSpace(path[index].Name) ? "unnamed hub" : path[index].Name!;
+            stopReason = $"{name} ({reason})";
+            return Math.Min(selectedIndex, index + 1);
+        }
+
+        return Math.Max(0, selectedIndex - 1);
+    }
+
+    private static bool IsVanillaIkStructuralHub(ShapeElement element, bool isRoot, out string reason)
+    {
+        if (isRoot)
+        {
+            reason = "shape root";
+            return true;
+        }
+
+        int childCount = element.Children?.Length ?? 0;
+        if (childCount >= VanillaIkAutoHubChildThreshold)
+        {
+            reason = $"hub with {childCount} children";
+            return true;
+        }
+
+        string normalized = NormalizeVanillaIkStructureName(element.Name);
+        if (IsVanillaIkTrunkName(normalized))
+        {
+            reason = $"trunk name '{element.Name}'";
+            return true;
+        }
+
+        reason = "";
+        return false;
+    }
+
+    private static bool IsVanillaIkTrunkName(string normalizedName)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedName)) return false;
+        if (VanillaIkTrunkNameTokens.Contains(normalizedName, StringComparer.OrdinalIgnoreCase)) return true;
+        return normalizedName.Contains("torso", StringComparison.OrdinalIgnoreCase) ||
+               normalizedName.Contains("spine", StringComparison.OrdinalIgnoreCase) ||
+               normalizedName.Contains("pelvis", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeVanillaIkStructureName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "";
+
+        StringBuilder builder = new(name.Length);
+        foreach (char character in name)
+        {
+            if (char.IsLetterOrDigit(character)) builder.Append(char.ToLowerInvariant(character));
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool TryGetVanillaIkLongestChildPath(ShapeElement element, int maxLength, out List<ShapeElement> path, out string note)
+    {
+        path = [];
+        note = "";
+        if (maxLength <= 0) return false;
+
+        ShapeElement? current = SelectVanillaIkLongestNamedChild(element, out int childCount);
+        if (current == null) return false;
+        if (childCount > 1)
+        {
+            note = $"Chose the longest child path from {element.Name ?? "unnamed"} ({childCount} children).";
+        }
+
+        path.Add(current);
+        AppendVanillaIkLongestDescendantPath(path, current, maxLength - 1, out string extensionNote);
+        if (!string.IsNullOrWhiteSpace(extensionNote))
+        {
+            note = string.IsNullOrWhiteSpace(note) ? extensionNote : $"{note} {extensionNote}";
+        }
+
+        return path.Count > 0;
+    }
+
+    private static void AppendVanillaIkLongestDescendantPath(List<ShapeElement> chainElements, ShapeElement current, int maxAdditional, out string note)
+    {
+        note = "";
+        for (int added = 0; added < maxAdditional; added++)
+        {
+            ShapeElement? next = SelectVanillaIkLongestNamedChild(current, out int childCount);
+            if (next == null) return;
+
+            if (childCount > 1 && string.IsNullOrWhiteSpace(note))
+            {
+                note = $"Extended through the longest child path from {current.Name ?? "unnamed"} ({childCount} children).";
+            }
+
+            chainElements.Add(next);
+            current = next;
+        }
+    }
+
+    private static ShapeElement? SelectVanillaIkLongestNamedChild(ShapeElement element, out int childCount)
+    {
+        childCount = element.Children?.Length ?? 0;
+        if (element.Children == null || element.Children.Length == 0) return null;
+
+        return element.Children
+            .Where(child => !string.IsNullOrWhiteSpace(child.Name))
+            .OrderByDescending(GetVanillaIkNamedSubtreeDepth)
+            .ThenBy(child => child.Name, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+    }
+
+    private static int GetVanillaIkNamedSubtreeDepth(ShapeElement element)
+    {
+        if (element.Children == null || element.Children.Length == 0) return 1;
+
+        int best = 0;
+        foreach (ShapeElement child in element.Children)
+        {
+            if (string.IsNullOrWhiteSpace(child.Name)) continue;
+            best = Math.Max(best, GetVanillaIkNamedSubtreeDepth(child));
+        }
+
+        return 1 + best;
+    }
+
+    private static bool TryBuildVanillaIkChainNames(IEnumerable<ShapeElement> elements, out string[] names)
+    {
+        names = elements
+            .Select(element => element.Name ?? "")
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return names.Length > 0;
+    }
+
+    private static string[] BuildVanillaIkFallbackChainNames(IReadOnlyList<ShapeElement> path, string selectedElementName)
+    {
+        if (path.Count == 0) return string.IsNullOrWhiteSpace(selectedElementName) ? [] : [selectedElementName.Trim()];
+
+        int selectedIndex = path.Count - 1;
+        int startIndex = Math.Max(0, selectedIndex - 1);
+        string[] names = path
+            .Skip(startIndex)
+            .Select(element => element.Name ?? "")
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return names.Length > 0 || string.IsNullOrWhiteSpace(selectedElementName) ? names : [selectedElementName.Trim()];
     }
 
     private bool TryGetManualVanillaIkChain(Shape? shape, out VanillaIkManualChain chain, out string error, out string warning)
