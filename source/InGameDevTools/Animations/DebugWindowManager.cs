@@ -612,7 +612,8 @@ public sealed partial class DebugWindowManager : IDisposable
         Animations,
         RecipeEditor,
         Particles,
-        Transforms
+        Transforms,
+        BlockItemJson
     }
 
     private readonly AnimationEditorHistory _animationHistory = new();
@@ -801,6 +802,13 @@ public sealed partial class DebugWindowManager : IDisposable
                     TransformsEditorTab(deltaSeconds);
                     ImGui.EndTabItem();
                 }
+                bool blockItemJsonTabOpen = true;
+                if (ImGui.BeginTabItem("Block/Item JSON##tab", ref blockItemJsonTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.BlockItemJson;
+                    BlockItemJsonEditorTab(deltaSeconds, _showEditorDiagnostics);
+                    ImGui.EndTabItem();
+                }
                 ImGui.EndTabBar();
             }
             ImGui.SetWindowFontScale(1f);
@@ -921,6 +929,9 @@ public sealed partial class DebugWindowManager : IDisposable
             case DevToolsTab.Transforms:
                 ApplySelectedTransformLive(force);
                 break;
+            case DevToolsTab.BlockItemJson:
+                ApplyBlockItemJsonRuntime(force);
+                break;
         }
     }
 
@@ -930,6 +941,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _recipeEditor.ClearRecipeLiveApplyState();
         _particleEffectsManager.ClearParticleLiveApplyState();
         ClearTransformLiveApplyState();
+        ClearBlockItemJsonLiveApplyState();
     }
 
     private void ResetDevToolsLayout()
@@ -939,6 +951,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _recipeEditor.ResetLayout();
         _particleEffectsManager.ResetLayout();
         ResetTransformsLayout();
+        ResetBlockItemJsonLayout();
     }
 
     private void CollidersTab()
