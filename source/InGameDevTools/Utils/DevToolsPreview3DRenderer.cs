@@ -10,7 +10,7 @@ namespace InGameDevTools.Utils;
 
 internal sealed class DevToolsPreview3DRenderer : IDisposable
 {
-    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad-v3";
+    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad-v4";
 
     private readonly ICoreClientAPI _api;
     private FrameBufferRef? _frameBuffer;
@@ -252,28 +252,14 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
     {
         if (particles.Count == 0) return 0;
 
-        EngineParticlePreview preview = EnsureParticlePreview();
-        int spawned = 0;
-        foreach (AdvancedParticleProperties particle in particles)
-        {
-            spawned += preview.Spawn(particle, cameraPosition);
-        }
-
-        return spawned;
+        return EnsureParticlePreview().Spawn(particles, cameraPosition);
     }
 
     public int SpawnParticleProviders(IReadOnlyList<IParticlePropertiesProvider> particles, Vector3 cameraPosition)
     {
         if (particles.Count == 0) return 0;
 
-        EngineParticlePreview preview = EnsureParticlePreview();
-        int spawned = 0;
-        foreach (IParticlePropertiesProvider particle in particles)
-        {
-            spawned += preview.Spawn(particle, cameraPosition);
-        }
-
-        return spawned;
+        return EnsureParticlePreview().Spawn(particles, cameraPosition);
     }
 
     public void Dispose()
@@ -310,15 +296,15 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         _particlePreview.Update(camera.Position, Math.Clamp(deltaSeconds, 0f, 0.1f));
         Matrixf particleView = BuildCameraOriginView(camera);
 
-        RenderEngineParticlePool(render.GetEngineShader(EnumShaderProgram.Particlescube), _particlePreview.CubePool, particleView, camera.Projection, EnumBlendMode.Standard);
-        RenderEngineParticlePool(EnsurePreviewQuadParticleShader(), _particlePreview.QuadPool, particleView, camera.Projection, EnumBlendMode.Glow);
+        RenderEngineParticlePool(render.GetEngineShader(EnumShaderProgram.Particlescube), _particlePreview.CubePool, particleView, camera.Projection, PreviewParticleBlendMode.Standard);
+        RenderEngineParticlePool(EnsurePreviewQuadParticleShader(), _particlePreview.QuadPool, particleView, camera.Projection, PreviewParticleBlendMode.AdditivePreserveFramebufferAlpha);
     }
 
-    private void RenderEngineParticlePool(IShaderProgram shader, IParticlePool pool, Matrixf modelView, Matrixf projection, EnumBlendMode blendMode)
+    private void RenderEngineParticlePool(IShaderProgram shader, IParticlePool pool, Matrixf modelView, Matrixf projection, PreviewParticleBlendMode blendMode)
     {
         if (pool.QuantityAlive <= 0) return;
 
-        _api.Render.GlToggleBlend(true, blendMode);
+        ApplyParticleBlendMode(blendMode);
         shader.Use();
         try
         {
@@ -329,6 +315,23 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         {
             shader.Stop();
         }
+    }
+
+    private void ApplyParticleBlendMode(PreviewParticleBlendMode blendMode)
+    {
+        if (blendMode == PreviewParticleBlendMode.Standard)
+        {
+            _api.Render.GlToggleBlend(true, EnumBlendMode.Standard);
+            return;
+        }
+
+        GL.Enable(EnableCap.Blend);
+        GL.BlendEquationSeparate(BlendEquationMode.FuncAdd, BlendEquationMode.FuncAdd);
+        GL.BlendFuncSeparate(
+            BlendingFactorSrc.SrcAlpha,
+            BlendingFactorDest.One,
+            BlendingFactorSrc.Zero,
+            BlendingFactorDest.One);
     }
 
     private IShaderProgram EnsurePreviewQuadParticleShader()
@@ -435,12 +438,13 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         private const int CubePoolSize = 2048;
         private readonly ICoreClientAPI _api;
         private bool _primed;
+        private bool _updating;
 
         public EngineParticlePreview(ICoreClientAPI api, ClientMain client)
         {
             _api = api;
-            QuadPool = new ParticlePoolQuads(QuadPoolSize, client, offthread: false);
-            CubePool = new ParticlePoolCubes(CubePoolSize, client, offthread: false);
+            QuadPool = new ParticlePoolQuads(QuadPoolSize, client, offthread: true);
+            CubePool = new ParticlePoolCubes(CubePoolSize, client, offthread: true);
         }
 
         public IParticlePool QuadPool { get; }
@@ -454,11 +458,22 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
 
         public int Spawn(IParticlePropertiesProvider particleProperties, Vector3 cameraPosition)
         {
+            return Spawn([particleProperties], cameraPosition);
+        }
+
+        public int Spawn(IEnumerable<IParticlePropertiesProvider> particleProperties, Vector3 cameraPosition)
+        {
             Prime(cameraPosition);
-            particleProperties.Init(_api);
-            IParticlePool pool = particleProperties.ParticleModel == EnumParticleModel.Quad ? QuadPool : CubePool;
-            int spawned = pool.SpawnParticles(particleProperties);
-            if (spawned > 0)
+            int spawned = 0;
+            foreach (IParticlePropertiesProvider particle in particleProperties)
+            {
+                if (particle == null) continue;
+                particle.Init(_api);
+                IParticlePool pool = particle.ParticleModel == EnumParticleModel.Quad ? QuadPool : CubePool;
+                spawned += pool.SpawnParticles(particle);
+            }
+
+            if (spawned > 0 && !_updating)
             {
                 Update(cameraPosition, 0f);
             }
@@ -469,11 +484,22 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         public void Update(Vector3 cameraPosition, float deltaSeconds)
         {
             Vec3d cameraPos = new(cameraPosition.X, cameraPosition.Y, cameraPosition.Z);
-            EngineParticleSpawnRedirect.RunWithPreview(this, () =>
+            _updating = true;
+            try
             {
-                CubePool.OnNewFrame(deltaSeconds, cameraPos);
-                QuadPool.OnNewFrame(deltaSeconds, cameraPos);
-            });
+                EngineParticleSpawnRedirect.RunWithPreview(this, () =>
+                {
+                    QuadPool.OnNewFrameOffThread(deltaSeconds, cameraPos);
+                    CubePool.OnNewFrameOffThread(deltaSeconds, cameraPos);
+                    QuadPool.OnNewFrame(deltaSeconds, cameraPos);
+                    CubePool.OnNewFrame(deltaSeconds, cameraPos);
+                });
+            }
+            finally
+            {
+                _updating = false;
+            }
+
             _primed = true;
         }
 
@@ -488,6 +514,12 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
             QuadPool.Dipose();
             CubePool.Dipose();
         }
+    }
+
+    private enum PreviewParticleBlendMode
+    {
+        Standard,
+        AdditivePreserveFramebufferAlpha
     }
 
     private static class EngineParticleSpawnRedirect
