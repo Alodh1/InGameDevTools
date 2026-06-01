@@ -115,14 +115,28 @@ public sealed partial class DebugWindowManager
         }
 
         string key = GetVanillaLiveKey(document);
+        string serialized = VanillaAnimationDocumentSerializer.Serialize(document);
         string status = _liveApplyManager.Apply(
             key,
             document.DisplayPath,
             () => CaptureVanillaLiveSnapshot(document),
             () => ApplyVanillaLiveDocument(document),
             () => BuildVanillaAppliedStatus(document));
-        _vanillaLiveAppliedHashes[key] = VanillaAnimationDocumentSerializer.Serialize(document);
+        if (IsVanillaLiveApplyFailure(status))
+        {
+            _vanillaLiveAppliedHashes.Remove(key);
+        }
+        else
+        {
+            _vanillaLiveAppliedHashes[key] = serialized;
+        }
+
         return status;
+    }
+
+    private static bool IsVanillaLiveApplyFailure(string status)
+    {
+        return status.StartsWith("Live apply failed", StringComparison.OrdinalIgnoreCase);
     }
 
     private void ClearVanillaLiveApplyState()
@@ -266,8 +280,8 @@ public sealed partial class DebugWindowManager
             ? ""
             : $" Rebuild failures: {string.Join("; ", refresh.Failures.Take(3))}{(refresh.Failures.Count > 3 ? $"; +{refresh.Failures.Count - 3} more" : "")}.";
         if (refresh.Matched == 0) return $"{baseStatus} Applied to future starts only.{failureText}";
-        if (refresh.Refreshed < refresh.Matched) return $"{baseStatus} Retessellated {refresh.Refreshed}/{refresh.Matched} loaded entity renderer(s); some apply to future starts only.{failureText}";
-        return $"{baseStatus} Retessellated {refresh.Refreshed} loaded entity renderer instance(s).{failureText}";
+        if (refresh.Refreshed < refresh.Matched) return $"{baseStatus} Queued retessellation for {refresh.Refreshed}/{refresh.Matched} loaded entity renderer(s); some apply to future starts only.{failureText}";
+        return $"{baseStatus} Queued retessellation for {refresh.Refreshed} loaded entity renderer instance(s).{failureText}";
     }
 
     private IEnumerable<Shape> GetVanillaRuntimeShapes(VanillaAnimationDocument document)
@@ -509,9 +523,9 @@ public sealed partial class DebugWindowManager
 
             try
             {
-                if (!TryResolveRuntimeEntityShape(entity, entityType, out Shape? entityShape) || entityShape == null)
+                if (!TryResolveRuntimeEntityShape(entity, entityType, out Shape? entityShape, out string missingShapeReason) || entityShape == null)
                 {
-                    result.Failures.Add($"{entity.Code}: missing loaded shape");
+                    result.Failures.Add($"{entity.Code}: {missingShapeReason}");
                     continue;
                 }
 
@@ -549,13 +563,27 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private static bool TryResolveRuntimeEntityShape(Entity entity, EntityProperties entityType, out Shape? shape)
+    private static bool TryResolveRuntimeEntityShape(Entity entity, EntityProperties entityType, out Shape? shape, out string failureReason)
     {
-        shape = entity.Properties?.Client?.LoadedShapeForEntity
-            ?? entity.Properties?.Client?.LoadedShape
-            ?? entityType.Client?.LoadedShapeForEntity
-            ?? entityType.Client?.LoadedShape;
-        return shape != null;
+        EntityClientProperties? client = entity.Properties?.Client ?? entityType.Client;
+        if (client == null)
+        {
+            shape = null;
+            failureReason = "missing client properties";
+            return false;
+        }
+
+        shape = client.LoadedShapeForEntity;
+        if (shape != null)
+        {
+            failureReason = "";
+            return true;
+        }
+
+        failureReason = client.LoadedShape != null
+            ? "missing entity render shape; LoadedShape exists but renderer retessellates from LoadedShapeForEntity"
+            : "missing loaded shape";
+        return false;
     }
 
     private void ClearRuntimeAnimationCache(Entity entity)
