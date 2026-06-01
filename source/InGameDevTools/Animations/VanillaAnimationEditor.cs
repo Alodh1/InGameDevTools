@@ -82,6 +82,8 @@ public sealed partial class DebugWindowManager
     private VanillaLiveSymmetryDriver _vanillaLiveSymmetryDriver = VanillaLiveSymmetryDriver.SelectedElement;
     private int _vanillaLiveSymmetryPhaseFrames = -1;
     private bool _vanillaLiveSymmetryPropagating;
+    private bool _vanillaShowLiveSymmetryGhost = true;
+    private float _vanillaLiveSymmetryGhostOpacity = 0.35f;
     private bool _vanillaIkFollowMove;
     private readonly List<string> _vanillaIkChainElementNames = [];
     private bool _vanillaIkHasTarget;
@@ -1200,6 +1202,7 @@ public sealed partial class DebugWindowManager
         VanillaPreviewMode effectiveMode = GetVanillaEffectivePreviewMode(scene);
         float viewportWidth = Math.Max(1f, max.X - min.X);
         float viewportHeight = Math.Max(1f, max.Y - min.Y);
+        VanillaPreviewGhost ghost = BuildVanillaLiveSymmetryGhost(row, scene, effectiveMode);
 
         VanillaAnimationViewport3DRenderer renderer = EnsureVanillaPreviewRenderer();
         int textureId = renderer.RenderToTexture(
@@ -1213,6 +1216,7 @@ public sealed partial class DebugWindowManager
             _vanillaViewportPanY,
             effectiveMode,
             _vanillaViewportWorldLighting,
+            ghost,
             _vanillaVerbosePreviewLogs,
             out string? previewSkipReason);
         if (textureId > 0)
@@ -1228,6 +1232,11 @@ public sealed partial class DebugWindowManager
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"Preview: {scene.DisplayName}");
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), text, GetVanillaViewportHelpText(effectiveMode, scene));
+        if (ghost.Enabled)
+        {
+            uint ghostText = ImGui.ColorConvertFloat4ToU32(new NVector4(0.54f, 0.86f, 1f, 1f));
+            drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), ghostText, $"Symmetry ghost: frame {ghost.Frame:0}");
+        }
 
         if (effectiveMode == VanillaPreviewMode.Orbit)
         {
@@ -1246,6 +1255,48 @@ public sealed partial class DebugWindowManager
                 drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), hint, "Edit gizmos are available in Orbit mode.");
             }
         }
+    }
+
+    private VanillaPreviewGhost BuildVanillaLiveSymmetryGhost(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, VanillaPreviewMode effectiveMode)
+    {
+        if (!_vanillaLiveSymmetryEnabled ||
+            !_vanillaShowLiveSymmetryGhost ||
+            scene.Playing ||
+            effectiveMode != VanillaPreviewMode.Orbit ||
+            row.ShapeAnimation == null)
+        {
+            return VanillaPreviewGhost.Disabled;
+        }
+
+        VanillaAnimationDocument document = row.ShapeAnimation.Document;
+        VanillaAnimation animation = row.ShapeAnimation.Animation;
+        if (_vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.InPlace ||
+            animation.QuantityFrames <= 1 ||
+            animation.KeyFrames == null ||
+            animation.KeyFrames.Length == 0 ||
+            string.IsNullOrWhiteSpace(_vanillaSelection.ElementName))
+        {
+            return VanillaPreviewGhost.Disabled;
+        }
+
+        int keyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, animation.KeyFrames.Length - 1);
+        AnimationKeyFrame keyFrame = animation.KeyFrames[keyFrameIndex];
+        string[] allElements = BuildVanillaSymmetryElementUniverse(document, animation, keyFrame);
+        if (!TryResolveVanillaSymmetryPair(document, _vanillaSelection.ElementName, allElements, out string pairName, out VanillaSymmetrySide sourceSide, out _) ||
+            string.Equals(pairName, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase) ||
+            !ShouldVanillaLiveSymmetryPropagateFrom(sourceSide))
+        {
+            return VanillaPreviewGhost.Disabled;
+        }
+
+        int phaseFrames = GetVanillaLiveSymmetryPhaseFrames(animation);
+        if (phaseFrames <= 0) return VanillaPreviewGhost.Disabled;
+
+        int sourceFrame = (int)Math.Round(scene.CurrentFrame, MidpointRounding.AwayFromZero);
+        int ghostFrame = GetVanillaPhaseTargetFrame(animation, sourceFrame, phaseFrames);
+        if (ghostFrame == sourceFrame) return VanillaPreviewGhost.Disabled;
+
+        return new VanillaPreviewGhost(true, ghostFrame, Math.Clamp(_vanillaLiveSymmetryGhostOpacity, 0.05f, 0.8f));
     }
 
     private VanillaPreviewMode GetVanillaEffectivePreviewMode(VanillaAnimationPreviewScene scene)
@@ -2277,7 +2328,7 @@ public sealed partial class DebugWindowManager
         BuildVanillaPreviewScene(row, rebuildMesh: false);
     }
 
-    private void EnsureVanillaLiveSymmetryPlayback(VanillaBrowserRow row, VanillaAnimation animation)
+    private void PauseVanillaLiveSymmetryPreview(VanillaBrowserRow row, VanillaAnimation animation)
     {
         if (!_vanillaLiveSymmetryEnabled || _vanillaLiveSymmetryMode != VanillaLiveSymmetryMode.HalfCycle) return;
         if (_vanillaPreviewScene?.Key != row.Key) return;
@@ -2289,7 +2340,7 @@ public sealed partial class DebugWindowManager
             _vanillaSelection.LoopEndFrame = maxFrame;
         }
 
-        _vanillaPreviewScene.Play();
+        _vanillaPreviewScene.Playing = false;
     }
 
     private void DisposeVanillaPreviewScene()
@@ -2902,7 +2953,7 @@ public sealed partial class DebugWindowManager
             _vanillaLiveSymmetryEnabled = enabled;
             if (_vanillaLiveSymmetryEnabled)
             {
-                EnsureVanillaLiveSymmetryPlayback(row, animation);
+                PauseVanillaLiveSymmetryPreview(row, animation);
             }
 
             _vanillaStatus = _vanillaLiveSymmetryEnabled
@@ -2925,7 +2976,7 @@ public sealed partial class DebugWindowManager
         if (ImGui.RadioButton("Half-cycle gait##vanilla-live-symmetry-mode", _vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.HalfCycle))
         {
             _vanillaLiveSymmetryMode = VanillaLiveSymmetryMode.HalfCycle;
-            EnsureVanillaLiveSymmetryPlayback(row, animation);
+            PauseVanillaLiveSymmetryPreview(row, animation);
             _vanillaStatus = "Live symmetry mode: half-cycle gait.";
         }
 
@@ -2965,7 +3016,30 @@ public sealed partial class DebugWindowManager
                 : $"Using custom phase: {activePhase} frame(s).");
             if (_vanillaLiveSymmetryEnabled)
             {
-                ImGui.TextDisabled("Half-cycle mode writes the pair at the shifted frame; playback shows the gait.");
+                ImGui.TextDisabled("Half-cycle mode writes the pair at the shifted frame; the ghost shows that pose while paused.");
+            }
+        }
+
+        if (_vanillaLiveSymmetryEnabled)
+        {
+            bool showGhost = _vanillaShowLiveSymmetryGhost;
+            if (ImGui.Checkbox("Show symmetry ghost##vanilla-live-symmetry-ghost", ref showGhost))
+            {
+                _vanillaShowLiveSymmetryGhost = showGhost;
+                _vanillaStatus = _vanillaShowLiveSymmetryGhost
+                    ? "Live symmetry ghost enabled."
+                    : "Live symmetry ghost hidden.";
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Shows a translucent phase-shifted preview of the mirrored pose without playing the animation.");
+            }
+
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(120);
+            if (ImGui.SliderFloat("Ghost opacity##vanilla-live-symmetry-ghost-opacity", ref _vanillaLiveSymmetryGhostOpacity, 0.05f, 0.8f, "%.2f"))
+            {
+                _vanillaLiveSymmetryGhostOpacity = Math.Clamp(_vanillaLiveSymmetryGhostOpacity, 0.05f, 0.8f);
             }
         }
     }
@@ -3225,7 +3299,6 @@ public sealed partial class DebugWindowManager
         PreserveVanillaSelectedKeyFrame(entry.Animation, sourceKeyFrame);
         MarkVanillaDirty(entry.Document);
         RefreshVanillaPreviewAfterEdit(row);
-        EnsureVanillaLiveSymmetryPlayback(row, entry.Animation);
 
         if (symmetry.Applied)
         {
@@ -5720,11 +5793,14 @@ public sealed partial class DebugWindowManager
     {
         private readonly ICoreClientAPI _api;
         private readonly Dictionary<string, AnimationMetaData> _activeAnimationsByAnimCode = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, AnimationMetaData> _ghostAnimationsByAnimCode = new(StringComparer.OrdinalIgnoreCase);
         private Shape _shape;
         private AnimationMetaData _metadata;
+        private AnimationMetaData _ghostMetadata;
         private VanillaAnimation _animation;
         private string _activeAnimationCode;
         private ClientAnimator _animator;
+        private ClientAnimator _ghostAnimator;
         private readonly MeshData _previewMeshData;
         private readonly MultiTextureMeshRef _meshRef;
         private MultiTextureMeshRef? _firstPersonMeshRef;
@@ -5760,6 +5836,9 @@ public sealed partial class DebugWindowManager
             _activeAnimationCode = GetAnimationCode(animation, metadata);
             _metadata.Animation = _activeAnimationCode;
             _animator = animator;
+            _ghostMetadata = CloneAnimationMetaData(metadata);
+            _ghostMetadata.Animation = _activeAnimationCode;
+            _ghostAnimator = CreatePreviewAnimator(shape, animation, key);
             _previewMeshData = meshes.PreviewMeshData;
             _meshRef = meshes.Orbit;
             _firstPersonMeshRef = meshes.FirstPerson;
@@ -5780,6 +5859,7 @@ public sealed partial class DebugWindowManager
             QuantityFrames = Math.Max(1, animation.QuantityFrames);
             ApplyBounds(bounds);
             _activeAnimationsByAnimCode[_activeAnimationCode] = _metadata;
+            _ghostAnimationsByAnimCode[_activeAnimationCode] = _ghostMetadata;
             ForceEvaluatePose(0);
         }
 
@@ -5794,6 +5874,7 @@ public sealed partial class DebugWindowManager
         public float CurrentFrame { get; private set; }
         public bool Playing { get; set; }
         public ClientAnimator Animator => _animator;
+        public ClientAnimator GhostAnimator => _ghostAnimator;
         public float ModelCenterX { get; private set; }
         public float ModelCenterY { get; private set; }
         public float ModelCenterZ { get; private set; }
@@ -5854,15 +5935,20 @@ public sealed partial class DebugWindowManager
             _shape = shape;
             _animation = animation;
             _metadata = metadata;
+            _ghostMetadata = CloneAnimationMetaData(metadata);
             _activeAnimationCode = GetAnimationCode(animation, metadata);
             _metadata.Animation = _activeAnimationCode;
+            _ghostMetadata.Animation = _activeAnimationCode;
             _animator = CreatePreviewAnimator(shape, animation, row.Key);
+            _ghostAnimator = CreatePreviewAnimator(shape, animation, row.Key);
             ApplyBounds(CalculateModelBounds(shape));
             ApplyGuiTransform(GetGuiTransform(row));
             FirstPersonFovDegrees = Math.Clamp(_api.Settings.Int["fpHandsFoV"] > 0 ? _api.Settings.Int["fpHandsFoV"] : 75, 25, 130);
             FirstPersonYOffset = _api.Settings.Float["fpHandsYOffset"];
             _activeAnimationsByAnimCode.Clear();
             _activeAnimationsByAnimCode[_activeAnimationCode] = _metadata;
+            _ghostAnimationsByAnimCode.Clear();
+            _ghostAnimationsByAnimCode[_activeAnimationCode] = _ghostMetadata;
             QuantityFrames = Math.Max(1, animation.QuantityFrames);
             CurrentFrame = Math.Clamp(CurrentFrame, 0, Math.Max(0, QuantityFrames - 1));
             ForceEvaluatePose(CurrentFrame);
@@ -5885,11 +5971,16 @@ public sealed partial class DebugWindowManager
             _previewMode = mode;
             _animation = animation;
             _metadata = metadata;
+            _ghostMetadata = CloneAnimationMetaData(metadata);
             _activeAnimationCode = GetAnimationCode(animation, metadata);
             _metadata.Animation = _activeAnimationCode;
+            _ghostMetadata.Animation = _activeAnimationCode;
             _animator = CreatePreviewAnimator(_shape, animation, row.Key);
+            _ghostAnimator = CreatePreviewAnimator(_shape, animation, row.Key);
             _activeAnimationsByAnimCode.Clear();
             _activeAnimationsByAnimCode[_activeAnimationCode] = _metadata;
+            _ghostAnimationsByAnimCode.Clear();
+            _ghostAnimationsByAnimCode[_activeAnimationCode] = _ghostMetadata;
             QuantityFrames = Math.Max(1, animation.QuantityFrames);
             CurrentFrame = Math.Clamp(CurrentFrame, 0, Math.Max(0, QuantityFrames - 1));
             ForceEvaluatePose(CurrentFrame);
@@ -5959,6 +6050,38 @@ public sealed partial class DebugWindowManager
             }
             Playing = wasPlaying;
             MarkRenderDirty();
+        }
+
+        public bool TryEvaluateGhostPose(float frame)
+        {
+            if (_disposed) return false;
+
+            float ghostFrame = Math.Clamp(frame, 0, Math.Max(0, QuantityFrames - 1));
+            _ghostAnimationsByAnimCode[_activeAnimationCode] = _ghostMetadata;
+            _ghostMetadata.StartFrameOnce = ghostFrame;
+            _ghostAnimator.OnFrame(_ghostAnimationsByAnimCode, 0.001f);
+
+            RunningAnimation? state = _ghostAnimator.GetAnimationState(_activeAnimationCode);
+            if (state != null)
+            {
+                state.meta = _ghostMetadata;
+                state.EasingFactor = 1f;
+                state.CurrentFrame = ghostFrame;
+                state.Iterations = ghostFrame >= QuantityFrames - 1 ? 1 : 0;
+            }
+
+            _ghostMetadata.StartFrameOnce = ghostFrame;
+            _ghostAnimator.OnFrame(_ghostAnimationsByAnimCode, 0f);
+            state = _ghostAnimator.GetAnimationState(_activeAnimationCode);
+            if (state != null)
+            {
+                state.meta = _ghostMetadata;
+                state.EasingFactor = 1f;
+                state.CurrentFrame = ghostFrame;
+                state.Iterations = ghostFrame >= QuantityFrames - 1 ? 1 : 0;
+            }
+
+            return _ghostAnimator.Matrices != null;
         }
 
         private void MarkRenderDirty()
@@ -6721,6 +6844,11 @@ public sealed partial class DebugWindowManager
         NVector3 Target,
         float Distance);
 
+    private readonly record struct VanillaPreviewGhost(bool Enabled, float Frame, float Opacity)
+    {
+        public static VanillaPreviewGhost Disabled { get; } = new(false, 0f, 0f);
+    }
+
     private readonly record struct VanillaPreviewRenderKey(
         string SceneKey,
         long RenderRevision,
@@ -6732,7 +6860,10 @@ public sealed partial class DebugWindowManager
         float PanX,
         float PanY,
         VanillaPreviewMode Mode,
-        bool WorldLighting);
+        bool WorldLighting,
+        bool GhostEnabled,
+        float GhostFrame,
+        float GhostOpacity);
 
     private sealed class VanillaAnimationViewport3DRenderer : IDisposable
     {
@@ -6769,6 +6900,7 @@ public sealed partial class DebugWindowManager
             float panY,
             VanillaPreviewMode mode,
             bool worldLighting,
+            VanillaPreviewGhost ghost,
             bool verboseLogs,
             out string? skipReason)
         {
@@ -6792,7 +6924,10 @@ public sealed partial class DebugWindowManager
                 panX,
                 panY,
                 mode,
-                worldLighting);
+                worldLighting,
+                ghost.Enabled,
+                ghost.Frame,
+                ghost.Opacity);
             if (_lastTextureId > 0 &&
                 _lastRenderKey == renderKey &&
                 _frameBuffer is { Disposed: false, ColorTextureIds.Length: > 0 })
@@ -6904,6 +7039,19 @@ public sealed partial class DebugWindowManager
 
                 LogVerboseScene(scene, mode, meshRef, verboseLogs);
                 render.RenderMultiTextureMesh(meshRef, "entityTex", 0);
+                if (ghost.Enabled && scene.TryEvaluateGhostPose(ghost.Frame))
+                {
+                    render.GLDepthMask(false);
+                    SetUniform(shader, "renderColor", new Vec4f(0.42f, 0.82f, 1f, Math.Clamp(ghost.Opacity, 0.05f, 0.8f)));
+                    if (shader.UBOs != null && shader.UBOs.TryGetValue("Animation", out UBORef ghostAnimationUbo) && scene.GhostAnimator.Matrices != null)
+                    {
+                        ghostAnimationUbo.Update(scene.GhostAnimator.Matrices, 0, scene.GhostAnimator.MaxJointId * 16 * 4);
+                    }
+
+                    render.RenderMultiTextureMesh(meshRef, "entityTex", 0);
+                    render.GLDepthMask(true);
+                    SetUniform(shader, "renderColor", ColorUtil.WhiteArgbVec);
+                }
                 glError = GL.GetError();
                 shader.Stop();
                 shader = null;
