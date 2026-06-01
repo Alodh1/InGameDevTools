@@ -1,30 +1,28 @@
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
+using HarmonyLib;
 using Vintagestory.API.Client;
-using Vintagestory.API.Config;
+using Vintagestory.API.Common;
 using Vintagestory.API.MathTools;
+using Vintagestory.Client.NoObf;
 
 namespace InGameDevTools.Utils;
 
 internal sealed class DevToolsPreview3DRenderer : IDisposable
 {
-    private const int ParticleVertexFloatCount = 10;
-    private const int ParticleTextureSize = 64;
     private readonly ICoreClientAPI _api;
     private FrameBufferRef? _frameBuffer;
-    private int _particleProgram;
-    private int _particleVao;
-    private int _particleVbo;
-    private int _particleTexture;
+    private EngineParticlePreview? _particlePreview;
 
     public DevToolsPreview3DRenderer(ICoreClientAPI api)
     {
         _api = api;
+        EngineParticleSpawnRedirect.EnsurePatched(api);
     }
 
     public int RenderToTexture(float width, float height, DevToolsPreviewCamera camera, IReadOnlyList<DevToolsPreviewMeshInstance> instances, out string? skipReason)
     {
-        return RenderToTexture(width, height, camera, instances, [], out skipReason);
+        return RenderToTexture(width, height, camera, instances, 0f, out skipReason);
     }
 
     public int RenderToTexture(
@@ -32,7 +30,7 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         float height,
         DevToolsPreviewCamera camera,
         IReadOnlyList<DevToolsPreviewMeshInstance> instances,
-        IReadOnlyList<DevToolsPreviewParticleInstance> particles,
+        float particleDeltaSeconds,
         out string? skipReason)
     {
         skipReason = null;
@@ -42,7 +40,7 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
             return 0;
         }
 
-        if (instances.Count == 0 && particles.Count == 0)
+        if (instances.Count == 0 && ParticleCount == 0)
         {
             skipReason = "nothing to render";
             return 0;
@@ -102,10 +100,10 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
                 activeShader = null;
             }
 
-            if (particles.Count > 0)
+            if (ParticleCount > 0)
             {
                 previousShader?.Stop();
-                RenderParticles(camera, particles);
+                RenderEngineParticles(camera, particleDeltaSeconds);
             }
 
             previousShader?.Use();
@@ -208,300 +206,202 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         _frameBuffer = null;
     }
 
+    public int ParticleCount => _particlePreview?.ParticleCount ?? 0;
+
+    public void ResetParticles()
+    {
+        _particlePreview?.Dispose();
+        _particlePreview = null;
+    }
+
+    public int SpawnParticles(IReadOnlyList<AdvancedParticleProperties> particles, Vector3 cameraPosition)
+    {
+        if (particles.Count == 0) return 0;
+
+        EngineParticlePreview preview = EnsureParticlePreview();
+        int spawned = 0;
+        foreach (AdvancedParticleProperties particle in particles)
+        {
+            spawned += preview.Spawn(particle, cameraPosition);
+        }
+
+        return spawned;
+    }
+
     public void Dispose()
     {
         DestroyFrameBuffer();
-        DestroyParticleResources();
+        ResetParticles();
     }
 
-    private void RenderParticles(DevToolsPreviewCamera camera, IReadOnlyList<DevToolsPreviewParticleInstance> particles)
+    private EngineParticlePreview EnsureParticlePreview()
     {
-        EnsureParticleResources();
-
-        int[] restoreViewport = new int[4];
-        GL.GetInteger(GetPName.Viewport, restoreViewport);
-        GL.GetInteger(GetPName.CurrentProgram, out int restoreProgram);
-        GL.GetInteger(GetPName.VertexArrayBinding, out int restoreVertexArray);
-        GL.GetInteger(GetPName.ArrayBufferBinding, out int restoreArrayBuffer);
-        GL.GetInteger(GetPName.ActiveTexture, out int restoreActiveTexture);
-        GL.ActiveTexture(TextureUnit.Texture0);
-        GL.GetInteger(GetPName.TextureBinding2D, out int restoreTexture2D);
-        GL.GetInteger(GetPName.BlendEquationRgb, out int restoreBlendEquationRgb);
-        GL.GetInteger(GetPName.BlendEquationAlpha, out int restoreBlendEquationAlpha);
-        GL.GetInteger(GetPName.BlendSrcRgb, out int restoreBlendSrcRgb);
-        GL.GetInteger(GetPName.BlendSrcAlpha, out int restoreBlendSrcAlpha);
-        GL.GetInteger(GetPName.BlendDstRgb, out int restoreBlendDstRgb);
-        GL.GetInteger(GetPName.BlendDstAlpha, out int restoreBlendDstAlpha);
-        GL.GetBoolean(GetPName.DepthWritemask, out bool restoreDepthMask);
-
-        try
+        if (_particlePreview != null) return _particlePreview;
+        if (_api.World is not ClientMain client)
         {
-            GL.UseProgram(_particleProgram);
-            GL.UniformMatrix4(GL.GetUniformLocation(_particleProgram, "projectionMatrix"), 1, false, camera.Projection.Values);
-            GL.UniformMatrix4(GL.GetUniformLocation(_particleProgram, "viewMatrix"), 1, false, camera.View.Values);
-            GL.Uniform1(GL.GetUniformLocation(_particleProgram, "particleTex"), 0);
-            GL.ActiveTexture(TextureUnit.Texture0);
-            GL.BindTexture(TextureTarget.Texture2D, _particleTexture);
-            GL.BindVertexArray(_particleVao);
-            GL.BindBuffer(BufferTarget.ArrayBuffer, _particleVbo);
-            GL.DepthMask(false);
+            throw new InvalidOperationException("Engine particle preview requires ClientMain.");
+        }
 
-            DrawParticlePass(camera, particles, glowPass: false);
-            DrawParticlePass(camera, particles, glowPass: true);
-        }
-        finally
-        {
-            GL.DepthMask(restoreDepthMask);
-            GL.BindBuffer(BufferTarget.ArrayBuffer, restoreArrayBuffer);
-            GL.BindVertexArray(restoreVertexArray);
-            GL.ActiveTexture(TextureUnit.Texture0);
-            GL.BindTexture(TextureTarget.Texture2D, restoreTexture2D);
-            GL.ActiveTexture((TextureUnit)restoreActiveTexture);
-            GL.BlendEquationSeparate((BlendEquationMode)restoreBlendEquationRgb, (BlendEquationMode)restoreBlendEquationAlpha);
-            GL.BlendFuncSeparate((BlendingFactorSrc)restoreBlendSrcRgb, (BlendingFactorDest)restoreBlendDstRgb, (BlendingFactorSrc)restoreBlendSrcAlpha, (BlendingFactorDest)restoreBlendDstAlpha);
-            GL.UseProgram(restoreProgram);
-            GL.Viewport(restoreViewport[0], restoreViewport[1], restoreViewport[2], restoreViewport[3]);
-        }
+        _particlePreview = new EngineParticlePreview(_api, client);
+        return _particlePreview;
     }
 
-    private void DrawParticlePass(DevToolsPreviewCamera camera, IReadOnlyList<DevToolsPreviewParticleInstance> particles, bool glowPass)
+    private void RenderEngineParticles(DevToolsPreviewCamera camera, float deltaSeconds)
     {
-        float[] vertices = BuildParticleVertices(camera, particles, glowPass);
-        if (vertices.Length == 0) return;
+        if (_particlePreview == null || _particlePreview.ParticleCount == 0) return;
 
-        GL.BufferData(BufferTarget.ArrayBuffer, vertices.Length * sizeof(float), vertices, BufferUsageHint.StreamDraw);
-        if (glowPass)
-        {
-            GL.BlendEquation(BlendEquationMode.FuncAdd);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.One);
-        }
-        else
-        {
-            GL.BlendEquation(BlendEquationMode.FuncAdd);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-        }
+        IRenderAPI render = _api.Render;
+        render.GlToggleBlend(true, EnumBlendMode.Standard);
+        render.GLDepthMask(false);
 
-        GL.DrawArrays(PrimitiveType.Triangles, 0, vertices.Length / ParticleVertexFloatCount);
+        _particlePreview.Update(camera.Position, Math.Clamp(deltaSeconds, 0f, 0.1f));
+        Matrixf particleView = BuildCameraOriginView(camera);
+
+        RenderEngineParticlePool(EnumShaderProgram.Particlescube, _particlePreview.CubePool, particleView, camera.Projection);
+        RenderEngineParticlePool(EnumShaderProgram.Particlesquad, _particlePreview.QuadPool, particleView, camera.Projection);
     }
 
-    private static float[] BuildParticleVertices(DevToolsPreviewCamera camera, IReadOnlyList<DevToolsPreviewParticleInstance> particles, bool glowPass)
+    private void RenderEngineParticlePool(EnumShaderProgram shaderProgram, IParticlePool pool, Matrixf modelView, Matrixf projection)
     {
-        List<DevToolsPreviewParticleInstance> ordered = particles
-            .Where(particle => glowPass ? particle.GlowLevel > 0 : particle.Color.W > 0.001f)
-            .OrderByDescending(particle => Vector3.Dot(particle.Position - camera.Position, camera.Forward))
-            .ToList();
+        if (pool.QuantityAlive <= 0) return;
 
-        if (ordered.Count == 0) return [];
+        IShaderProgram shader = _api.Render.GetEngineShader(shaderProgram);
+        shader.Use();
+        ApplyParticleShaderUniforms(shader, modelView, projection);
+        _api.Render.RenderMeshInstanced(pool.Model, pool.QuantityAlive);
+        shader.Stop();
+    }
 
-        List<float> vertices = new(ordered.Count * 6 * ParticleVertexFloatCount);
-        foreach (DevToolsPreviewParticleInstance particle in ordered)
+    private void ApplyParticleShaderUniforms(IShaderProgram shader, Matrixf modelView, Matrixf projection)
+    {
+        IRenderAPI render = _api.Render;
+        if (shader.HasUniform("rgbaFogIn")) shader.Uniform("rgbaFogIn", render.FogColor);
+        if (shader.HasUniform("rgbaAmbientIn")) shader.Uniform("rgbaAmbientIn", render.AmbientColor);
+        SetUniform(shader, "fogMinIn", render.FogMin);
+        SetUniform(shader, "fogDensityIn", render.FogDensity);
+        SetUniformMatrix(shader, "projectionMatrix", projection.Values);
+        SetUniformMatrix(shader, "modelViewMatrix", modelView.Values);
+    }
+
+    private static Matrixf BuildCameraOriginView(DevToolsPreviewCamera camera)
+    {
+        Matrixf view = new();
+        view.Set(Mat4f.LookAt(
+            Mat4f.Create(),
+            [0f, 0f, 0f],
+            [camera.Forward.X, camera.Forward.Y, camera.Forward.Z],
+            [camera.Up.X, camera.Up.Y, camera.Up.Z]));
+        return view;
+    }
+
+    private sealed class EngineParticlePreview : IDisposable
+    {
+        private const int QuadPoolSize = 4096;
+        private const int CubePoolSize = 2048;
+        private readonly ICoreClientAPI _api;
+        private bool _primed;
+
+        public EngineParticlePreview(ICoreClientAPI api, ClientMain client)
         {
-            float size = Math.Clamp(particle.Size, 0.001f, 8f);
-            Vector4 color = particle.Color;
-            float softness = particle.IsCube ? 0.08f : 1f;
+            _api = api;
+            QuadPool = new ParticlePoolQuads(QuadPoolSize, client, offthread: false);
+            CubePool = new ParticlePoolCubes(CubePoolSize, client, offthread: false);
+        }
 
-            if (glowPass)
+        public IParticlePool QuadPool { get; }
+        public IParticlePool CubePool { get; }
+        public int ParticleCount => QuadPool.QuantityAlive + CubePool.QuantityAlive;
+
+        public int Spawn(IParticlePropertiesProvider particleProperties, Vector3 cameraPosition)
+        {
+            Prime(cameraPosition);
+            particleProperties.Init(_api);
+            IParticlePool pool = particleProperties.ParticleModel == EnumParticleModel.Quad ? QuadPool : CubePool;
+            int spawned = pool.SpawnParticles(particleProperties);
+            if (spawned > 0)
             {
-                float glow = Math.Clamp(particle.GlowLevel / 255f, 0f, 1f);
-                size *= 1.25f + glow * 0.75f;
-                color = new Vector4(
-                    Math.Clamp(color.X + glow * 0.35f, 0f, 1f),
-                    Math.Clamp(color.Y + glow * 0.18f, 0f, 1f),
-                    Math.Clamp(color.Z * 0.75f, 0f, 1f),
-                    color.W * Math.Clamp(0.18f + glow * 0.28f, 0.08f, 0.46f));
-                softness = 1f;
+                Update(cameraPosition, 0f);
             }
 
-            if (color.W <= 0.001f) continue;
-
-            float half = size * 0.5f;
-            Vector3 right = camera.Right * half;
-            Vector3 up = camera.Up * half;
-            Vector3 topLeft = particle.Position - right + up;
-            Vector3 topRight = particle.Position + right + up;
-            Vector3 bottomRight = particle.Position + right - up;
-            Vector3 bottomLeft = particle.Position - right - up;
-
-            AppendParticleVertex(vertices, topLeft, 0f, 1f, color, softness);
-            AppendParticleVertex(vertices, topRight, 1f, 1f, color, softness);
-            AppendParticleVertex(vertices, bottomRight, 1f, 0f, color, softness);
-            AppendParticleVertex(vertices, topLeft, 0f, 1f, color, softness);
-            AppendParticleVertex(vertices, bottomRight, 1f, 0f, color, softness);
-            AppendParticleVertex(vertices, bottomLeft, 0f, 0f, color, softness);
+            return spawned;
         }
 
-        return vertices.ToArray();
-    }
-
-    private static void AppendParticleVertex(List<float> vertices, Vector3 position, float u, float v, Vector4 color, float softness)
-    {
-        vertices.Add(position.X);
-        vertices.Add(position.Y);
-        vertices.Add(position.Z);
-        vertices.Add(u);
-        vertices.Add(v);
-        vertices.Add(color.X);
-        vertices.Add(color.Y);
-        vertices.Add(color.Z);
-        vertices.Add(color.W);
-        vertices.Add(softness);
-    }
-
-    private void EnsureParticleResources()
-    {
-        if (_particleProgram != 0) return;
-
-        _particleProgram = CreateParticleProgram();
-        _particleVao = GL.GenVertexArray();
-        _particleVbo = GL.GenBuffer();
-        _particleTexture = CreateParticleTexture();
-
-        GL.BindVertexArray(_particleVao);
-        GL.BindBuffer(BufferTarget.ArrayBuffer, _particleVbo);
-        int stride = ParticleVertexFloatCount * sizeof(float);
-        GL.EnableVertexAttribArray(0);
-        GL.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, 0);
-        GL.EnableVertexAttribArray(1);
-        GL.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, stride, 3 * sizeof(float));
-        GL.EnableVertexAttribArray(2);
-        GL.VertexAttribPointer(2, 4, VertexAttribPointerType.Float, false, stride, 5 * sizeof(float));
-        GL.EnableVertexAttribArray(3);
-        GL.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, stride, 9 * sizeof(float));
-        GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
-        GL.BindVertexArray(0);
-    }
-
-    private static int CreateParticleProgram()
-    {
-        const string vertexShader = """
-            #version 330 core
-            layout(location = 0) in vec3 vertexPosition;
-            layout(location = 1) in vec2 uvIn;
-            layout(location = 2) in vec4 colorIn;
-            layout(location = 3) in float softnessIn;
-
-            uniform mat4 projectionMatrix;
-            uniform mat4 viewMatrix;
-
-            out vec2 uv;
-            out vec4 color;
-            out float softness;
-
-            void main(void)
-            {
-                uv = uvIn;
-                color = colorIn;
-                softness = softnessIn;
-                gl_Position = projectionMatrix * viewMatrix * vec4(vertexPosition, 1.0);
-            }
-            """;
-
-        const string fragmentShader = """
-            #version 330 core
-            uniform sampler2D particleTex;
-
-            in vec2 uv;
-            in vec4 color;
-            in float softness;
-
-            out vec4 outColor;
-
-            void main(void)
-            {
-                float textureAlpha = texture(particleTex, uv).a;
-                float alpha = color.a * mix(1.0, textureAlpha, clamp(softness, 0.0, 1.0));
-                if (alpha <= 0.002) discard;
-                outColor = vec4(color.rgb, alpha);
-            }
-            """;
-
-        int vertex = CompileParticleShader(ShaderType.VertexShader, vertexShader);
-        int fragment = CompileParticleShader(ShaderType.FragmentShader, fragmentShader);
-        int program = GL.CreateProgram();
-        GL.AttachShader(program, vertex);
-        GL.AttachShader(program, fragment);
-        GL.LinkProgram(program);
-        GL.GetProgram(program, GetProgramParameterName.LinkStatus, out int status);
-        GL.DeleteShader(vertex);
-        GL.DeleteShader(fragment);
-        if (status != 1)
+        public void Update(Vector3 cameraPosition, float deltaSeconds)
         {
-            string info = GL.GetProgramInfoLog(program);
-            GL.DeleteProgram(program);
-            throw new InvalidOperationException($"Particle preview shader link failed: {info}");
+            Vec3d cameraPos = new(cameraPosition.X, cameraPosition.Y, cameraPosition.Z);
+            EngineParticleSpawnRedirect.RunWithPreview(this, () =>
+            {
+                CubePool.OnNewFrame(deltaSeconds, cameraPos);
+                QuadPool.OnNewFrame(deltaSeconds, cameraPos);
+            });
+            _primed = true;
         }
 
-        return program;
-    }
-
-    private static int CompileParticleShader(ShaderType type, string source)
-    {
-        int shader = GL.CreateShader(type);
-        GL.ShaderSource(shader, source);
-        GL.CompileShader(shader);
-        GL.GetShader(shader, ShaderParameter.CompileStatus, out int status);
-        if (status == 1) return shader;
-
-        string info = GL.GetShaderInfoLog(shader);
-        GL.DeleteShader(shader);
-        throw new InvalidOperationException($"Particle preview {type} shader compile failed: {info}");
-    }
-
-    private static int CreateParticleTexture()
-    {
-        byte[] data = new byte[ParticleTextureSize * ParticleTextureSize * 4];
-        for (int y = 0; y < ParticleTextureSize; y++)
+        private void Prime(Vector3 cameraPosition)
         {
-            for (int x = 0; x < ParticleTextureSize; x++)
+            if (_primed) return;
+            Update(cameraPosition, 1f / 60f);
+        }
+
+        public void Dispose()
+        {
+            QuadPool.Dipose();
+            CubePool.Dipose();
+        }
+    }
+
+    private static class EngineParticleSpawnRedirect
+    {
+        private const string HarmonyId = "ingamedevtools.preview-particles";
+        private static readonly object PatchLock = new();
+        private static bool _patched;
+        [ThreadStatic] private static EngineParticlePreview? _activePreview;
+
+        public static void EnsurePatched(ICoreClientAPI api)
+        {
+            lock (PatchLock)
             {
-                float nx = (x + 0.5f) / ParticleTextureSize * 2f - 1f;
-                float ny = (y + 0.5f) / ParticleTextureSize * 2f - 1f;
-                float distance = MathF.Sqrt(nx * nx + ny * ny);
-                float alpha = Math.Clamp(1f - distance, 0f, 1f);
-                alpha = alpha * alpha * (3f - 2f * alpha);
-                int offset = (y * ParticleTextureSize + x) * 4;
-                data[offset + 0] = 255;
-                data[offset + 1] = 255;
-                data[offset + 2] = 255;
-                data[offset + 3] = (byte)Math.Clamp(alpha * 255f, 0f, 255f);
+                if (_patched) return;
+
+                Harmony harmony = new(HarmonyId);
+                System.Reflection.MethodInfo? method = AccessTools.Method(
+                    typeof(ClientMain),
+                    nameof(ClientMain.SpawnParticles),
+                    [typeof(IParticlePropertiesProvider), typeof(IPlayer)]);
+                if (method == null)
+                {
+                    throw new InvalidOperationException("ClientMain.SpawnParticles(IParticlePropertiesProvider, IPlayer) was not found.");
+                }
+
+                harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(typeof(EngineParticleSpawnRedirect), nameof(SpawnParticlesPrefix)));
+                _patched = true;
+                api.Logger.VerboseDebug("InGameDevTools: engine particle preview spawn redirect installed.");
             }
         }
 
-        int texture = GL.GenTexture();
-        GL.BindTexture(TextureTarget.Texture2D, texture);
-        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba8, ParticleTextureSize, ParticleTextureSize, 0, PixelFormat.Rgba, PixelType.UnsignedByte, data);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-        GL.BindTexture(TextureTarget.Texture2D, 0);
-        return texture;
-    }
-
-    private void DestroyParticleResources()
-    {
-        if (_particleVbo != 0)
+        public static void RunWithPreview(EngineParticlePreview preview, Action action)
         {
-            GL.DeleteBuffer(_particleVbo);
-            _particleVbo = 0;
+            EngineParticlePreview? previous = _activePreview;
+            _activePreview = preview;
+            try
+            {
+                action();
+            }
+            finally
+            {
+                _activePreview = previous;
+            }
         }
 
-        if (_particleVao != 0)
+        private static bool SpawnParticlesPrefix(IParticlePropertiesProvider particlePropertiesProvider)
         {
-            GL.DeleteVertexArray(_particleVao);
-            _particleVao = 0;
-        }
+            EngineParticlePreview? preview = _activePreview;
+            if (preview == null) return true;
 
-        if (_particleTexture != 0)
-        {
-            GL.DeleteTexture(_particleTexture);
-            _particleTexture = 0;
-        }
-
-        if (_particleProgram != 0)
-        {
-            GL.DeleteProgram(_particleProgram);
-            _particleProgram = 0;
+            preview.Spawn(particlePropertiesProvider, Vector3.Zero);
+            return false;
         }
     }
 
@@ -551,8 +451,6 @@ internal sealed class DevToolsPreviewMesh : IDisposable
 }
 
 internal readonly record struct DevToolsPreviewMeshInstance(DevToolsPreviewMesh Mesh, Matrixf ModelMatrix);
-
-internal readonly record struct DevToolsPreviewParticleInstance(Vector3 Position, float Size, Vector4 Color, bool IsCube, int GlowLevel);
 
 internal static class DevToolsPreviewMeshFactory
 {

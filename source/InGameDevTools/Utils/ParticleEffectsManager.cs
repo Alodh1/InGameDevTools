@@ -1281,16 +1281,6 @@ public class ParticleEffectsManager
     private float _previewDistance = 4.5f;
     private Vector3 _previewTarget = new(0f, 0.8f, 0f);
     private bool _previewWindEnabled;
-    private float _previewWindX = 1f;
-    private float _previewWindY;
-    private float _previewWindZ = 0.25f;
-    private float _previewWindStrength = 1f;
-    private float _previewWindTurbulence = 0.25f;
-    private float _previewWindPhase;
-    private bool _previewTerrainPlaneEnabled = true;
-    private bool _previewLiquid;
-    private bool _previewRainHeightEnabled;
-    private float _previewRainHeightOffset = 1.25f;
     private bool _previewShowReferenceModel = true;
     private bool _previewReferenceWireframe;
     private float _previewReferenceOpacity = 0.35f;
@@ -1304,12 +1294,10 @@ public class ParticleEffectsManager
     private int _selectedParticleEmitterIndex;
     private bool _particleVariantOnlyEdit;
     private string _particleStatus = "";
-    private readonly List<ParticlePreviewParticle> _previewParticles = [];
     private readonly Dictionary<string, ParticlePreviewPlacement> _previewPlacementCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _particleLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _particleLiveOverrideKeysByScope = new(StringComparer.OrdinalIgnoreCase);
     private DevToolsPreview3DRenderer? _previewRenderer3D;
-    private readonly Random _previewRandom = new(42);
     private readonly ICoreAPI _api;
     private readonly Dictionary<string, ParticleEffectEntry> _particleEffects = new(StringComparer.OrdinalIgnoreCase);
     private ParticleAssetScanDiagnostics _scanDiagnostics = new();
@@ -1454,53 +1442,16 @@ public class ParticleEffectsManager
 
         if (ImGui.CollapsingHeader($"Wind preview##particle-preview-wind-{id}", ImGuiTreeNodeFlags.DefaultOpen))
         {
-            ImGui.Checkbox($"Enable wind##particle-preview-{id}", ref _previewWindEnabled);
+            ImGui.Checkbox($"Use game wind##particle-preview-{id}", ref _previewWindEnabled);
             ImGui.SameLine();
             ImGui.TextDisabled($"Selected wind affectedness: {selectedParticleProperties?.WindAffectednes ?? 0f:0.00}");
-
-            ImGui.SetNextItemWidth(100);
-            ImGui.InputFloat($"Wind X##particle-preview-{id}", ref _previewWindX, 0, 0, "%.2f");
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(100);
-            ImGui.InputFloat($"Y##particle-preview-wind-{id}", ref _previewWindY, 0, 0, "%.2f");
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(100);
-            ImGui.InputFloat($"Z##particle-preview-wind-{id}", ref _previewWindZ, 0, 0, "%.2f");
-
-            ImGui.SetNextItemWidth(130);
-            ImGui.SliderFloat($"Strength##particle-preview-wind-{id}", ref _previewWindStrength, 0f, 8f, "%.2f");
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(130);
-            ImGui.SliderFloat($"Turbulence##particle-preview-wind-{id}", ref _previewWindTurbulence, 0f, 2f, "%.2f");
-
-            if (ImGui.Button($"Set east wind##particle-preview-wind-{id}"))
-            {
-                _previewWindX = 1f;
-                _previewWindY = 0f;
-                _previewWindZ = 0f;
-            }
-
-            ImGui.SameLine();
-            if (ImGui.Button($"Set north wind##particle-preview-wind-{id}"))
-            {
-                _previewWindX = 0f;
-                _previewWindY = 0f;
-                _previewWindZ = 1f;
-            }
+            Vec3f wind = GlobalConstants.CurrentWindSpeedClient;
+            ImGui.TextDisabled($"Current game wind: {wind.X:0.00}, {wind.Y:0.00}, {wind.Z:0.00}");
         }
 
         if (ImGui.CollapsingHeader($"Preview environment##particle-preview-environment-{id}"))
         {
-            ImGui.Checkbox($"Terrain plane##particle-preview-environment-{id}", ref _previewTerrainPlaneEnabled);
-            ImGui.SameLine();
-            ImGui.Checkbox($"Liquid volume##particle-preview-environment-{id}", ref _previewLiquid);
-            ImGui.SameLine();
-            ImGui.Checkbox($"Rain height##particle-preview-environment-{id}", ref _previewRainHeightEnabled);
-            if (_previewRainHeightEnabled)
-            {
-                ImGui.SetNextItemWidth(130);
-                ImGui.SliderFloat($"Rain height offset##particle-preview-environment-{id}", ref _previewRainHeightOffset, -2f, 4f, "%.2f");
-            }
+            ImGui.TextDisabled("Uses Vintage Story ParticlePhysics against the current client world.");
         }
 
         float dt = Math.Clamp(deltaSeconds, 0f, 0.1f) * _previewTimeScale;
@@ -1515,8 +1466,7 @@ public class ParticleEffectsManager
             }
         }
 
-        UpdatePreviewParticles(dt, GetPreviewParticleOrigin(key));
-        DrawPreviewViewport(id, key, emitters, selectedParticleProperties);
+        DrawPreviewViewport(id, key, emitters, selectedParticleProperties, dt);
     }
 
     private void DrawManualReferencePicker(string id, string key)
@@ -1561,7 +1511,7 @@ public class ParticleEffectsManager
         }
     }
 
-    private void DrawPreviewViewport(string id, string key, IReadOnlyList<ParticleEffectEntry> emitters, AdvancedParticleProperties? selectedParticleProperties)
+    private void DrawPreviewViewport(string id, string key, IReadOnlyList<ParticleEffectEntry> emitters, AdvancedParticleProperties? selectedParticleProperties, float deltaSeconds)
     {
         System.Numerics.Vector2 available = ImGui.GetContentRegionAvail();
         System.Numerics.Vector2 size = new(Math.Max(320f, available.X), Math.Max(260f, available.Y));
@@ -1622,13 +1572,13 @@ public class ParticleEffectsManager
             meshInstances.Add(new DevToolsPreviewMeshInstance(referenceModel.Mesh, identity));
         }
 
-        List<DevToolsPreviewParticleInstance> previewParticles = BuildPreviewParticleInstances(_previewParticles);
-        int textureId = EnsurePreviewRenderer3D().RenderToTexture(
+        DevToolsPreview3DRenderer previewRenderer = EnsurePreviewRenderer3D();
+        int textureId = previewRenderer.RenderToTexture(
             max.X - min.X,
             max.Y - min.Y,
             previewCamera,
             meshInstances,
-            previewParticles,
+            deltaSeconds,
             out string? skipReason);
         if (textureId > 0)
         {
@@ -1655,7 +1605,7 @@ public class ParticleEffectsManager
 
         if (_previewWindEnabled)
         {
-            Vector3 wind = selectedParticleProperties == null ? Vector3.Zero : GetPreviewWindVector(selectedParticleProperties);
+            Vector3 wind = selectedParticleProperties == null ? Vector3.Zero : GetPreviewGameWindVector(selectedParticleProperties);
             if (wind.LengthSquared > 0.0001f)
             {
                 Vector3 direction = Vector3.Normalize(wind);
@@ -1669,15 +1619,14 @@ public class ParticleEffectsManager
 
         drawList.PopClipRect();
 
-        drawList.AddText(min + new System.Numerics.Vector2(12f, 10f), text, $"{_previewParticles.Count} preview particles");
+        drawList.AddText(min + new System.Numerics.Vector2(12f, 10f), text, $"{previewRenderer.ParticleCount} engine preview particles");
         drawList.AddText(min + new System.Numerics.Vector2(12f, 30f), text, "RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms.");
         string referenceText = referenceModel == null
             ? "Reference model: none"
             : $"Reference model: {referenceModel.Label}";
         drawList.AddText(min + new System.Numerics.Vector2(12f, 50f), text, referenceText);
-        drawList.AddText(min + new System.Numerics.Vector2(12f, 70f), text, _previewWindEnabled ? "Wind preview enabled" : "Wind preview disabled");
-        string environmentText = $"Environment: {(_previewTerrainPlaneEnabled ? "terrain" : "no terrain")}, {(_previewLiquid ? "liquid" : "air")}, {(_previewRainHeightEnabled ? "rain height" : "no rain")}";
-        drawList.AddText(min + new System.Numerics.Vector2(12f, 90f), text, environmentText);
+        drawList.AddText(min + new System.Numerics.Vector2(12f, 70f), text, _previewWindEnabled ? "Game wind enabled" : "Game wind disabled");
+        drawList.AddText(min + new System.Numerics.Vector2(12f, 90f), text, "Environment: current client world ParticlePhysics");
     }
 
     private DevToolsPreviewCamera BuildPreviewCamera(System.Numerics.Vector2 min, System.Numerics.Vector2 max)
@@ -2334,474 +2283,70 @@ public class ParticleEffectsManager
     private void ResetPreview(string key)
     {
         _previewEffectKey = key;
-        _previewParticles.Clear();
+        _previewRenderer3D?.ResetParticles();
         _previewEmitAccumulator = 0;
         ResetPreviewCamera(key);
     }
 
-    private void EmitPreviewParticles(IReadOnlyList<ParticleEffectEntry> emitters, float intensity, Vector3 origin)
+    private int EmitPreviewParticles(IReadOnlyList<ParticleEffectEntry> emitters, float intensity, Vector3 origin)
     {
+        List<AdvancedParticleProperties> prepared = new(emitters.Count);
         for (int emitterIndex = 0; emitterIndex < emitters.Count; emitterIndex++)
         {
-            EmitPreviewParticles(emitters[emitterIndex].Properties, emitterIndex, intensity, origin);
+            prepared.Add(PrepareEnginePreviewParticle(emitters[emitterIndex].Properties, intensity, origin));
         }
+
+        return EnsurePreviewRenderer3D().SpawnParticles(prepared, _previewTarget);
     }
 
-    private void EmitPreviewParticles(AdvancedParticleProperties particleProperties, int emitterIndex, float intensity, Vector3 origin)
+    private AdvancedParticleProperties PrepareEnginePreviewParticle(AdvancedParticleProperties particleProperties, float intensity, Vector3 origin)
     {
-        float quantity = Math.Max(0f, SampleNatFloat(particleProperties.Quantity) * Math.Max(0.05f, intensity));
-        int spawned = 0;
-        while (spawned < 320 && spawned < quantity && !(_previewRandom.NextDouble() > quantity - spawned))
+        AdvancedParticleProperties clone = particleProperties.Clone();
+        NormalizeParticleTree(clone);
+
+        clone.basePos = new Vec3d(origin.X, origin.Y, origin.Z);
+        clone.baseVelocity = new Vec3f(_previewVelocityX, _previewVelocityY, _previewVelocityZ);
+        clone.WindAffectednesAtPos = _previewWindEnabled ? Math.Max(1f, clone.WindAffectednesAtPos) : 0f;
+
+        ScaleNatFloat(clone.Quantity, Math.Max(0.05f, intensity));
+        return clone;
+    }
+
+    private static void NormalizeParticleTree(AdvancedParticleProperties particleProperties)
+    {
+        NormalizeParticleProperties(particleProperties);
+        if (particleProperties.SecondaryParticles != null)
         {
-            ParticlePreviewParticle? particle = CreatePreviewParticle(particleProperties, emitterIndex, origin);
-            if (particle != null)
+            foreach (AdvancedParticleProperties secondary in particleProperties.SecondaryParticles)
             {
-                _previewParticles.Add(particle);
-            }
-            spawned++;
-        }
-
-        TrimPreviewParticles();
-    }
-
-    private ParticlePreviewParticle? CreatePreviewParticle(AdvancedParticleProperties particleProperties, int emitterIndex, Vector3 origin)
-    {
-        ParticlePreviewColor previewColor = GetPreviewParticleColor(particleProperties);
-        if (previewColor.Alpha == 0) return null;
-
-        Vector3 velocity = new(
-            SampleNatFloat(GetNatFloat(particleProperties.Velocity, 0)) + _previewVelocityX,
-            SampleNatFloat(GetNatFloat(particleProperties.Velocity, 1)) + _previewVelocityY,
-            SampleNatFloat(GetNatFloat(particleProperties.Velocity, 2)) + _previewVelocityZ);
-        Vector3 position = origin + new Vector3(
-            SampleNatFloat(GetNatFloat(particleProperties.PosOffset, 0)),
-            SampleNatFloat(GetNatFloat(particleProperties.PosOffset, 1)),
-            SampleNatFloat(GetNatFloat(particleProperties.PosOffset, 2)));
-
-        return new ParticlePreviewParticle
-        {
-            Properties = particleProperties,
-            Position = position,
-            Velocity = velocity,
-            StartingVelocity = velocity,
-            ParentVelocity = GetPreviewWindBaseVector(),
-            ParentVelocityWeight = _previewWindEnabled ? Math.Max(0f, particleProperties.WindAffectednes) : 0f,
-            Bounciness = particleProperties.Bounciness,
-            SizeMultiplier = Math.Max(0.01f, SampleNatFloat(particleProperties.Size)),
-            ParticleHeight = particleProperties.ParticleModel == EnumParticleModel.Cube ? 0.0625f : 0.5f,
-            ColorRed = previewColor.Red,
-            ColorGreen = previewColor.Green,
-            ColorBlue = previewColor.Blue,
-            ColorAlpha = previewColor.Alpha,
-            VertexFlags = particleProperties.VertexFlags,
-            SelfPropelled = particleProperties.SelfPropelled,
-            TerrainCollision = particleProperties.TerrainCollision,
-            GravityStrength = SampleNatFloat(particleProperties.GravityEffect) * GlobalConstants.GravityStrengthParticle * 40f,
-            SwimOnLiquid = particleProperties.SwimOnLiquid,
-            DieInLiquid = particleProperties.DieInLiquid,
-            DieInAir = particleProperties.DieInAir,
-            DieOnRainHeightmap = particleProperties.DieOnRainHeightmap,
-            OpacityEvolve = particleProperties.OpacityEvolve,
-            RedEvolve = particleProperties.RedEvolve,
-            GreenEvolve = particleProperties.GreenEvolve,
-            BlueEvolve = particleProperties.BlueEvolve,
-            SizeEvolve = particleProperties.SizeEvolve,
-            VelocityEvolve = particleProperties.VelocityEvolve,
-            RandomVelocityChange = particleProperties.RandomVelocityChange,
-            SecondaryParticles = particleProperties.SecondaryParticles,
-            DeathParticles = particleProperties.DeathParticles,
-            SecondarySpawnTimers = particleProperties.SecondaryParticles == null ? [] : new float[particleProperties.SecondaryParticles.Length],
-            Life = Math.Max(0.05f, SampleNatFloat(particleProperties.LifeLength)) * 5f,
-            Seed = (float)_previewRandom.NextDouble(),
-            EmitterIndex = emitterIndex,
-            ParticleModel = particleProperties.ParticleModel,
-            Alive = true,
-            RandomDrag = 1f,
-            RandomVelocityDirection = 1f
-        };
-    }
-
-    private void TrimPreviewParticles()
-    {
-        if (_previewParticles.Count > 2000)
-        {
-            _previewParticles.RemoveRange(0, _previewParticles.Count - 2000);
-        }
-    }
-
-    private void UpdatePreviewParticles(float deltaSeconds, Vector3 origin)
-    {
-        if (deltaSeconds <= 0) return;
-
-        if (_previewWindEnabled)
-        {
-            _previewWindPhase += deltaSeconds;
-        }
-
-        for (int index = _previewParticles.Count - 1; index >= 0; index--)
-        {
-            ParticlePreviewParticle particle = _previewParticles[index];
-            TickPreviewParticle(particle, deltaSeconds, origin);
-            if (!particle.Alive)
-            {
-                SpawnDeathPreviewParticles(particle);
-                _previewParticles.RemoveAt(index);
+                if (secondary != null) NormalizeParticleTree(secondary);
             }
         }
 
-        TrimPreviewParticles();
+        if (particleProperties.DeathParticles != null)
+        {
+            foreach (AdvancedParticleProperties death in particleProperties.DeathParticles)
+            {
+                if (death != null) NormalizeParticleTree(death);
+            }
+        }
     }
 
-    private static AdvancedParticleProperties? GetPreviewEmitterProperties(IReadOnlyList<ParticleEffectEntry> emitters, int emitterIndex)
+    private static void ScaleNatFloat(NatFloat? value, float multiplier)
     {
-        return emitterIndex >= 0 && emitterIndex < emitters.Count ? emitters[emitterIndex].Properties : emitters.FirstOrDefault()?.Properties;
+        if (value == null || Math.Abs(multiplier - 1f) <= 0.0001f) return;
+
+        value.avg *= multiplier;
+        value.var *= multiplier;
+        value.offset *= multiplier;
     }
 
-    private Vector3 GetPreviewWindVector(AdvancedParticleProperties particleProperties)
-    {
-        return GetPreviewWindBaseVector() * Math.Max(0f, particleProperties.WindAffectednes);
-    }
-
-    private Vector3 GetPreviewWindBaseVector()
+    private Vector3 GetPreviewGameWindVector(AdvancedParticleProperties particleProperties)
     {
         if (!_previewWindEnabled) return Vector3.Zero;
 
-        Vector3 direction = new(_previewWindX, _previewWindY, _previewWindZ);
-        if (direction.LengthSquared <= 0.0001f) return Vector3.Zero;
-
-        return Vector3.Normalize(direction) * _previewWindStrength;
-    }
-
-    private void TickPreviewParticle(ParticlePreviewParticle particle, float deltaSeconds, Vector3 origin)
-    {
-        TickPreviewSecondaryParticles(particle, deltaSeconds);
-
-        if (particle.TerrainCollision && particle.SelfPropelled)
-        {
-            particle.Velocity += (particle.StartingVelocity - particle.Velocity) * 0.02f;
-        }
-
-        particle.Velocity.Y -= particle.GravityStrength * deltaSeconds;
-        HandlePreviewBuoyancy(particle, deltaSeconds);
-
-        Vector3 motion = GetPreviewMotion(particle, deltaSeconds);
-        if (particle.ParentVelocity.LengthSquared > 0.0001f && particle.ParentVelocityWeight > 0f)
-        {
-            motion += particle.ParentVelocity * particle.ParentVelocityWeight * GetPreviewWindTurbulence(particle) * deltaSeconds;
-        }
-
-        if (_previewTerrainPlaneEnabled && particle.TerrainCollision)
-        {
-            ApplyPreviewTerrainCollision(particle, ref motion, origin.Y);
-        }
-
-        particle.Position += motion;
-        TickPreviewRandomVelocityChange(particle, deltaSeconds);
-        particle.Age += deltaSeconds;
-
-        bool alive = particle.Age < particle.Life;
-        alive &= !particle.DieInAir || _previewLiquid;
-        alive &= !particle.DieInLiquid || !_previewLiquid;
-        if (_previewRainHeightEnabled && particle.DieOnRainHeightmap)
-        {
-            alive &= particle.Position.Y > origin.Y + _previewRainHeightOffset;
-        }
-        particle.Alive = alive;
-    }
-
-    private void TickPreviewSecondaryParticles(ParticlePreviewParticle particle, float deltaSeconds)
-    {
-        if (particle.SecondaryParticles == null || particle.SecondaryParticles.Length == 0) return;
-
-        for (int index = 0; index < particle.SecondaryParticles.Length; index++)
-        {
-            AdvancedParticleProperties secondary = particle.SecondaryParticles[index];
-            if (secondary == null) continue;
-            particle.SecondarySpawnTimers[index] += deltaSeconds;
-            float interval = Math.Max(0.001f, SampleNatFloat(secondary.SecondarySpawnInterval));
-            if (particle.SecondarySpawnTimers[index] <= interval) continue;
-
-            particle.SecondarySpawnTimers[index] = 0f;
-            ParticlePreviewParticle? spawned = CreatePreviewParticle(secondary, particle.EmitterIndex, particle.Position);
-            if (spawned != null)
-            {
-                _previewParticles.Add(spawned);
-            }
-        }
-    }
-
-    private void SpawnDeathPreviewParticles(ParticlePreviewParticle particle)
-    {
-        if (particle.DeathParticles == null) return;
-        foreach (AdvancedParticleProperties deathParticle in particle.DeathParticles)
-        {
-            if (deathParticle == null) continue;
-            ParticlePreviewParticle? spawned = CreatePreviewParticle(deathParticle, particle.EmitterIndex, particle.Position);
-            if (spawned != null)
-            {
-                _previewParticles.Add(spawned);
-            }
-        }
-    }
-
-    private void HandlePreviewBuoyancy(ParticlePreviewParticle particle, float deltaSeconds)
-    {
-        if (!_previewLiquid) return;
-
-        if (particle.SwimOnLiquid)
-        {
-            float height = particle.ParticleHeight * particle.SizeMultiplier;
-            float buoyancy = Math.Clamp(9f * Math.Clamp(height, 0f, 1f), -1.25f, 1.25f);
-            particle.Velocity.Y += particle.GravityStrength * deltaSeconds * buoyancy;
-            float drag = Math.Clamp(30f * Math.Abs(particle.Velocity.Y) - 0.02f, 1f, 1.25f);
-            particle.Velocity.Y /= drag;
-            particle.Velocity.X *= 0.99f;
-            particle.Velocity.Z *= 0.99f;
-            return;
-        }
-
-        particle.Velocity.X *= 0.98f;
-        particle.Velocity.Z *= 0.98f;
-    }
-
-    private static Vector3 GetPreviewMotion(ParticlePreviewParticle particle, float deltaSeconds)
-    {
-        if (particle.VelocityEvolve is { Length: >= 3 })
-        {
-            float sequence = GetPreviewSequence(particle);
-            return new Vector3(
-                particle.Velocity.X * EvaluateEvolvingNatFloat(particle.VelocityEvolve[0], 0f, sequence) * deltaSeconds,
-                particle.Velocity.Y * EvaluateEvolvingNatFloat(particle.VelocityEvolve[1], 0f, sequence) * deltaSeconds,
-                particle.Velocity.Z * EvaluateEvolvingNatFloat(particle.VelocityEvolve[2], 0f, sequence) * deltaSeconds);
-        }
-
-        return particle.Velocity * deltaSeconds;
-    }
-
-    private float GetPreviewWindTurbulence(ParticlePreviewParticle particle)
-    {
-        if (_previewWindTurbulence <= 0f) return 1f;
-
-        float turbulence = 1f;
-        turbulence += MathF.Sin(_previewWindPhase * 2.4f + particle.Seed * 12.9898f) * _previewWindTurbulence;
-        turbulence += MathF.Cos(_previewWindPhase * 1.7f + particle.Seed * 78.233f) * _previewWindTurbulence * 0.35f;
-        return Math.Max(0f, turbulence);
-    }
-
-    private static void ApplyPreviewTerrainCollision(ParticlePreviewParticle particle, ref Vector3 motion, float groundY)
-    {
-        if (particle.Position.Y + motion.Y >= groundY) return;
-
-        motion.Y = groundY - particle.Position.Y;
-        float drag = (1f - Math.Clamp(6.060606f * Math.Max(0.001f, Math.Abs(motion.Y)), 0.001f, 1f)) * particle.RandomDrag;
-        particle.Velocity.X *= drag;
-        particle.Velocity.Y *= -particle.Bounciness * 0.65f;
-        particle.Velocity.Z *= drag;
-    }
-
-    private void TickPreviewRandomVelocityChange(ParticlePreviewParticle particle, float deltaSeconds)
-    {
-        if (!particle.RandomVelocityChange) return;
-
-        EvolvingNatFloat accelerationX = new(EnumTransformFunction.SINUS, MathF.PI * 2f);
-        EvolvingNatFloat accelerationZ = new(EnumTransformFunction.COSINUS, 7.539823f);
-        if (particle.RandomVelocitySequence > 0f)
-        {
-            float accelX = EvaluateEvolvingNatFloat(accelerationX, 0f, particle.RandomVelocitySequence);
-            float accelZ = EvaluateEvolvingNatFloat(accelerationZ, 0f, particle.RandomVelocitySequence);
-            particle.Velocity.X += particle.RandomVelocityDirection * accelX * deltaSeconds * 4f * particle.SizeMultiplier;
-            particle.Velocity.Z += accelZ * deltaSeconds * 3f * particle.SizeMultiplier;
-            particle.Velocity.Y += (particle.RandomVelocityDirection * accelX * deltaSeconds * 10f * particle.SizeMultiplier -
-                particle.RandomVelocityDirection * accelZ * deltaSeconds * 3f * particle.SizeMultiplier) / 10f;
-            particle.RandomVelocitySequence += deltaSeconds / 3f;
-            if (particle.RandomVelocitySequence > 2f)
-            {
-                particle.RandomVelocitySequence = 0f;
-            }
-            if (_previewRandom.NextDouble() < 0.005)
-            {
-                particle.RandomVelocitySequence = 0f;
-            }
-        }
-        else
-        {
-            particle.Velocity.X += (particle.StartingVelocity.X - particle.Velocity.X) * deltaSeconds;
-            particle.Velocity.Z += (particle.StartingVelocity.Z - particle.Velocity.Z) * deltaSeconds;
-        }
-
-        if (_previewRandom.NextDouble() < 0.005)
-        {
-            particle.RandomVelocitySequence = (float)_previewRandom.NextDouble() * 0.5f;
-            particle.RandomVelocityDirection = _previewRandom.Next(2) * 2 - 1;
-        }
-    }
-
-    private float SampleNatFloat(NatFloat? value)
-    {
-        return SampleNatFloat(value, 1f);
-    }
-
-    private float SampleNatFloat(NatFloat? value, float multiplier)
-    {
-        if (value == null) return 0f;
-        float random = (float)_previewRandom.NextDouble();
-        float sample = value.dist switch
-        {
-            EnumDistribution.UNIFORM => value.avg + (random - 0.5f) * 2f * value.var,
-            EnumDistribution.GAUSSIAN => value.avg + (AveragePreviewRandom(3) - 0.5f) * 2f * value.var,
-            EnumDistribution.NARROWGAUSSIAN => value.avg + (AveragePreviewRandom(6) - 0.5f) * 2f * value.var,
-            EnumDistribution.VERYNARROWGAUSSIAN => value.avg + (AveragePreviewRandom(12) - 0.5f) * 2f * value.var,
-            EnumDistribution.INVEXP => value.avg + (float)(_previewRandom.NextDouble() * _previewRandom.NextDouble()) * value.var,
-            EnumDistribution.STRONGINVEXP => value.avg + (float)(_previewRandom.NextDouble() * _previewRandom.NextDouble() * _previewRandom.NextDouble()) * value.var,
-            EnumDistribution.STRONGERINVEXP => value.avg + (float)(_previewRandom.NextDouble() * _previewRandom.NextDouble() * _previewRandom.NextDouble() * _previewRandom.NextDouble()) * value.var,
-            EnumDistribution.INVERSEGAUSSIAN => value.avg + 2f * InverseGaussianPreviewRandom(3) * value.var,
-            EnumDistribution.NARROWINVERSEGAUSSIAN => value.avg + 2f * InverseGaussianPreviewRandom(6) * value.var,
-            EnumDistribution.TRIANGLE => value.avg + (AveragePreviewRandom(2) - 0.5f) * 2f * value.var,
-            EnumDistribution.DIRAC => value.avg + (random - 0.5f) * 2f * value.var,
-            _ => 0f
-        };
-        return value.offset + multiplier * sample;
-    }
-
-    private float AveragePreviewRandom(int rolls)
-    {
-        float value = 0f;
-        for (int index = 0; index < rolls; index++)
-        {
-            value += (float)_previewRandom.NextDouble();
-        }
-        return value / rolls;
-    }
-
-    private float InverseGaussianPreviewRandom(int rolls)
-    {
-        float value = AveragePreviewRandom(rolls);
-        value = value > 0.5f ? value - 0.5f : value + 0.5f;
-        return value - 0.5f;
-    }
-
-    private static NatFloat? GetNatFloat(NatFloat[]? values, int index)
-    {
-        return values != null && index >= 0 && index < values.Length ? values[index] : null;
-    }
-
-    private ParticlePreviewColor GetPreviewParticleColor(AdvancedParticleProperties particleProperties)
-    {
-        if (_api is ICoreClientAPI clientApi)
-        {
-            try
-            {
-                return ParticlePreviewColor.FromRgba(particleProperties.GetRgbaColor(clientApi));
-            }
-            catch
-            {
-                // Fall through to the local sampler for partially initialized preview-only particles.
-            }
-        }
-
-        if (particleProperties.HsvaColor == null)
-        {
-            return ParticlePreviewColor.FromRgba(particleProperties.Color);
-        }
-
-        int hsvRgba = ColorUtil.HsvToRgba(
-            (byte)GameMath.Clamp(SampleNatFloat(GetNatFloat(particleProperties.HsvaColor, 0)), 0f, 255f),
-            (byte)GameMath.Clamp(SampleNatFloat(GetNatFloat(particleProperties.HsvaColor, 1)), 0f, 255f),
-            (byte)GameMath.Clamp(SampleNatFloat(GetNatFloat(particleProperties.HsvaColor, 2)), 0f, 255f),
-            (byte)GameMath.Clamp(SampleNatFloat(GetNatFloat(particleProperties.HsvaColor, 3)), 0f, 255f));
-        return ParticlePreviewColor.FromRgba(hsvRgba);
-    }
-
-    private static List<DevToolsPreviewParticleInstance> BuildPreviewParticleInstances(IEnumerable<ParticlePreviewParticle> particles)
-    {
-        List<DevToolsPreviewParticleInstance> instances = [];
-        foreach (ParticlePreviewParticle particle in particles)
-        {
-            Vector4 color = PreviewColorVector(particle);
-            if (color.W <= 0.001f) continue;
-
-            float size = GetPreviewParticleSize(particle);
-            if (!float.IsFinite(size) || size <= 0f) continue;
-
-            int glow = new VertexFlags(particle.VertexFlags).GlowLevel;
-            instances.Add(new DevToolsPreviewParticleInstance(
-                particle.Position,
-                size,
-                color,
-                particle.ParticleModel == EnumParticleModel.Cube,
-                glow));
-        }
-
-        return instances;
-    }
-
-    private static Vector4 PreviewColorVector(ParticlePreviewParticle particle)
-    {
-        float sequence = GetPreviewSequence(particle);
-        byte alpha = particle.ColorAlpha;
-        if (particle.OpacityEvolve != EvolvingNatFloat.NoValueSet)
-        {
-            alpha = (byte)GameMath.Clamp(EvaluateEvolvingNatFloat(particle.OpacityEvolve, alpha, sequence), 0f, 255f);
-        }
-
-        byte red = (byte)GameMath.Clamp(particle.ColorRed + EvaluateEvolvingNatFloat(particle.RedEvolve, particle.ColorRed, sequence), 0f, 255f);
-        byte green = (byte)GameMath.Clamp(particle.ColorGreen + EvaluateEvolvingNatFloat(particle.GreenEvolve, particle.ColorGreen, sequence), 0f, 255f);
-        byte blue = (byte)GameMath.Clamp(particle.ColorBlue + EvaluateEvolvingNatFloat(particle.BlueEvolve, particle.ColorBlue, sequence), 0f, 255f);
-        return new Vector4(red / 255f, green / 255f, blue / 255f, alpha / 255f);
-    }
-
-    private static float GetPreviewParticleSize(ParticlePreviewParticle particle)
-    {
-        return particle.SizeEvolve != EvolvingNatFloat.NoValueSet
-            ? Math.Max(0.001f, EvaluateEvolvingNatFloat(particle.SizeEvolve, particle.SizeMultiplier, GetPreviewSequence(particle)))
-            : particle.SizeMultiplier;
-    }
-
-    private static float GetPreviewSequence(ParticlePreviewParticle particle)
-    {
-        return particle.Life <= 0f ? 0f : Math.Clamp(particle.Age / particle.Life, 0f, 1f);
-    }
-
-    private static float EvaluateEvolvingNatFloat(EvolvingNatFloat value, float firstValue, float sequence)
-    {
-        if (value == EvolvingNatFloat.NoValueSet || value.Transform == EnumTransformFunction.UNSPECIFIED) return 0f;
-
-        float sign = firstValue == 0f ? 0f : firstValue / Math.Abs(firstValue);
-        float result = value.Transform switch
-        {
-            EnumTransformFunction.IDENTICAL => firstValue,
-            EnumTransformFunction.LINEAR => firstValue + value.Factor * sequence,
-            EnumTransformFunction.INVERSELINEAR => firstValue + 1f / (1f + value.Factor * sequence),
-            EnumTransformFunction.LINEARNULLIFY => value.Factor > 0f ? Math.Min(0f, firstValue + value.Factor * sequence) : Math.Max(0f, firstValue + value.Factor * sequence),
-            EnumTransformFunction.LINEARREDUCE => firstValue - sign * value.Factor * sequence,
-            EnumTransformFunction.LINEARINCREASE => firstValue + sign * value.Factor * sequence,
-            EnumTransformFunction.QUADRATIC => firstValue + Math.Sign(value.Factor) * (value.Factor * sequence) * (value.Factor * sequence),
-            EnumTransformFunction.ROOT => firstValue + MathF.Sqrt(Math.Max(0f, value.Factor * sequence)),
-            EnumTransformFunction.SINUS => firstValue + GameMath.FastSin(value.Factor * sequence),
-            EnumTransformFunction.CLAMPEDPOSITIVESINUS => firstValue * GameMath.Min(5f * Math.Abs(GameMath.FastSin(value.Factor * sequence)), 1f),
-            EnumTransformFunction.COSINUS => firstValue + GameMath.FastCos(value.Factor * sequence),
-            EnumTransformFunction.SMOOTHSTEP => firstValue + GameMath.SmoothStep(value.Factor * sequence),
-            _ => 0f
-        };
-
-        return value.MaxValue.HasValue ? Math.Min(value.MaxValue.Value, result) : result;
-    }
-
-    private readonly struct ParticlePreviewColor(byte red, byte green, byte blue, byte alpha)
-    {
-        public readonly byte Red = red;
-        public readonly byte Green = green;
-        public readonly byte Blue = blue;
-        public readonly byte Alpha = alpha;
-
-        public static ParticlePreviewColor FromRgba(int rgba)
-        {
-            return new(
-                (byte)(rgba & 0xFF),
-                (byte)((rgba >> 8) & 0xFF),
-                (byte)((rgba >> 16) & 0xFF),
-                (byte)((rgba >> 24) & 0xFF));
-        }
+        Vec3f wind = GlobalConstants.CurrentWindSpeedClient;
+        return new Vector3(wind.X, wind.Y, wind.Z) * Math.Max(0f, particleProperties.WindAffectednes);
     }
 
     private sealed class ParticleEffectFamilyBuilder(string key, string displayKey, string domain, string searchText, string tooltip)
@@ -2985,50 +2530,6 @@ public class ParticleEffectsManager
         public readonly float Depth = depth;
         public readonly Vector3 Normal = normal;
         public readonly System.Numerics.Vector4 Color = color;
-    }
-
-    private sealed class ParticlePreviewParticle
-    {
-        public AdvancedParticleProperties Properties = null!;
-        public Vector3 Position;
-        public Vector3 Velocity;
-        public Vector3 StartingVelocity;
-        public Vector3 ParentVelocity;
-        public float ParentVelocityWeight;
-        public float Bounciness;
-        public float Age;
-        public float Life;
-        public float SizeMultiplier;
-        public float ParticleHeight;
-        public float Seed;
-        public int EmitterIndex;
-        public EnumParticleModel ParticleModel;
-        public byte ColorRed;
-        public byte ColorGreen;
-        public byte ColorBlue;
-        public byte ColorAlpha;
-        public int VertexFlags;
-        public bool SelfPropelled;
-        public bool TerrainCollision;
-        public float GravityStrength;
-        public bool SwimOnLiquid;
-        public bool DieInLiquid;
-        public bool DieInAir;
-        public bool DieOnRainHeightmap;
-        public EvolvingNatFloat OpacityEvolve;
-        public EvolvingNatFloat RedEvolve;
-        public EvolvingNatFloat GreenEvolve;
-        public EvolvingNatFloat BlueEvolve;
-        public EvolvingNatFloat SizeEvolve;
-        public EvolvingNatFloat[]? VelocityEvolve;
-        public bool RandomVelocityChange;
-        public AdvancedParticleProperties[]? SecondaryParticles;
-        public AdvancedParticleProperties[]? DeathParticles;
-        public float[] SecondarySpawnTimers = [];
-        public bool Alive;
-        public float RandomDrag = 1f;
-        public float RandomVelocitySequence;
-        public float RandomVelocityDirection = 1f;
     }
 
     private void SpawnDebugParticles(string code, float offset, Vector3 velocity, float intensity)
