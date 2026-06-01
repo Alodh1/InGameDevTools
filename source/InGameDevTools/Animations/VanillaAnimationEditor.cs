@@ -85,6 +85,10 @@ public sealed partial class DebugWindowManager
     private bool _vanillaLiveSymmetryPropagating;
     private bool _vanillaShowLiveSymmetryGhost = true;
     private float _vanillaLiveSymmetryGhostOpacity = 0.35f;
+    private bool _vanillaOnionSkinEnabled;
+    private bool _vanillaOnionSkinPrevious = true;
+    private bool _vanillaOnionSkinNext = true;
+    private float _vanillaOnionSkinOpacity = 0.22f;
     private bool _vanillaIkFollowMove;
     private VanillaIkChainMode _vanillaIkMode = VanillaIkChainMode.AutoLimb;
     private readonly List<string> _vanillaIkChainElementNames = [];
@@ -914,6 +918,34 @@ public sealed partial class DebugWindowManager
             ImGui.SetTooltip("Use current world light and fog instead of stable editor lighting.");
         }
 
+        bool onionSkins = _vanillaOnionSkinEnabled;
+        ImGui.SameLine();
+        if (ImGui.Checkbox("Onion skins##vanilla-preview-onion", ref onionSkins))
+        {
+            _vanillaOnionSkinEnabled = onionSkins;
+            _vanillaStatus = _vanillaOnionSkinEnabled
+                ? "Viewport onion skins enabled."
+                : "Viewport onion skins disabled.";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Shows neighboring vanilla shape keyframes as translucent ghosts in the preview viewport.");
+        }
+
+        if (_vanillaOnionSkinEnabled)
+        {
+            ImGui.SameLine();
+            ImGui.Checkbox("Prev##vanilla-preview-onion-prev", ref _vanillaOnionSkinPrevious);
+            ImGui.SameLine();
+            ImGui.Checkbox("Next##vanilla-preview-onion-next", ref _vanillaOnionSkinNext);
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(92);
+            if (ImGui.SliderFloat("Opacity##vanilla-preview-onion-opacity", ref _vanillaOnionSkinOpacity, 0.05f, 0.6f, "%.2f"))
+            {
+                _vanillaOnionSkinOpacity = Math.Clamp(_vanillaOnionSkinOpacity, 0.05f, 0.6f);
+            }
+        }
+
         ImGui.SameLine();
         ImGui.TextUnformatted("Mode:");
         ImGui.SameLine();
@@ -1206,7 +1238,7 @@ public sealed partial class DebugWindowManager
         VanillaPreviewMode effectiveMode = GetVanillaEffectivePreviewMode(scene);
         float viewportWidth = Math.Max(1f, max.X - min.X);
         float viewportHeight = Math.Max(1f, max.Y - min.Y);
-        VanillaPreviewGhost ghost = BuildVanillaLiveSymmetryGhost(row, scene, effectiveMode);
+        VanillaPreviewGhost[] ghosts = BuildVanillaViewportGhosts(row, scene, effectiveMode);
 
         VanillaAnimationViewport3DRenderer renderer = EnsureVanillaPreviewRenderer();
         int textureId = renderer.RenderToTexture(
@@ -1220,7 +1252,7 @@ public sealed partial class DebugWindowManager
             _vanillaViewportPanY,
             effectiveMode,
             _vanillaViewportWorldLighting,
-            ghost,
+            ghosts,
             _vanillaVerbosePreviewLogs,
             out string? previewSkipReason);
         if (textureId > 0)
@@ -1244,10 +1276,10 @@ public sealed partial class DebugWindowManager
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"Preview: {scene.DisplayName}");
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), text, GetVanillaViewportHelpText(effectiveMode, scene));
-        if (ghost.Enabled)
+        if (ghosts.Length > 0)
         {
             uint ghostText = ImGui.ColorConvertFloat4ToU32(new NVector4(0.54f, 0.86f, 1f, 1f));
-            drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), ghostText, $"Symmetry ghost: frame {ghost.Frame:0}");
+            drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), ghostText, GetVanillaViewportGhostStatus(ghosts));
         }
 
         if (effectiveMode == VanillaPreviewMode.Orbit)
@@ -1314,6 +1346,50 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private VanillaPreviewGhost[] BuildVanillaViewportGhosts(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, VanillaPreviewMode effectiveMode)
+    {
+        if (effectiveMode != VanillaPreviewMode.Orbit) return [];
+
+        List<VanillaPreviewGhost> ghosts = [];
+        AddVanillaOnionSkinGhosts(row, scene, ghosts);
+        VanillaPreviewGhost symmetry = BuildVanillaLiveSymmetryGhost(row, scene, effectiveMode);
+        if (symmetry.Enabled) ghosts.Add(symmetry);
+        return ghosts.ToArray();
+    }
+
+    private void AddVanillaOnionSkinGhosts(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, List<VanillaPreviewGhost> ghosts)
+    {
+        if (!_vanillaOnionSkinEnabled ||
+            row.ShapeAnimation == null ||
+            scene.Playing)
+        {
+            return;
+        }
+
+        VanillaAnimation animation = row.ShapeAnimation.Animation;
+        if (animation.KeyFrames == null || animation.KeyFrames.Length <= 1) return;
+
+        int keyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, animation.KeyFrames.Length - 1);
+        float opacity = Math.Clamp(_vanillaOnionSkinOpacity, 0.05f, 0.6f);
+        if (_vanillaOnionSkinPrevious && keyFrameIndex > 0)
+        {
+            float frame = animation.KeyFrames[keyFrameIndex - 1].Frame;
+            if (!IsSamePreviewFrame(frame, scene.CurrentFrame))
+            {
+                ghosts.Add(new VanillaPreviewGhost(true, frame, opacity, 1.0f, 0.62f, 0.28f, $"prev {frame:0}"));
+            }
+        }
+
+        if (_vanillaOnionSkinNext && keyFrameIndex < animation.KeyFrames.Length - 1)
+        {
+            float frame = animation.KeyFrames[keyFrameIndex + 1].Frame;
+            if (!IsSamePreviewFrame(frame, scene.CurrentFrame))
+            {
+                ghosts.Add(new VanillaPreviewGhost(true, frame, opacity, 0.35f, 1.0f, 0.55f, $"next {frame:0}"));
+            }
+        }
+    }
+
     private VanillaPreviewGhost BuildVanillaLiveSymmetryGhost(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, VanillaPreviewMode effectiveMode)
     {
         if (!_vanillaLiveSymmetryEnabled ||
@@ -1325,23 +1401,11 @@ public sealed partial class DebugWindowManager
             return VanillaPreviewGhost.Disabled;
         }
 
-        VanillaAnimationDocument document = row.ShapeAnimation.Document;
         VanillaAnimation animation = row.ShapeAnimation.Animation;
         if (_vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.InPlace ||
             animation.QuantityFrames <= 1 ||
             animation.KeyFrames == null ||
-            animation.KeyFrames.Length == 0 ||
-            string.IsNullOrWhiteSpace(_vanillaSelection.ElementName))
-        {
-            return VanillaPreviewGhost.Disabled;
-        }
-
-        int keyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, animation.KeyFrames.Length - 1);
-        AnimationKeyFrame keyFrame = animation.KeyFrames[keyFrameIndex];
-        string[] allElements = BuildVanillaSymmetryElementUniverse(document, animation, keyFrame);
-        if (!TryResolveVanillaSymmetryPair(document, _vanillaSelection.ElementName, allElements, out string pairName, out VanillaSymmetrySide sourceSide, out _) ||
-            string.Equals(pairName, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase) ||
-            !ShouldVanillaLiveSymmetryPropagateFrom(sourceSide))
+            animation.KeyFrames.Length == 0)
         {
             return VanillaPreviewGhost.Disabled;
         }
@@ -1353,7 +1417,19 @@ public sealed partial class DebugWindowManager
         int ghostFrame = GetVanillaPhaseTargetFrame(animation, sourceFrame, phaseFrames);
         if (ghostFrame == sourceFrame) return VanillaPreviewGhost.Disabled;
 
-        return new VanillaPreviewGhost(true, ghostFrame, Math.Clamp(_vanillaLiveSymmetryGhostOpacity, 0.05f, 0.8f));
+        return new VanillaPreviewGhost(true, ghostFrame, Math.Clamp(_vanillaLiveSymmetryGhostOpacity, 0.05f, 0.8f), 0.42f, 0.82f, 1f, $"sym {ghostFrame:0}");
+    }
+
+    private static bool IsSamePreviewFrame(float left, float right)
+    {
+        return Math.Abs(left - right) < 0.001f;
+    }
+
+    private static string GetVanillaViewportGhostStatus(IReadOnlyList<VanillaPreviewGhost> ghosts)
+    {
+        return ghosts.Count == 1
+            ? $"Ghost: {ghosts[0].Label}"
+            : $"Ghosts: {string.Join(", ", ghosts.Select(ghost => ghost.Label))}";
     }
 
     private VanillaPreviewMode GetVanillaEffectivePreviewMode(VanillaAnimationPreviewScene scene)
@@ -7305,9 +7381,9 @@ public sealed partial class DebugWindowManager
         NVector3 Target,
         float Distance);
 
-    private readonly record struct VanillaPreviewGhost(bool Enabled, float Frame, float Opacity)
+    private readonly record struct VanillaPreviewGhost(bool Enabled, float Frame, float Opacity, float Red, float Green, float Blue, string Label)
     {
-        public static VanillaPreviewGhost Disabled { get; } = new(false, 0f, 0f);
+        public static VanillaPreviewGhost Disabled { get; } = new(false, 0f, 0f, 0f, 0f, 0f, "");
     }
 
     private readonly record struct VanillaPreviewRenderKey(
@@ -7322,9 +7398,7 @@ public sealed partial class DebugWindowManager
         float PanY,
         VanillaPreviewMode Mode,
         bool WorldLighting,
-        bool GhostEnabled,
-        float GhostFrame,
-        float GhostOpacity);
+        string GhostKey);
 
     private sealed class VanillaAnimationViewport3DRenderer : IDisposable
     {
@@ -7350,6 +7424,16 @@ public sealed partial class DebugWindowManager
             _lastSkipLogKey = "";
         }
 
+        private static string BuildGhostRenderKey(IReadOnlyList<VanillaPreviewGhost> ghosts)
+        {
+            if (ghosts.Count == 0) return "";
+            return string.Join(
+                "|",
+                ghosts
+                    .Where(ghost => ghost.Enabled)
+                    .Select(ghost => $"{ghost.Frame:0.###}:{ghost.Opacity:0.###}:{ghost.Red:0.###}:{ghost.Green:0.###}:{ghost.Blue:0.###}:{ghost.Label}"));
+        }
+
         public int RenderToTexture(
             VanillaAnimationPreviewScene scene,
             float width,
@@ -7361,7 +7445,7 @@ public sealed partial class DebugWindowManager
             float panY,
             VanillaPreviewMode mode,
             bool worldLighting,
-            VanillaPreviewGhost ghost,
+            IReadOnlyList<VanillaPreviewGhost> ghosts,
             bool verboseLogs,
             out string? skipReason)
         {
@@ -7386,9 +7470,7 @@ public sealed partial class DebugWindowManager
                 panY,
                 mode,
                 worldLighting,
-                ghost.Enabled,
-                ghost.Frame,
-                ghost.Opacity);
+                BuildGhostRenderKey(ghosts));
             if (_lastTextureId > 0 &&
                 _lastRenderKey == renderKey &&
                 _frameBuffer is { Disposed: false, ColorTextureIds.Length: > 0 })
@@ -7500,10 +7582,12 @@ public sealed partial class DebugWindowManager
 
                 LogVerboseScene(scene, mode, meshRef, verboseLogs);
                 render.RenderMultiTextureMesh(meshRef, "entityTex", 0);
-                if (ghost.Enabled && scene.TryEvaluateGhostPose(ghost.Frame))
+                foreach (VanillaPreviewGhost ghost in ghosts)
                 {
+                    if (!ghost.Enabled || !scene.TryEvaluateGhostPose(ghost.Frame)) continue;
+
                     render.GLDepthMask(false);
-                    SetUniform(shader, "renderColor", new Vec4f(0.42f, 0.82f, 1f, Math.Clamp(ghost.Opacity, 0.05f, 0.8f)));
+                    SetUniform(shader, "renderColor", new Vec4f(ghost.Red, ghost.Green, ghost.Blue, Math.Clamp(ghost.Opacity, 0.05f, 0.8f)));
                     if (shader.UBOs != null && shader.UBOs.TryGetValue("Animation", out UBORef ghostAnimationUbo) && scene.GhostAnimator.Matrices != null)
                     {
                         ghostAnimationUbo.Update(scene.GhostAnimator.Matrices, 0, scene.GhostAnimator.MaxJointId * 16 * 4);
