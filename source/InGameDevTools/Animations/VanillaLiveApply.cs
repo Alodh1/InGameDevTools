@@ -6,6 +6,7 @@ using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.MathTools;
+using Vintagestory.GameContent;
 using VanillaAnimation = Vintagestory.API.Common.Animation;
 
 namespace InGameDevTools.Animations;
@@ -159,6 +160,13 @@ public sealed partial class DebugWindowManager
         List<VanillaShapeRuntimeSnapshot> snapshots = targets
             .Select(shape => new VanillaShapeRuntimeSnapshot(shape, CloneVanillaAnimationArray(shape.Animations)))
             .ToList();
+        List<VanillaEntityClientShapeSnapshot> clientSnapshots = GetVanillaRuntimeEntityClients(document)
+            .Select(client => new VanillaEntityClientShapeSnapshot(
+                client,
+                client.LoadedShape,
+                client.LoadedShapeForEntity,
+                client.LoadedAlternateShapes?.ToArray()))
+            .ToList();
 
         string backupPath = Path.Combine("assets", document.Domain, document.AssetPath.Replace('/', Path.DirectorySeparatorChar));
         return new(
@@ -167,7 +175,14 @@ public sealed partial class DebugWindowManager
                 foreach (VanillaShapeRuntimeSnapshot snapshot in snapshots)
                 {
                     snapshot.Shape.Animations = CloneVanillaAnimationArray(snapshot.Animations);
-                    PrepareRuntimeShapeAnimations(snapshot.Shape, document.DisplayPath);
+                    PrepareRuntimeShapeAnimationLookups(snapshot.Shape);
+                }
+
+                foreach (VanillaEntityClientShapeSnapshot snapshot in clientSnapshots)
+                {
+                    snapshot.Client.LoadedShape = snapshot.LoadedShape;
+                    snapshot.Client.LoadedShapeForEntity = snapshot.LoadedShapeForEntity;
+                    snapshot.Client.LoadedAlternateShapes = snapshot.LoadedAlternateShapes?.ToArray();
                 }
 
                 RefreshLoadedEntityAnimators(document);
@@ -209,9 +224,16 @@ public sealed partial class DebugWindowManager
         if (document.Kind == VanillaDocumentKind.Shape)
         {
             VanillaAnimation[] edited = document.ShapeAnimations.Select(entry => CloneVanillaAnimation(entry.Animation)).ToArray();
-            foreach (Shape target in GetVanillaRuntimeShapes(document))
+            Dictionary<Shape, Shape> editedShapeCache = new(ReferenceEqualityComparer.Instance);
+            bool shapeApplied = false;
+            foreach (EntityClientProperties client in GetVanillaRuntimeEntityClients(document))
             {
-                ApplyVanillaAnimationsToRuntimeShape(target, edited, document.DisplayPath);
+                shapeApplied |= ApplyVanillaAnimationsToRuntimeClientShapes(client, edited, document.DisplayPath, editedShapeCache);
+            }
+
+            if (!shapeApplied && document.Shape != null)
+            {
+                ApplyVanillaAnimationsToRuntimeShape(document.Shape, edited);
             }
 
             return;
@@ -244,8 +266,8 @@ public sealed partial class DebugWindowManager
             ? ""
             : $" Rebuild failures: {string.Join("; ", refresh.Failures.Take(3))}{(refresh.Failures.Count > 3 ? $"; +{refresh.Failures.Count - 3} more" : "")}.";
         if (refresh.Matched == 0) return $"{baseStatus} Applied to future starts only.{failureText}";
-        if (refresh.Refreshed < refresh.Matched) return $"{baseStatus} Rebuilt {refresh.Refreshed}/{refresh.Matched} loaded entity animator(s); some apply to future starts only.{failureText}";
-        return $"{baseStatus} Rebuilt {refresh.Refreshed} loaded entity animator instance(s).{failureText}";
+        if (refresh.Refreshed < refresh.Matched) return $"{baseStatus} Retessellated {refresh.Refreshed}/{refresh.Matched} loaded entity renderer(s); some apply to future starts only.{failureText}";
+        return $"{baseStatus} Retessellated {refresh.Refreshed} loaded entity renderer instance(s).{failureText}";
     }
 
     private IEnumerable<Shape> GetVanillaRuntimeShapes(VanillaAnimationDocument document)
@@ -287,6 +309,28 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private IEnumerable<EntityClientProperties> GetVanillaRuntimeEntityClients(VanillaAnimationDocument document)
+    {
+        HashSet<EntityClientProperties> seen = [];
+        foreach (EntityProperties entityType in GetVanillaRuntimeEntityTargets(document))
+        {
+            EntityClientProperties? client = entityType.Client;
+            if (client != null && seen.Add(client))
+            {
+                yield return client;
+            }
+
+            foreach (Entity entity in GetLoadedEntitiesForVanillaRuntimeTarget(entityType))
+            {
+                client = entity.Properties?.Client;
+                if (client != null && seen.Add(client))
+                {
+                    yield return client;
+                }
+            }
+        }
+    }
+
     private IEnumerable<VanillaMetadataRuntimeTarget> GetVanillaRuntimeMetadataTargets(VanillaAnimationDocument document)
     {
         HashSet<EntityClientProperties> seen = [];
@@ -320,29 +364,81 @@ public sealed partial class DebugWindowManager
 
     private void PrepareRuntimeShapeAnimations(Shape shape, string label)
     {
-        try
-        {
-            Dictionary<string, ShapeElement> elementsByName = shape.CollectAndResolveReferences(_api.World.Logger, label);
-            shape.CacheInvTransforms();
-            shape.ResolveAndFindJoints(_api.World.Logger, label, elementsByName);
-        }
-        catch
-        {
-            // Loaded runtime shapes are usually already resolved. Frame generation below is the critical step.
-        }
+        shape.JointsById.Clear();
+        shape.InitForAnimations(_api.World.Logger, label);
+        PrepareRuntimeShapeAnimationLookups(shape);
+    }
 
+    private static void PrepareRuntimeShapeAnimationLookups(Shape shape)
+    {
         foreach (VanillaAnimation animation in shape.Animations ?? [])
         {
-            PrepareLiveAnimationFrames(shape, animation);
+            if (string.IsNullOrWhiteSpace(animation.Code)) animation.Code = animation.Name;
+            if (animation.KeyFrames != null)
+            {
+                foreach (AnimationKeyFrame keyFrame in animation.KeyFrames)
+                {
+                    if (keyFrame.Elements == null) continue;
+                    foreach (AnimationKeyFrameElement element in keyFrame.Elements.Values)
+                    {
+                        CompleteVanillaElementTransformGroups(element);
+                    }
+                }
+            }
         }
 
         RebuildRuntimeShapeAnimationLookups(shape);
     }
 
-    private void ApplyVanillaAnimationsToRuntimeShape(Shape target, VanillaAnimation[] edited, string label)
+    private void ApplyVanillaAnimationsToRuntimeShape(Shape target, VanillaAnimation[] edited)
     {
         target.Animations = CloneVanillaAnimationArray(edited);
-        PrepareRuntimeShapeAnimations(target, label);
+        PrepareRuntimeShapeAnimationLookups(target);
+    }
+
+    private bool ApplyVanillaAnimationsToRuntimeClientShapes(EntityClientProperties client, VanillaAnimation[] edited, string label, Dictionary<Shape, Shape> editedShapeCache)
+    {
+        bool applied = false;
+        if (client.LoadedShape != null)
+        {
+            client.LoadedShape = GetOrCreateEditedRuntimeShape(client.LoadedShape, edited, label, editedShapeCache);
+            applied = true;
+        }
+
+        if (client.LoadedShapeForEntity != null)
+        {
+            client.LoadedShapeForEntity = GetOrCreateEditedRuntimeShape(client.LoadedShapeForEntity, edited, label, editedShapeCache);
+            applied = true;
+        }
+
+        if (client.LoadedAlternateShapes != null)
+        {
+            Shape[] editedAlternates = new Shape[client.LoadedAlternateShapes.Length];
+            for (int index = 0; index < client.LoadedAlternateShapes.Length; index++)
+            {
+                Shape alternate = client.LoadedAlternateShapes[index];
+                editedAlternates[index] = GetOrCreateEditedRuntimeShape(alternate, edited, label, editedShapeCache);
+            }
+
+            client.LoadedAlternateShapes = editedAlternates;
+            applied = true;
+        }
+
+        return applied;
+    }
+
+    private Shape GetOrCreateEditedRuntimeShape(Shape source, VanillaAnimation[] edited, string label, Dictionary<Shape, Shape> editedShapeCache)
+    {
+        if (editedShapeCache.TryGetValue(source, out Shape? existing))
+        {
+            return existing;
+        }
+
+        Shape clone = source.Clone() ?? throw new InvalidOperationException($"Could not clone runtime shape for {label}.");
+        clone.Animations = CloneVanillaAnimationArray(edited);
+        PrepareRuntimeShapeAnimations(clone, label);
+        editedShapeCache[source] = clone;
+        return clone;
     }
 
     private static void RebuildRuntimeShapeAnimationLookups(Shape shape)
@@ -359,24 +455,6 @@ public sealed partial class DebugWindowManager
 
         AssignDictionaryMember(shape, "AnimationsByCode", byCode);
         AssignDictionaryMember(shape, "AnimationsByCrc32", byCrc);
-    }
-
-    private static void PrepareLiveAnimationFrames(Shape shape, VanillaAnimation animation)
-    {
-        if (string.IsNullOrWhiteSpace(animation.Code)) animation.Code = animation.Name;
-        if (animation.KeyFrames != null)
-        {
-            foreach (AnimationKeyFrame keyFrame in animation.KeyFrames)
-            {
-                if (keyFrame.Elements == null) continue;
-                foreach (AnimationKeyFrameElement element in keyFrame.Elements.Values)
-                {
-                    CompleteVanillaElementTransformGroups(element);
-                }
-            }
-        }
-
-        animation.GenerateAllFrames(shape.Elements, shape.JointsById);
     }
 
     private static void RebuildRuntimeMetadataLookups(EntityClientProperties client)
@@ -437,16 +515,16 @@ public sealed partial class DebugWindowManager
                     continue;
                 }
 
-                PrepareRuntimeShapeAnimations(entityShape, label);
-                RunningAnimation[] copyOverAnimations = GetRunningAnimationsForCopy(entity);
-                ClearRuntimeAnimationCache(entity);
-                entity.AnimManager.AnimationsDirty = true;
-                entity.AnimManager.LoadAnimator(_api, entity, entityShape, copyOverAnimations, requirePosesOnServer: false, disableElements: []);
-                if (entity.AnimManager.Animator is AnimatorBase animator)
+                if (entity.Properties?.Client?.Renderer is not EntityShapeRenderer renderer)
                 {
-                    animator.entityForLogging = entity;
+                    result.Failures.Add($"{entity.Code}: renderer is not an entity shape renderer");
+                    continue;
                 }
 
+                ClearRuntimeAnimationCache(entity);
+                entity.AnimManager.AnimationsDirty = true;
+                entity.MarkShapeModified();
+                renderer.TesselateShape();
                 result.Refreshed++;
             }
             catch (Exception exception)
@@ -478,18 +556,6 @@ public sealed partial class DebugWindowManager
             ?? entityType.Client?.LoadedShapeForEntity
             ?? entityType.Client?.LoadedShape;
         return shape != null;
-    }
-
-    private static RunningAnimation[] GetRunningAnimationsForCopy(Entity entity)
-    {
-        if (entity.AnimManager?.Animator is not AnimatorBase animator || animator.Animations == null)
-        {
-            return [];
-        }
-
-        return animator.Animations
-            .Where(animation => animation != null && (animation.Active || animation.Running))
-            .ToArray();
     }
 
     private void ClearRuntimeAnimationCache(Entity entity)
@@ -565,6 +631,7 @@ public sealed partial class DebugWindowManager
     }
 
     private sealed record VanillaShapeRuntimeSnapshot(Shape Shape, VanillaAnimation[] Animations);
+    private sealed record VanillaEntityClientShapeSnapshot(EntityClientProperties Client, Shape? LoadedShape, Shape? LoadedShapeForEntity, Shape[]? LoadedAlternateShapes);
     private sealed record VanillaMetadataRuntimeSnapshot(EntityProperties EntityType, EntityClientProperties Client, AnimationMetaData[] Animations);
     private sealed record VanillaMetadataRuntimeTarget(EntityProperties EntityType, EntityClientProperties Client);
 
