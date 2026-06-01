@@ -10,9 +10,12 @@ namespace InGameDevTools.Utils;
 
 internal sealed class DevToolsPreview3DRenderer : IDisposable
 {
+    private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad";
+
     private readonly ICoreClientAPI _api;
     private FrameBufferRef? _frameBuffer;
     private EngineParticlePreview? _particlePreview;
+    private IShaderProgram? _previewQuadParticleShader;
 
     public DevToolsPreview3DRenderer(ICoreClientAPI api)
     {
@@ -267,23 +270,74 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         IRenderAPI render = _api.Render;
         render.GlToggleBlend(true, EnumBlendMode.Standard);
         render.GLDepthMask(false);
+        GL.Disable(EnableCap.DepthTest);
 
         _particlePreview.Update(camera.Position, Math.Clamp(deltaSeconds, 0f, 0.1f));
         Matrixf particleView = BuildCameraOriginView(camera);
 
-        RenderEngineParticlePool(EnumShaderProgram.Particlescube, _particlePreview.CubePool, particleView, camera.Projection);
-        RenderEngineParticlePool(EnumShaderProgram.Particlesquad, _particlePreview.QuadPool, particleView, camera.Projection);
+        RenderEngineParticlePool(render.GetEngineShader(EnumShaderProgram.Particlescube), _particlePreview.CubePool, particleView, camera.Projection);
+        RenderEngineParticlePool(EnsurePreviewQuadParticleShader(), _particlePreview.QuadPool, particleView, camera.Projection);
     }
 
-    private void RenderEngineParticlePool(EnumShaderProgram shaderProgram, IParticlePool pool, Matrixf modelView, Matrixf projection)
+    private void RenderEngineParticlePool(IShaderProgram shader, IParticlePool pool, Matrixf modelView, Matrixf projection)
     {
         if (pool.QuantityAlive <= 0) return;
 
-        IShaderProgram shader = _api.Render.GetEngineShader(shaderProgram);
         shader.Use();
-        ApplyParticleShaderUniforms(shader, modelView, projection);
-        _api.Render.RenderMeshInstanced(pool.Model, pool.QuantityAlive);
-        shader.Stop();
+        try
+        {
+            ApplyParticleShaderUniforms(shader, modelView, projection);
+            _api.Render.RenderMeshInstanced(pool.Model, pool.QuantityAlive);
+        }
+        finally
+        {
+            shader.Stop();
+        }
+    }
+
+    private IShaderProgram EnsurePreviewQuadParticleShader()
+    {
+        if (_previewQuadParticleShader is { Disposed: false, LoadError: false })
+        {
+            return _previewQuadParticleShader;
+        }
+
+        IShaderProgram? existing = TryGetShaderProgram(PreviewQuadParticleShaderName);
+        if (existing is { Disposed: false, LoadError: false })
+        {
+            _previewQuadParticleShader = existing;
+            return existing;
+        }
+
+        IShaderProgram shader = _api.Shader.NewShaderProgram();
+        IShader vertexShader = _api.Shader.NewShader(EnumShaderType.VertexShader);
+        vertexShader.Code = PreviewQuadParticleVertexShader;
+        shader.VertexShader = vertexShader;
+
+        IShader fragmentShader = _api.Shader.NewShader(EnumShaderType.FragmentShader);
+        fragmentShader.Code = PreviewQuadParticleFragmentShader;
+        shader.FragmentShader = fragmentShader;
+
+        _api.Shader.RegisterMemoryShaderProgram(PreviewQuadParticleShaderName, shader);
+        if (!shader.Compile())
+        {
+            throw new InvalidOperationException("Could not compile preview quad particle shader.");
+        }
+
+        _previewQuadParticleShader = shader;
+        return shader;
+    }
+
+    private IShaderProgram? TryGetShaderProgram(string name)
+    {
+        try
+        {
+            return _api.Shader.GetProgramByName(name);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void ApplyParticleShaderUniforms(IShaderProgram shader, Matrixf modelView, Matrixf projection)
@@ -443,6 +497,96 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
     {
         if (shader.HasUniform(name)) shader.UniformMatrix(name, matrix);
     }
+
+    private const string PreviewQuadParticleVertexShader = """
+#version 330 core
+#extension GL_ARB_explicit_attrib_location: enable
+
+layout (location = 0) in vec3 vertexPosition;
+layout (location = 1) in vec2 uvIn;
+layout (location = 2) in vec4 baseColor;
+
+layout (location = 3) in int renderFlags;
+layout (location = 4) in vec3 particlePosition;
+layout (location = 5) in float scale;
+layout (location = 6) in vec4 particleDir;
+layout (location = 7) in vec4 rgbaLightIn;
+layout (location = 8) in vec4 rgbaBlockIn;
+
+uniform vec3 rgbaAmbientIn;
+uniform mat4 projectionMatrix;
+uniform mat4 modelViewMatrix;
+
+out vec4 color;
+out vec2 uv;
+
+mat4 rotationZ(float angle) {
+    return mat4(cos(angle), -sin(angle), 0, 0,
+                sin(angle),  cos(angle), 0, 0,
+                0,           0,          1, 0,
+                0,           0,          0, 1);
+}
+
+void main()
+{
+    mat4 mvmat = modelViewMatrix;
+    vec3 localPos = vertexPosition * scale;
+    bool rainParticle = renderFlags < 0;
+
+    uv = rainParticle ? vec2(0.5, 0.5) : uvIn;
+
+    mvmat[3] = mvmat * vec4(particlePosition, 1.0);
+
+    if (rainParticle) {
+        vec3 u = normalize(particleDir.xyz);
+        vec3 v = vec3(0.0, -1.0, 0.0);
+        float zangle = acos(dot(u.xy, v.xy));
+        mvmat = mvmat * rotationZ(zangle);
+    }
+
+    mvmat[0].xyz = vec3(1.0, 0.0, 0.0);
+    if (!rainParticle) {
+        mvmat[1].xyz = vec3(0.0, 1.0, 0.0);
+    }
+    mvmat[2].xyz = vec3(0.0, 0.0, 1.0);
+
+    if (rainParticle) {
+        localPos.y = localPos.y * 8.0 - 3.0;
+        localPos.xz /= 3.5;
+    }
+
+    vec3 light = max(rgbaAmbientIn, rgbaLightIn.rgb);
+    light = max(light, vec3(0.35));
+    color = baseColor * vec4(rgbaBlockIn.rgb * light, rgbaBlockIn.a);
+
+    vec4 cameraPos = mvmat * vec4(localPos, 1.0);
+    gl_Position = projectionMatrix * cameraPos;
+}
+""";
+
+    private const string PreviewQuadParticleFragmentShader = """
+#version 330 core
+#extension GL_ARB_explicit_attrib_location: enable
+
+in vec4 color;
+in vec2 uv;
+
+layout(location = 0) out vec4 outColor;
+
+void main()
+{
+    vec4 previewColor = color;
+    vec2 edgeFade = vec2(
+        max(max(0.0, 0.1 - uv.x), max(0.0, uv.x - 0.9)),
+        max(max(0.0, 0.1 - uv.y), max(0.0, uv.y - 0.9))
+    );
+
+    previewColor.a *= 1.0 - clamp(length(edgeFade) * 10.0, 0.0, 1.0);
+    if (previewColor.a < 0.002) discard;
+
+    outColor = clamp(previewColor, vec4(0.0), vec4(1.0));
+}
+""";
 }
 
 internal sealed class DevToolsPreviewMesh : IDisposable
