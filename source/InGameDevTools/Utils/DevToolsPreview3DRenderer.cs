@@ -228,6 +228,20 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         return spawned;
     }
 
+    public int SpawnParticleProviders(IReadOnlyList<IParticlePropertiesProvider> particles, Vector3 cameraPosition)
+    {
+        if (particles.Count == 0) return 0;
+
+        EngineParticlePreview preview = EnsureParticlePreview();
+        int spawned = 0;
+        foreach (IParticlePropertiesProvider particle in particles)
+        {
+            spawned += preview.Spawn(particle, cameraPosition);
+        }
+
+        return spawned;
+    }
+
     public void Dispose()
     {
         DestroyFrameBuffer();
