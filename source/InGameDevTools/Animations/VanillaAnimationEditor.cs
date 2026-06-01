@@ -1263,7 +1263,7 @@ public sealed partial class DebugWindowManager
         VanillaPreviewMode effectiveMode = GetVanillaEffectivePreviewMode(scene);
         float viewportWidth = Math.Max(1f, max.X - min.X);
         float viewportHeight = Math.Max(1f, max.Y - min.Y);
-        VanillaPreviewGhost[] ghosts = BuildVanillaViewportGhosts(row, scene, effectiveMode);
+        VanillaPreviewGhost[] ghosts = BuildVanillaViewportGhosts(row, scene, effectiveMode, out string ghostOverlayStatus);
 
         VanillaAnimationViewport3DRenderer renderer = EnsureVanillaPreviewRenderer();
         int textureId = renderer.RenderToTexture(
@@ -1287,7 +1287,8 @@ public sealed partial class DebugWindowManager
         else if (!string.IsNullOrWhiteSpace(previewSkipReason))
         {
             uint warning = ImGui.ColorConvertFloat4ToU32(new NVector4(0.95f, 0.72f, 0.43f, 1f));
-            drawList.AddText(new NVector2(min.X + 12f, min.Y + 54f), warning, $"Preview skipped: {previewSkipReason}");
+            float skipY = string.IsNullOrWhiteSpace(ghostOverlayStatus) ? 54f : 70f;
+            drawList.AddText(new NVector2(min.X + 12f, min.Y + skipY), warning, $"Preview skipped: {previewSkipReason}");
         }
 
         if (effectiveMode == VanillaPreviewMode.Orbit)
@@ -1301,10 +1302,12 @@ public sealed partial class DebugWindowManager
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"Preview: {scene.DisplayName}");
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), text, GetVanillaViewportHelpText(effectiveMode, scene));
-        if (ghosts.Length > 0)
+        if (!string.IsNullOrWhiteSpace(ghostOverlayStatus))
         {
-            uint ghostText = ImGui.ColorConvertFloat4ToU32(new NVector4(0.54f, 0.86f, 1f, 1f));
-            drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), ghostText, GetVanillaViewportGhostStatus(ghosts));
+            uint ghostText = ImGui.ColorConvertFloat4ToU32(ghosts.Length > 0
+                ? new NVector4(0.54f, 0.86f, 1f, 1f)
+                : new NVector4(0.95f, 0.72f, 0.43f, 1f));
+            drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), ghostText, ghostOverlayStatus);
         }
 
         if (effectiveMode == VanillaPreviewMode.Orbit)
@@ -1371,31 +1374,76 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private VanillaPreviewGhost[] BuildVanillaViewportGhosts(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, VanillaPreviewMode effectiveMode)
+    private VanillaPreviewGhost[] BuildVanillaViewportGhosts(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, VanillaPreviewMode effectiveMode, out string overlayStatus)
     {
-        if (effectiveMode != VanillaPreviewMode.Orbit) return [];
+        overlayStatus = "";
+        if (effectiveMode != VanillaPreviewMode.Orbit)
+        {
+            if (_vanillaOnionSkinEnabled || (_vanillaLiveSymmetryEnabled && _vanillaShowLiveSymmetryGhost))
+            {
+                overlayStatus = "Ghost overlays hidden: switch to Orbit mode.";
+            }
+
+            return [];
+        }
 
         List<VanillaPreviewGhost> ghosts = [];
-        AddVanillaOnionSkinGhosts(row, scene, ghosts);
-        VanillaPreviewGhost symmetry = BuildVanillaLiveSymmetryGhost(row, scene, effectiveMode);
+        List<string> hiddenReasons = [];
+        AddVanillaOnionSkinGhosts(row, scene, ghosts, out string onionSkinStatus);
+        if (!string.IsNullOrWhiteSpace(onionSkinStatus))
+        {
+            hiddenReasons.Add(onionSkinStatus);
+        }
+
+        VanillaPreviewGhost symmetry = BuildVanillaLiveSymmetryGhost(row, scene, effectiveMode, out string symmetryStatus);
         if (symmetry.Enabled) ghosts.Add(symmetry);
+        else if (!string.IsNullOrWhiteSpace(symmetryStatus))
+        {
+            hiddenReasons.Add(symmetryStatus);
+        }
+
+        overlayStatus = ghosts.Count > 0
+            ? GetVanillaViewportGhostStatus(ghosts)
+            : string.Join(" ", hiddenReasons);
         return ghosts.ToArray();
     }
 
-    private void AddVanillaOnionSkinGhosts(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, List<VanillaPreviewGhost> ghosts)
+    private void AddVanillaOnionSkinGhosts(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, List<VanillaPreviewGhost> ghosts, out string hiddenReason)
     {
-        if (!_vanillaOnionSkinEnabled ||
-            row.ShapeAnimation == null ||
-            scene.Playing)
+        hiddenReason = "";
+        if (!_vanillaOnionSkinEnabled)
         {
             return;
         }
 
+        if (row.ShapeAnimation == null)
+        {
+            hiddenReason = "Onion skins hidden: select a shape animation.";
+            return;
+        }
+
+        if (scene.Playing)
+        {
+            hiddenReason = "Onion skins hidden while playback is running.";
+            return;
+        }
+
         VanillaAnimation animation = row.ShapeAnimation.Animation;
-        if (animation.KeyFrames == null || animation.KeyFrames.Length <= 1) return;
+        if (animation.KeyFrames == null || animation.KeyFrames.Length <= 1)
+        {
+            hiddenReason = "Onion skins hidden: this animation has no neighboring keyframes.";
+            return;
+        }
+
+        if (!_vanillaOnionSkinPrevious && !_vanillaOnionSkinNext)
+        {
+            hiddenReason = "Onion skins hidden: previous and next are disabled.";
+            return;
+        }
 
         int keyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, animation.KeyFrames.Length - 1);
         float opacity = Math.Clamp(_vanillaOnionSkinOpacity, 0.05f, 0.6f);
+        int initialCount = ghosts.Count;
         if (_vanillaOnionSkinPrevious && keyFrameIndex > 0)
         {
             float frame = animation.KeyFrames[keyFrameIndex - 1].Frame;
@@ -1413,34 +1461,74 @@ public sealed partial class DebugWindowManager
                 ghosts.Add(new VanillaPreviewGhost(true, frame, opacity, 0.35f, 1.0f, 0.55f, $"next {frame:0}"));
             }
         }
+
+        if (ghosts.Count == initialCount)
+        {
+            hiddenReason = "Onion skins hidden: no enabled neighboring keyframe differs from the current frame.";
+        }
     }
 
-    private VanillaPreviewGhost BuildVanillaLiveSymmetryGhost(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, VanillaPreviewMode effectiveMode)
+    private VanillaPreviewGhost BuildVanillaLiveSymmetryGhost(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, VanillaPreviewMode effectiveMode, out string hiddenReason)
     {
-        if (!_vanillaLiveSymmetryEnabled ||
-            !_vanillaShowLiveSymmetryGhost ||
-            scene.Playing ||
-            effectiveMode != VanillaPreviewMode.Orbit ||
-            row.ShapeAnimation == null)
+        hiddenReason = "";
+        if (!_vanillaLiveSymmetryEnabled)
         {
+            return VanillaPreviewGhost.Disabled;
+        }
+
+        if (!_vanillaShowLiveSymmetryGhost)
+        {
+            hiddenReason = "Symmetry ghost hidden: ghost display is disabled.";
+            return VanillaPreviewGhost.Disabled;
+        }
+
+        if (scene.Playing)
+        {
+            hiddenReason = "Symmetry ghost hidden while playback is running.";
+            return VanillaPreviewGhost.Disabled;
+        }
+
+        if (effectiveMode != VanillaPreviewMode.Orbit)
+        {
+            hiddenReason = "Symmetry ghost hidden: switch to Orbit mode.";
+            return VanillaPreviewGhost.Disabled;
+        }
+
+        if (row.ShapeAnimation == null)
+        {
+            hiddenReason = "Symmetry ghost hidden: select a shape animation.";
             return VanillaPreviewGhost.Disabled;
         }
 
         VanillaAnimation animation = row.ShapeAnimation.Animation;
-        if (_vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.InPlace ||
-            animation.QuantityFrames <= 1 ||
+        if (_vanillaLiveSymmetryMode == VanillaLiveSymmetryMode.InPlace)
+        {
+            hiddenReason = "Symmetry ghost hidden: in-place mode mirrors on the current frame.";
+            return VanillaPreviewGhost.Disabled;
+        }
+
+        if (animation.QuantityFrames <= 1 ||
             animation.KeyFrames == null ||
             animation.KeyFrames.Length == 0)
         {
+            hiddenReason = "Symmetry ghost hidden: half-cycle mode needs multiple frames.";
             return VanillaPreviewGhost.Disabled;
         }
 
         int phaseFrames = GetVanillaLiveSymmetryPhaseFrames(animation);
-        if (phaseFrames <= 0) return VanillaPreviewGhost.Disabled;
+        if (phaseFrames <= 0)
+        {
+            hiddenReason = "Symmetry ghost hidden: phase is zero.";
+            return VanillaPreviewGhost.Disabled;
+        }
 
         int sourceFrame = (int)Math.Round(scene.CurrentFrame, MidpointRounding.AwayFromZero);
         int ghostFrame = GetVanillaPhaseTargetFrame(animation, sourceFrame, phaseFrames);
-        if (ghostFrame == sourceFrame) return VanillaPreviewGhost.Disabled;
+        if (ghostFrame == sourceFrame)
+        {
+            hiddenReason = "Symmetry ghost hidden: phase resolves to the current frame.";
+            return VanillaPreviewGhost.Disabled;
+        }
 
         return new VanillaPreviewGhost(true, ghostFrame, Math.Clamp(_vanillaLiveSymmetryGhostOpacity, 0.05f, 0.8f), 0.42f, 0.82f, 1f, $"sym {ghostFrame:0}");
     }
