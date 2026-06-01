@@ -731,7 +731,7 @@ internal sealed class TransformGizmoRenderer : IRenderer
     private bool TryBuildState(out GizmoState state)
     {
         state = default;
-        if (!_debugManager.TryGetActiveTransformGizmo(out ModelTransform transform, out TransformGizmoContext context, out BlockPos? blockPos, out Vec3d? worldCenter, out TransformGizmoAxes? worldAxes, out TransformGizmoAxes? parentAxes)) return false;
+        if (!_debugManager.TryGetActiveTransformGizmo(out ModelTransform transform, out TransformGizmoContext context, out BlockPos? blockPos, out Vec3d? worldCenter, out TransformGizmoAxes? worldAxes, out TransformGizmoAxes? parentAxes, out TransformGizmoAxes? translationAxes)) return false;
 
         GetCameraBasis(out Vec3d forward, out Vec3d right, out Vec3d up);
         Vec3d center;
@@ -744,7 +744,7 @@ internal sealed class TransformGizmoRenderer : IRenderer
             center = GetFallbackCenter(transform, context, blockPos, forward, right, up);
         }
 
-        TranslationBasis basis = BuildTranslationBasis(transform, context, blockPos, center, worldAxes);
+        TranslationBasis basis = BuildTranslationBasis(transform, context, blockPos, center, worldAxes, translationAxes);
         if (!TryGetRotationSetup(transform, context, out Matrix3 rotationParentBasis, out FastVec3f attachmentRotation))
         {
             rotationParentBasis = Matrix3.Identity;
@@ -799,8 +799,16 @@ internal sealed class TransformGizmoRenderer : IRenderer
         return true;
     }
 
-    private TranslationBasis BuildTranslationBasis(ModelTransform transform, TransformGizmoContext context, BlockPos? blockPos, Vec3d center, TransformGizmoAxes? worldAxes)
+    private TranslationBasis BuildTranslationBasis(ModelTransform transform, TransformGizmoContext context, BlockPos? blockPos, Vec3d center, TransformGizmoAxes? worldAxes, TransformGizmoAxes? translationAxes)
     {
+        if (translationAxes.HasValue)
+        {
+            return new TranslationBasis(
+                SafeNormalize(translationAxes.Value.X, new Vec3d(1, 0, 0)),
+                SafeNormalize(translationAxes.Value.Y, new Vec3d(0, 1, 0)),
+                SafeNormalize(translationAxes.Value.Z, new Vec3d(0, 0, 1)));
+        }
+
         if (_debugManager.GizmoSpace == TransformGizmoSpace.World)
         {
             return new TranslationBasis(new Vec3d(1, 0, 0), new Vec3d(0, 1, 0), new Vec3d(0, 0, 1));

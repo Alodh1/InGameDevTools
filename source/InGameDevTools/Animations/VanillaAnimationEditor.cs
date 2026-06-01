@@ -91,6 +91,9 @@ public sealed partial class DebugWindowManager
     private double _vanillaViewportGizmoDragAccumulatedDegrees;
     private double _vanillaViewportGizmoDragRingScreenSign = -1.0;
     private double _vanillaViewportGizmoDragStartValue;
+    private double _vanillaViewportGizmoDragStartOffsetX;
+    private double _vanillaViewportGizmoDragStartOffsetY;
+    private double _vanillaViewportGizmoDragStartOffsetZ;
     private string _vanillaViewportGizmoDragRowKey = "";
     private int _vanillaViewportGizmoDragKeyFrameIndex = -1;
     private string _vanillaViewportGizmoDragElementName = "";
@@ -1594,6 +1597,9 @@ public sealed partial class DebugWindowManager
                 ? GetVanillaViewportGizmoRingScreenSign(projection, hoveredAxis)
                 : -1.0;
             _vanillaViewportGizmoDragStartValue = GetVanillaGizmoAxisValue(element, GizmoMode, hoveredAxis);
+            _vanillaViewportGizmoDragStartOffsetX = element.OffsetX ?? 0;
+            _vanillaViewportGizmoDragStartOffsetY = element.OffsetY ?? 0;
+            _vanillaViewportGizmoDragStartOffsetZ = element.OffsetZ ?? 0;
             _vanillaViewportGizmoDragRowKey = row.Key;
             _vanillaViewportGizmoDragKeyFrameIndex = _vanillaSelection.KeyFrameIndex;
             _vanillaViewportGizmoDragElementName = _vanillaSelection.ElementName;
@@ -1612,7 +1618,7 @@ public sealed partial class DebugWindowManager
             }
             else
             {
-                ApplyVanillaViewportGizmoDrag(row, entry, keyFrame, element, _vanillaViewportGizmoDragMode, _vanillaViewportGizmoDragAxis, _vanillaViewportGizmoDragVector, projection.Scale);
+                ApplyVanillaViewportGizmoDrag(row, entry, keyFrame, element, _vanillaViewportGizmoDragMode, _vanillaViewportGizmoDragAxis, _vanillaViewportGizmoDragVector, projection);
             }
         }
 
@@ -1915,40 +1921,98 @@ public sealed partial class DebugWindowManager
         return -1.0;
     }
 
-    private bool ApplyVanillaViewportGizmoDrag(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, AnimationKeyFrameElement element, TransformGizmoMode mode, TransformGizmoAxis axis, NVector2 axisVector, float scale)
+    private bool ApplyVanillaViewportGizmoDrag(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, AnimationKeyFrameElement element, TransformGizmoMode mode, TransformGizmoAxis axis, NVector2 axisVector, VanillaGizmoProjection projection)
     {
         NVector2 direction = NormalizeOrDefault(axisVector, new NVector2(1f, 0f));
         NVector2 mouseDelta = ImGui.GetMousePos() - _vanillaViewportGizmoDragMouseStart;
         double projected = NVector2.Dot(mouseDelta, direction);
-        double value = _vanillaViewportGizmoDragStartValue;
 
         switch (mode)
         {
             case TransformGizmoMode.Move:
-                value += projected / Math.Max(1f, scale) * 16.0;
-                value = SnapVanillaGizmoValue(value, Math.Max(0.001, TransformGizmoIncrement * 16.0));
-                break;
+                return ApplyVanillaViewportMoveGizmoDrag(row, entry, keyFrame, element, axis, projected, projection);
             case TransformGizmoMode.Scale:
-                value += projected / Math.Max(1f, scale) * 16.0;
+            {
+                double value = _vanillaViewportGizmoDragStartValue;
+                value += projected / Math.Max(1f, projection.Scale) * 16.0;
                 value = SnapVanillaGizmoValue(value, Math.Max(0.001, TransformGizmoIncrement * 16.0));
+                if (Math.Abs(value - GetVanillaGizmoAxisValue(element, mode, axis)) < 0.0001) return false;
+                SetVanillaGizmoAxisValue(element, mode, axis, value);
                 break;
+            }
             case TransformGizmoMode.Rotate:
+            {
+                double value = _vanillaViewportGizmoDragStartValue;
                 value += UpdateVanillaViewportGizmoRingDrag();
                 value = NormalizeVanillaDegrees(SnapVanillaGizmoValue(value, Math.Max(0.001, TransformGizmoIncrement)));
+                if (Math.Abs(value - GetVanillaGizmoAxisValue(element, mode, axis)) < 0.0001) return false;
+                SetVanillaGizmoAxisValue(element, mode, axis, value);
                 break;
+            }
             default:
                 return false;
         }
 
-        if (Math.Abs(value - GetVanillaGizmoAxisValue(element, mode, axis)) < 0.0001) return false;
-        if (_vanillaIkFollowMove && mode == TransformGizmoMode.Move && TryApplyVanillaViewportIkMove(row, entry, element, axis, value))
+        ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
+        return true;
+    }
+
+    private bool ApplyVanillaViewportMoveGizmoDrag(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, AnimationKeyFrameElement element, TransformGizmoAxis axis, double projected, VanillaGizmoProjection projection)
+    {
+        double modelDelta = projected / Math.Max(1f, projection.Scale);
+        NVector3 modelDeltaVector = GetVanillaViewportMoveModelDelta(projection, axis, modelDelta);
+        NVector3 offsetDelta = projection.TranslationBasis.ModelToOffsetDelta(modelDeltaVector) * 16f;
+        double step = Math.Max(0.001, TransformGizmoIncrement * 16.0);
+        double offsetX = SnapVanillaGizmoValue(_vanillaViewportGizmoDragStartOffsetX + offsetDelta.X, step);
+        double offsetY = SnapVanillaGizmoValue(_vanillaViewportGizmoDragStartOffsetY + offsetDelta.Y, step);
+        double offsetZ = SnapVanillaGizmoValue(_vanillaViewportGizmoDragStartOffsetZ + offsetDelta.Z, step);
+
+        if (Math.Abs(offsetX - (element.OffsetX ?? 0)) < 0.0001 &&
+            Math.Abs(offsetY - (element.OffsetY ?? 0)) < 0.0001 &&
+            Math.Abs(offsetZ - (element.OffsetZ ?? 0)) < 0.0001)
+        {
+            return false;
+        }
+
+        AnimationKeyFrameElement desiredElement = CloneElement(element);
+        SetVanillaGizmoMoveOffsetValues(desiredElement, offsetX, offsetY, offsetZ);
+        if (_vanillaIkFollowMove && TryApplyVanillaViewportIkMove(row, entry, desiredElement))
         {
             return true;
         }
 
-        SetVanillaGizmoAxisValue(element, mode, axis, value);
+        SetVanillaGizmoMoveOffsetValues(element, offsetX, offsetY, offsetZ);
         ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
         return true;
+    }
+
+    private NVector3 GetVanillaViewportMoveModelDelta(VanillaGizmoProjection projection, TransformGizmoAxis axis, double modelDelta)
+    {
+        NVector3 direction = GizmoSpace == TransformGizmoSpace.World
+            ? axis switch
+            {
+                TransformGizmoAxis.X => NVector3.UnitX,
+                TransformGizmoAxis.Y => NVector3.UnitY,
+                TransformGizmoAxis.Z => NVector3.UnitZ,
+                _ => NVector3.UnitX
+            }
+            : axis switch
+            {
+                TransformGizmoAxis.X => projection.AxisXModel,
+                TransformGizmoAxis.Y => projection.AxisYModel,
+                TransformGizmoAxis.Z => projection.AxisZModel,
+                _ => projection.AxisXModel
+            };
+
+        return direction * (float)modelDelta;
+    }
+
+    private static void SetVanillaGizmoMoveOffsetValues(AnimationKeyFrameElement element, double offsetX, double offsetY, double offsetZ)
+    {
+        element.OffsetX = offsetX;
+        element.OffsetY = offsetY;
+        element.OffsetZ = offsetZ;
+        CompleteVanillaPositionGroup(element);
     }
 
     private double UpdateVanillaViewportGizmoRingDrag()
@@ -2043,6 +2107,7 @@ public sealed partial class DebugWindowManager
         NVector3 elementPoint = GetVanillaGizmoLocalPoint(pose);
         if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint, min, width, height, out NVector2 center)) return false;
 
+        VanillaGizmoTranslationBasis translationBasis = BuildVanillaGizmoTranslationBasis(pose);
         float modelAxisLength = Math.Clamp(Math.Max(Math.Max(scene.ModelWidth, scene.ModelHeight), scene.ModelDepth) * 0.16f, 0.12f, 0.85f);
         float modelRingRadius = Math.Clamp(modelAxisLength * 0.95f, 0.10f, 0.80f);
         NVector2 axisX;
@@ -2097,8 +2162,25 @@ public sealed partial class DebugWindowManager
             ringZ,
             bounds,
             hasVisualCenter,
-            visualCenter);
+            visualCenter,
+            translationBasis,
+            translationBasis.AxisX,
+            translationBasis.AxisY,
+            translationBasis.AxisZ);
         return true;
+    }
+
+    private static VanillaGizmoTranslationBasis BuildVanillaGizmoTranslationBasis(ElementPose pose)
+    {
+        if (!TryBuildVanillaPoseModelMatrix(pose, out Matrixf poseMatrix))
+        {
+            return VanillaGizmoTranslationBasis.Identity;
+        }
+
+        NVector3 axisX = NormalizeOrDefault(TransformVanillaPreviewDirection(poseMatrix, NVector3.UnitX), NVector3.UnitX);
+        NVector3 axisY = NormalizeOrDefault(TransformVanillaPreviewDirection(poseMatrix, NVector3.UnitY), NVector3.UnitY);
+        NVector3 axisZ = NormalizeOrDefault(TransformVanillaPreviewDirection(poseMatrix, NVector3.UnitZ), NVector3.UnitZ);
+        return new VanillaGizmoTranslationBasis(axisX, axisY, axisZ);
     }
 
     private static Matrixf BuildVanillaElementModelMatrix(Matrixf model, ElementPose pose)
@@ -2649,6 +2731,10 @@ public sealed partial class DebugWindowManager
         _vanillaViewportGizmoDragLastAngleRadians = 0;
         _vanillaViewportGizmoDragAccumulatedDegrees = 0;
         _vanillaViewportGizmoDragRingScreenSign = -1.0;
+        _vanillaViewportGizmoDragStartValue = 0;
+        _vanillaViewportGizmoDragStartOffsetX = 0;
+        _vanillaViewportGizmoDragStartOffsetY = 0;
+        _vanillaViewportGizmoDragStartOffsetZ = 0;
         _vanillaViewportGizmoDragRowKey = "";
         _vanillaViewportGizmoDragKeyFrameIndex = -1;
         _vanillaViewportGizmoDragElementName = "";
@@ -4355,7 +4441,7 @@ public sealed partial class DebugWindowManager
             : new(true, written, created, overwritten, $"Baked half-cycle symmetry for {sourceSide.ToString().ToLowerInvariant()} side: wrote {written}, created {created} keyframe(s), overwrote {overwritten} element(s).");
     }
 
-    private bool TryApplyVanillaViewportIkMove(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrameElement selectedElement, TransformGizmoAxis axis, double value)
+    private bool TryApplyVanillaViewportIkMove(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrameElement desiredElement)
     {
         if (entry.Animation.KeyFrames == null || entry.Animation.KeyFrames.Length == 0) return false;
         int keyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, entry.Animation.KeyFrames.Length - 1);
@@ -4393,8 +4479,6 @@ public sealed partial class DebugWindowManager
             _vanillaIkDragCache = cache;
         }
 
-        AnimationKeyFrameElement desiredElement = CloneElement(_vanillaIkDragCache.SelectedStartElement);
-        SetVanillaGizmoAxisValue(desiredElement, TransformGizmoMode.Move, axis, value);
         Vec3d target = GetVanillaIkDesiredEndTarget(_vanillaIkDragCache, desiredElement);
         if (!TrySolveVanillaIkCcdToTarget(_vanillaIkDragCache, target, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
@@ -7634,7 +7718,61 @@ public sealed partial class DebugWindowManager
         NVector2[] RingZ,
         NVector2[] BoundsCorners,
         bool HasVisualCenter,
-        NVector2 VisualCenter);
+        NVector2 VisualCenter,
+        VanillaGizmoTranslationBasis TranslationBasis,
+        NVector3 AxisXModel,
+        NVector3 AxisYModel,
+        NVector3 AxisZModel);
+
+    private readonly struct VanillaGizmoTranslationBasis
+    {
+        public static VanillaGizmoTranslationBasis Identity { get; } = new(NVector3.UnitX, NVector3.UnitY, NVector3.UnitZ);
+
+        private readonly float determinant;
+
+        public VanillaGizmoTranslationBasis(NVector3 axisX, NVector3 axisY, NVector3 axisZ)
+        {
+            AxisX = axisX;
+            AxisY = axisY;
+            AxisZ = axisZ;
+            determinant = axisX.X * (axisY.Y * axisZ.Z - axisY.Z * axisZ.Y) -
+                axisY.X * (axisX.Y * axisZ.Z - axisX.Z * axisZ.Y) +
+                axisZ.X * (axisX.Y * axisY.Z - axisX.Z * axisY.Y);
+        }
+
+        public NVector3 AxisX { get; }
+        public NVector3 AxisY { get; }
+        public NVector3 AxisZ { get; }
+
+        public NVector3 ModelToOffsetDelta(NVector3 modelDelta)
+        {
+            if (Math.Abs(determinant) < 0.000001f)
+            {
+                return new NVector3(
+                    ProjectOntoBasis(modelDelta, AxisX),
+                    ProjectOntoBasis(modelDelta, AxisY),
+                    ProjectOntoBasis(modelDelta, AxisZ));
+            }
+
+            float tx = modelDelta.X * (AxisY.Y * AxisZ.Z - AxisY.Z * AxisZ.Y) -
+                AxisY.X * (modelDelta.Y * AxisZ.Z - modelDelta.Z * AxisZ.Y) +
+                AxisZ.X * (modelDelta.Y * AxisY.Z - modelDelta.Z * AxisY.Y);
+            float ty = AxisX.X * (modelDelta.Y * AxisZ.Z - modelDelta.Z * AxisZ.Y) -
+                modelDelta.X * (AxisX.Y * AxisZ.Z - AxisX.Z * AxisZ.Y) +
+                AxisZ.X * (AxisX.Y * modelDelta.Z - AxisX.Z * modelDelta.Y);
+            float tz = AxisX.X * (AxisY.Y * modelDelta.Z - AxisY.Z * modelDelta.Y) -
+                AxisY.X * (AxisX.Y * modelDelta.Z - AxisX.Z * modelDelta.Y) +
+                modelDelta.X * (AxisX.Y * AxisY.Z - AxisX.Z * AxisY.Y);
+
+            return new NVector3(tx / determinant, ty / determinant, tz / determinant);
+        }
+
+        private static float ProjectOntoBasis(NVector3 modelDelta, NVector3 basis)
+        {
+            float lengthSquared = basis.LengthSquared();
+            return lengthSquared < 0.000001f ? 0f : NVector3.Dot(modelDelta, basis) / lengthSquared;
+        }
+    }
 
     private readonly record struct VanillaViewportElementHit(
         string ElementName,

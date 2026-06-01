@@ -196,6 +196,7 @@ public sealed partial class DebugWindowManager
             worldCenter: worldCenter,
             worldAxes: activeAxes,
             parentAxes: parentAxes,
+            translationAxes: selectedAxes,
             allowScale: false,
             dragStarted: () => BeginRigGizmoDrag(animationCode, animation, selectedPart),
             dragEnded: () => EndRigGizmoDrag(animationCode, animation));
