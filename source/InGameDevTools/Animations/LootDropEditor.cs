@@ -616,10 +616,11 @@ public sealed partial class DebugWindowManager
     private static JObject BuildRuntimeDropToken(BlockDropItemStack drop)
     {
         NatFloat quantity = drop.Quantity ?? NatFloat.One;
+        string code = GetRuntimeDropCode(drop);
         JObject token = new()
         {
-            ["type"] = drop.Type.ToString(),
-            ["code"] = drop.Code?.ToString() ?? "",
+            ["type"] = GetRuntimeDropType(drop, code),
+            ["code"] = code,
             ["quantity"] = new JObject
             {
                 ["offset"] = quantity.offset,
@@ -642,6 +643,24 @@ public sealed partial class DebugWindowManager
         }
 
         return token;
+    }
+
+    private static string GetRuntimeDropCode(BlockDropItemStack drop)
+    {
+        string? code = drop.Code?.ToString();
+        if (!string.IsNullOrWhiteSpace(code)) return code;
+
+        return drop.ResolvedItemstack?.Collectible?.Code?.ToString() ?? "";
+    }
+
+    private static string GetRuntimeDropType(BlockDropItemStack drop, string resolvedCode)
+    {
+        if (drop.ResolvedItemstack != null && string.IsNullOrWhiteSpace(drop.Code?.ToString()) && !string.IsNullOrWhiteSpace(resolvedCode))
+        {
+            return drop.ResolvedItemstack.Class.ToString();
+        }
+
+        return drop.Type.ToString();
     }
 
     private string CurrentLootDropJson()
