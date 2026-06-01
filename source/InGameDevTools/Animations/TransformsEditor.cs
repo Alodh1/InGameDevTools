@@ -1052,9 +1052,12 @@ public sealed partial class DebugWindowManager
             if (slot.CanSaveToSource)
             {
                 ImGui.SameLine();
-                if (ImGui.Button("Save authored file##transform-source-save"))
+                string saveLabel = _transformGroupEdit && GetTransformFamilyCount(asset) > 1
+                    ? "Save group authored files##transform-source-save"
+                    : "Save authored file##transform-source-save";
+                if (ImGui.Button(saveLabel))
                 {
-                    SourceSaveResult result = TrySaveTransformToSource(asset.Collectible, slot.AttributeCode, transform, slot.TypedKey);
+                    SourceSaveResult result = TrySaveSelectedTransformToSource(asset, slot);
                     if (result.Request != null)
                     {
                         QueueSourceSave(result, status => _transformsStatus = status);
@@ -1139,8 +1142,7 @@ public sealed partial class DebugWindowManager
     private void DrawTransformScopeControls(TransformAssetEntry asset, TransformSlotSelection slot)
     {
         ImGui.SeparatorText("Edit scope");
-        string familyKey = GetTransformFamilyKey(asset);
-        int familyCount = _transformFamilyCounts.TryGetValue(familyKey, out int count) ? count : 1;
+        int familyCount = GetTransformFamilyCount(asset);
         string familyDisplay = GetTransformFamilyDisplayKey(asset);
         ImGui.TextWrapped(familyDisplay);
         ImGui.TextDisabled($"{familyCount} compatible asset(s) for {slot.DisplayName}");
@@ -1866,8 +1868,15 @@ public sealed partial class DebugWindowManager
 
     private void ResetTransformPreviewCameraToBounds()
     {
+        if (_transformReferenceMesh?.Bounds.IsValid == true)
+        {
+            DevToolsPreviewBounds referenceBounds = _transformReferenceMesh.Bounds.Include(_transformPreviewAnchor);
+            _transformPreviewTarget = referenceBounds.Center;
+            _transformPreviewDistance = Math.Clamp(referenceBounds.Radius * 3.1f, 1.4f, 36f);
+            return;
+        }
+
         DevToolsPreviewBounds bounds = DevToolsPreviewBounds.Empty;
-        if (_transformReferenceMesh != null) bounds = bounds.Include(_transformReferenceMesh.Bounds);
         if (_transformPreviewMesh != null) bounds = bounds.Include(_transformPreviewMesh.Bounds);
         if (bounds.IsValid) bounds = bounds.Include(_transformPreviewAnchor);
         if (!bounds.IsValid)
@@ -1879,6 +1888,11 @@ public sealed partial class DebugWindowManager
 
         _transformPreviewTarget = bounds.Center;
         _transformPreviewDistance = Math.Clamp(bounds.Radius * 3.1f, 1.4f, 36f);
+    }
+
+    private int GetTransformFamilyCount(TransformAssetEntry asset)
+    {
+        return _transformFamilyCounts.TryGetValue(GetTransformFamilyKey(asset), out int count) ? count : 1;
     }
 
     private DevToolsPreview3DRenderer EnsureTransformsPreviewRenderer()
@@ -1975,6 +1989,134 @@ public sealed partial class DebugWindowManager
         _transformsStatus = targets.Count > 1
             ? $"Reset {slot.DisplayName} defaults for {targets.Count} {GetTransformFamilyDisplayKey(asset)} asset(s){skippedSuffix}."
             : $"Reset {slot.DisplayName} default for {asset.Label}{skippedSuffix}.";
+    }
+
+    private SourceSaveResult TrySaveSelectedTransformToSource(TransformAssetEntry asset, TransformSlotSelection slot)
+    {
+        if (!_transformGroupEdit)
+        {
+            return TrySaveTransformToSource(asset.Collectible, slot.AttributeCode, GetTransformDraft(asset, slot), slot.TypedKey);
+        }
+
+        List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot, out int skipped);
+        return TrySaveTransformTargetsToSource(asset, slot, targets, skipped);
+    }
+
+    private SourceSaveResult TrySaveTransformTargetsToSource(
+        TransformAssetEntry sourceAsset,
+        TransformSlotSelection sourceSlot,
+        IReadOnlyList<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets,
+        int skipped)
+    {
+        try
+        {
+            if (targets.Count == 0)
+            {
+                return SourceSaveResult.Fail("No transform targets to save.");
+            }
+
+            Dictionary<string, TransformSourceSaveFile> files = new(StringComparer.OrdinalIgnoreCase);
+            foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
+            {
+                TransformSourceSaveFile file = GetOrCreateTransformSourceSaveFile(files, targetAsset);
+                ApplyTransformToSourceDocument(file.Json, targetSlot.AttributeCode, GetTransformDraft(targetAsset, targetSlot), targetSlot.TypedKey);
+            }
+
+            if (files.Count == 0)
+            {
+                return SourceSaveResult.Fail("No transform source files could be resolved.");
+            }
+
+            List<TransformSourceSaveFile> fileList = files.Values
+                .OrderBy(file => file.OutputPath, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            foreach (TransformSourceSaveFile file in fileList)
+            {
+                file.NewText = JsonUtil.ToPrettyString(file.Json);
+            }
+
+            string skippedSuffix = FormatTransformSkippedSuffix(skipped);
+            string status = $"Saved authored {sourceSlot.DisplayName} for {targets.Count} {GetTransformFamilyDisplayKey(sourceAsset)} asset(s) to {fileList.Count} file(s){skippedSuffix}.";
+
+            if (fileList.Count == 1)
+            {
+                TransformSourceSaveFile file = fileList[0];
+                SourceSaveRequest request = new(
+                    file.OutputPath,
+                    file.OldText,
+                    file.NewText,
+                    status,
+                    () => WriteAuthoredFile(file.OutputPath, file.NewText));
+                return SourceSaveResult.Preview(request);
+            }
+
+            SourceSaveRequest groupRequest = new(
+                $"{fileList.Count} authored transform files",
+                BuildTransformGroupSavePreview(fileList, oldText: true),
+                BuildTransformGroupSavePreview(fileList, oldText: false),
+                status,
+                () =>
+                {
+                    foreach (TransformSourceSaveFile file in fileList)
+                    {
+                        WriteAuthoredFile(file.OutputPath, file.NewText);
+                    }
+
+                    return "";
+                });
+            return SourceSaveResult.Preview(groupRequest);
+        }
+        catch (Exception exception)
+        {
+            return SourceSaveResult.Fail($"Group save failed for {sourceAsset.Collectible.Code}: {exception.Message}");
+        }
+    }
+
+    private static TransformSourceSaveFile GetOrCreateTransformSourceSaveFile(Dictionary<string, TransformSourceSaveFile> files, TransformAssetEntry asset)
+    {
+        IAsset? sourceAsset = FindCollectibleSourceAsset(asset.Collectible);
+        string domain = sourceAsset?.Location.Domain ?? asset.Collectible.Code?.Domain ?? "game";
+        string kind = asset.Collectible is Block ? "blocktypes" : "itemtypes";
+        string assetPath = sourceAsset?.Location.Path ?? $"{kind}/{EnsureJsonFilePath(asset.Collectible.Code?.Path ?? "unknown")}";
+        string outputPath = GetToolAuthoredAssetPath("transforms", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
+
+        if (files.TryGetValue(outputPath, out TransformSourceSaveFile? existing))
+        {
+            return existing;
+        }
+
+        string sourceText = ReadAssetText(sourceAsset);
+        string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : sourceText;
+        JObject json = TryParseJsonObject(oldText) ?? TryParseJsonObject(sourceText) ?? CreateCollectibleAuthoringDocument(asset.Collectible);
+        TransformSourceSaveFile file = new(outputPath, oldText, json);
+        files[outputPath] = file;
+        return file;
+    }
+
+    private static void ApplyTransformToSourceDocument(JObject json, string attributeCode, ModelTransform transform, string? typedKey)
+    {
+        JObject attributes = json["attributes"] as JObject ?? new JObject();
+        if (typedKey == null)
+        {
+            attributes[attributeCode] = TransformToToken(transform);
+        }
+        else
+        {
+            JObject transformsByType = attributes[attributeCode] as JObject ?? new JObject();
+            transformsByType[typedKey] = TransformToToken(transform);
+            attributes[attributeCode] = transformsByType;
+        }
+
+        json["attributes"] = attributes;
+    }
+
+    private static string BuildTransformGroupSavePreview(IEnumerable<TransformSourceSaveFile> files, bool oldText)
+    {
+        return string.Join(
+            Environment.NewLine + Environment.NewLine,
+            files.Select(file =>
+                $"// {file.OutputPath}" + Environment.NewLine +
+                (oldText ? file.OldText : file.NewText)));
     }
 
     private List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> GetTransformEditTargets(TransformAssetEntry asset, TransformSlotSelection slot, out int skipped)
@@ -2106,6 +2248,22 @@ public sealed partial class DebugWindowManager
         public string Key => $"{Asset.Key}|{AttributeCode}|{TypedKey ?? ""}";
         public string DisplayName => TypedKey == null ? AttributeCode : $"{AttributeCode} / {TypedKey}";
         public bool CanSaveToSource => true;
+    }
+
+    private sealed class TransformSourceSaveFile
+    {
+        public TransformSourceSaveFile(string outputPath, string oldText, JObject json)
+        {
+            OutputPath = outputPath;
+            OldText = oldText;
+            Json = json;
+            NewText = oldText;
+        }
+
+        public string OutputPath { get; }
+        public string OldText { get; }
+        public JObject Json { get; }
+        public string NewText { get; set; }
     }
 
     private enum TransformApplicabilityKind
