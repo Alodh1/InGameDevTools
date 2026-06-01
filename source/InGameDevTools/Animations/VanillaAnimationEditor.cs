@@ -21,6 +21,9 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
+    private const double VanillaIkSolveTolerance = 0.01;
+    private const double VanillaIkSolveImprovementEpsilon = 0.001;
+
     private readonly VanillaAnimationIndexService _vanillaIndex = new();
     private readonly VanillaAnimationSelection _vanillaSelection = new();
     private readonly VanillaAnimationExportService _vanillaExportService = new();
@@ -80,10 +83,7 @@ public sealed partial class DebugWindowManager
     private int _vanillaLiveSymmetryPhaseFrames = -1;
     private bool _vanillaLiveSymmetryPropagating;
     private bool _vanillaIkFollowMove;
-    private string _vanillaIkLastSelectedElementName = "";
-    private string _vanillaIkUpperElementName = "";
-    private string _vanillaIkLowerElementName = "";
-    private string _vanillaIkEndElementName = "";
+    private readonly List<string> _vanillaIkChainElementNames = [];
     private bool _vanillaIkHasTarget;
     private float _vanillaIkTargetX;
     private float _vanillaIkTargetY;
@@ -92,7 +92,7 @@ public sealed partial class DebugWindowManager
     private string _vanillaIkDragRowKey = "";
     private int _vanillaIkDragKeyFrameIndex = -1;
     private string _vanillaIkDragElementName = "";
-    private VanillaIkDragCache? _vanillaIkDragCache;
+    private VanillaIkCcdCache? _vanillaIkDragCache;
 
     private void VanillaAnimationsTab(float deltaSeconds)
     {
@@ -2682,10 +2682,7 @@ public sealed partial class DebugWindowManager
 
         int selectedElementIndex = Math.Max(0, Array.FindIndex(elementNames, name => string.Equals(name, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase)));
         if (selectedElementIndex >= elementNames.Length) selectedElementIndex = 0;
-        if (ImGui.ListBox("Elements##vanilla-elements", ref selectedElementIndex, elementNames, elementNames.Length))
-        {
-            _vanillaSelection.ElementName = elementNames[selectedElementIndex];
-        }
+        DrawVanillaElementList(elementNames, selectedElementIndex);
 
         if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName) || !keyFrame.Elements.TryGetValue(_vanillaSelection.ElementName, out AnimationKeyFrameElement? element))
         {
@@ -2736,6 +2733,68 @@ public sealed partial class DebugWindowManager
             CompleteVanillaElementTransformGroups(element);
             ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
         }
+    }
+
+    private void DrawVanillaElementList(string[] elementNames, int selectedElementIndex)
+    {
+        if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName) && elementNames.Length > 0)
+        {
+            _vanillaSelection.ElementName = elementNames[Math.Clamp(selectedElementIndex, 0, elementNames.Length - 1)];
+        }
+
+        float lineHeight = ImGui.GetTextLineHeightWithSpacing();
+        float listHeight = Math.Clamp(elementNames.Length * lineHeight + 8f, 96f * _devToolsUiScale, 220f * _devToolsUiScale);
+        if (!ImGui.BeginListBox("Elements##vanilla-elements", new NVector2(-float.Epsilon, listHeight))) return;
+
+        ImGuiIOPtr io = ImGui.GetIO();
+        for (int index = 0; index < elementNames.Length; index++)
+        {
+            string elementName = elementNames[index];
+            bool selected = string.Equals(elementName, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase);
+            bool inIkChain = ContainsVanillaIkChainElement(elementName);
+            string label = inIkChain ? $"[IK] {elementName}##vanilla-element-{index}" : $"{elementName}##vanilla-element-{index}";
+
+            if (ImGui.Selectable(label, selected))
+            {
+                _vanillaSelection.ElementName = elementName;
+                if (io.KeyCtrl)
+                {
+                    ToggleVanillaIkChainElement(elementName);
+                }
+            }
+
+            if (inIkChain && ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Selected for the manual IK chain. Ctrl+Click to remove it.");
+            }
+        }
+
+        ImGui.EndListBox();
+    }
+
+    private bool ContainsVanillaIkChainElement(string elementName)
+    {
+        return _vanillaIkChainElementNames.Any(name => string.Equals(name, elementName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void ToggleVanillaIkChainElement(string elementName)
+    {
+        if (string.IsNullOrWhiteSpace(elementName)) return;
+
+        int existingIndex = _vanillaIkChainElementNames.FindIndex(name => string.Equals(name, elementName, StringComparison.OrdinalIgnoreCase));
+        if (existingIndex >= 0)
+        {
+            _vanillaIkChainElementNames.RemoveAt(existingIndex);
+            _vanillaStatus = $"Removed {elementName} from the IK chain.";
+        }
+        else
+        {
+            _vanillaIkChainElementNames.Add(elementName);
+            _vanillaStatus = $"Added {elementName} to the IK chain.";
+        }
+
+        _vanillaIkHasTarget = false;
+        ClearVanillaViewportGizmoDrag();
     }
 
     private void DrawVanillaSymmetryControls(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, string selectedElementName, AnimationKeyFrameElement selectedElement)
@@ -2917,46 +2976,41 @@ public sealed partial class DebugWindowManager
         string[] allElements = BuildVanillaSymmetryElementUniverse(document, entry.Animation, keyFrame);
 
         ImGui.SeparatorText("IK");
-        if (allElements.Length < 2)
+        if (allElements.Length < 1)
         {
-            ImGui.TextDisabled("IK needs at least two shape elements.");
+            ImGui.TextDisabled("IK needs at least one shape element.");
             return;
         }
 
-        EnsureVanillaIkDefaults(document.Shape, selectedElementName, allElements);
+        PruneVanillaIkChainElements(allElements);
+        bool hasChain = TryGetManualVanillaIkChain(document.Shape, out VanillaIkManualChain chain, out string chainError, out string chainWarning);
 
-        if (ImGui.Checkbox("Two-bone IK on Move##vanilla-ik-follow-move", ref _vanillaIkFollowMove))
+        if (ImGui.Checkbox("IK on Move##vanilla-ik-follow-move", ref _vanillaIkFollowMove))
         {
             _vanillaStatus = _vanillaIkFollowMove
-                ? "IK Move enabled. Select the chain handle and drag the Move gizmo."
+                ? "IK Move enabled. Select the end of a valid manual chain and drag the Move gizmo."
                 : "IK Move disabled.";
         }
 
-        if (ImGui.Button("Use selected hierarchy##vanilla-ik-use-selected"))
+        if (ImGui.Button("Clear IK chain##vanilla-ik-clear"))
         {
-            if (TryInferVanillaIkChain(document.Shape, selectedElementName, out VanillaIkChain inferred))
-            {
-                SetVanillaIkChainFields(inferred);
-                _vanillaIkHasTarget = false;
-                _vanillaStatus = $"IK chain set: {inferred.UpperElementName} -> {inferred.LowerElementName} -> {GetVanillaIkEndLabel(inferred)}.";
-            }
-            else
-            {
-                _vanillaStatus = $"Could not infer a two-bone IK chain from {selectedElementName}.";
-            }
+            _vanillaIkChainElementNames.Clear();
+            _vanillaIkHasTarget = false;
+            ClearVanillaViewportGizmoDrag();
+            _vanillaStatus = "IK chain cleared.";
         }
 
-        DrawVanillaIkElementCombo("Upper##vanilla-ik-upper", ref _vanillaIkUpperElementName, allElements, includeDistalOption: false);
-        DrawVanillaIkElementCombo("Lower##vanilla-ik-lower", ref _vanillaIkLowerElementName, allElements, includeDistalOption: false);
-        DrawVanillaIkElementCombo("End handle##vanilla-ik-end", ref _vanillaIkEndElementName, allElements, includeDistalOption: true);
-
-        bool hasChain = TryGetConfiguredVanillaIkChain(out VanillaIkChain chain, out string chainError);
         if (hasChain)
         {
-            ImGui.TextDisabled($"Chain: {chain.UpperElementName} -> {chain.LowerElementName} -> {GetVanillaIkEndLabel(chain)}");
-            if (!string.Equals(selectedElementName, chain.HandleElementName, StringComparison.OrdinalIgnoreCase))
+            ImGui.TextDisabled($"Chain: {chain.DisplayName} -> distal end of {chain.EndElementName}");
+            if (!string.IsNullOrWhiteSpace(chainWarning))
             {
-                ImGui.TextDisabled($"IK Move handle: select {chain.HandleElementName} before dragging.");
+                ImGui.TextColored(new NVector4(1f, 0.72f, 0.32f, 1f), chainWarning);
+            }
+
+            if (!string.Equals(selectedElementName, chain.EndElementName, StringComparison.OrdinalIgnoreCase))
+            {
+                ImGui.TextDisabled($"IK Move handle: select {chain.EndElementName} before dragging.");
             }
         }
         else
@@ -2967,7 +3021,7 @@ public sealed partial class DebugWindowManager
         if (!hasChain) ImGui.BeginDisabled();
         if (ImGui.Button("Target = current end##vanilla-ik-current-target"))
         {
-            SetVanillaIkTargetFromCurrentEnd(row, entry, keyFrame);
+            SetVanillaIkTargetFromCurrentEnd(row, entry, keyFrame, chain);
         }
         if (!hasChain) ImGui.EndDisabled();
 
@@ -2985,7 +3039,7 @@ public sealed partial class DebugWindowManager
         if (!canSolve) ImGui.BeginDisabled();
         if (ImGui.Button("Solve IK to target##vanilla-ik-solve"))
         {
-            ApplyVanillaIkTarget(row, entry, keyFrame);
+            ApplyVanillaIkTarget(row, entry, keyFrame, chain);
         }
         if (!canSolve) ImGui.EndDisabled();
 
@@ -2995,28 +3049,91 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void EnsureVanillaIkDefaults(Shape? shape, string selectedElementName, string[] allElements)
+    private void PruneVanillaIkChainElements(string[] allElements)
     {
-        bool selectedChanged = !string.Equals(_vanillaIkLastSelectedElementName, selectedElementName, StringComparison.OrdinalIgnoreCase);
-        bool configuredNamesStillExist =
-            ContainsElementName(allElements, _vanillaIkUpperElementName) &&
-            ContainsElementName(allElements, _vanillaIkLowerElementName) &&
-            (string.IsNullOrWhiteSpace(_vanillaIkEndElementName) || ContainsElementName(allElements, _vanillaIkEndElementName));
-
-        if (!selectedChanged && configuredNamesStillExist) return;
-
-        _vanillaIkLastSelectedElementName = selectedElementName;
-        _vanillaIkHasTarget = false;
-
-        if (TryInferVanillaIkChain(shape, selectedElementName, out VanillaIkChain chain))
+        for (int index = _vanillaIkChainElementNames.Count - 1; index >= 0; index--)
         {
-            SetVanillaIkChainFields(chain);
-            return;
+            if (ContainsElementName(allElements, _vanillaIkChainElementNames[index])) continue;
+
+            _vanillaIkChainElementNames.RemoveAt(index);
+            _vanillaIkHasTarget = false;
+            ClearVanillaViewportGizmoDrag();
+        }
+    }
+
+    private bool TryGetManualVanillaIkChain(Shape? shape, out VanillaIkManualChain chain, out string error, out string warning)
+    {
+        chain = default;
+        error = "";
+        warning = "";
+
+        if (_vanillaIkChainElementNames.Count == 0)
+        {
+            error = "Ctrl+Click elements to build a manual IK chain.";
+            return false;
         }
 
-        _vanillaIkUpperElementName = "";
-        _vanillaIkLowerElementName = "";
-        _vanillaIkEndElementName = selectedElementName;
+        if (shape?.Elements == null || shape.Elements.Length == 0)
+        {
+            error = "IK needs a loaded shape hierarchy.";
+            return false;
+        }
+
+        var nodes = new List<VanillaIkChainNode>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string selectedName in _vanillaIkChainElementNames)
+        {
+            string name = selectedName.Trim();
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            if (!seen.Add(name))
+            {
+                error = $"IK chain contains {name} more than once.";
+                return false;
+            }
+
+            if (!TryFindShapeElementPath(shape, name, out List<ShapeElement> path) || path.Count == 0)
+            {
+                error = $"IK chain element {name} was not found in the shape hierarchy.";
+                return false;
+            }
+
+            ShapeElement element = path[^1];
+            string elementName = string.IsNullOrWhiteSpace(element.Name) ? name : element.Name!;
+            string parentName = path.Count > 1 && !string.IsNullOrWhiteSpace(path[^2].Name) ? path[^2].Name! : "";
+            nodes.Add(new VanillaIkChainNode(elementName, parentName, path.Count - 1));
+        }
+
+        if (nodes.Count == 0)
+        {
+            error = "Ctrl+Click elements to build a manual IK chain.";
+            return false;
+        }
+
+        nodes.Sort((left, right) =>
+        {
+            int depth = left.Depth.CompareTo(right.Depth);
+            return depth != 0 ? depth : string.Compare(left.ElementName, right.ElementName, StringComparison.OrdinalIgnoreCase);
+        });
+
+        for (int index = 1; index < nodes.Count; index++)
+        {
+            VanillaIkChainNode previous = nodes[index - 1];
+            VanillaIkChainNode current = nodes[index];
+            if (!string.Equals(current.ParentElementName, previous.ElementName, StringComparison.OrdinalIgnoreCase))
+            {
+                error = $"IK chain must be one contiguous parent-to-child path. {current.ElementName} is not a direct child of {previous.ElementName}.";
+                return false;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(nodes[0].ParentElementName))
+        {
+            warning = "Top selected element is a root element; IK can rotate the whole model.";
+        }
+
+        string[] orderedNames = nodes.Select(node => node.ElementName).ToArray();
+        chain = new VanillaIkManualChain(orderedNames, orderedNames[^1], string.Join(" -> ", orderedNames));
+        return true;
     }
 
     private static bool ContainsElementName(string[] elementNames, string value)
@@ -3024,41 +3141,9 @@ public sealed partial class DebugWindowManager
         return !string.IsNullOrWhiteSpace(value) && elementNames.Any(name => string.Equals(name, value, StringComparison.OrdinalIgnoreCase));
     }
 
-    private void SetVanillaIkChainFields(VanillaIkChain chain)
+    private void SetVanillaIkTargetFromCurrentEnd(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, VanillaIkManualChain chain)
     {
-        _vanillaIkUpperElementName = chain.UpperElementName;
-        _vanillaIkLowerElementName = chain.LowerElementName;
-        _vanillaIkEndElementName = chain.EndElementName;
-    }
-
-    private static bool DrawVanillaIkElementCombo(string label, ref string value, string[] elementNames, bool includeDistalOption)
-    {
-        string[] options = includeDistalOption
-            ? new[] { "<distal end of lower>" }.Concat(elementNames).ToArray()
-            : elementNames;
-
-        string currentValue = value;
-        int selectedIndex = includeDistalOption && string.IsNullOrWhiteSpace(currentValue)
-            ? 0
-            : Array.FindIndex(options, option => string.Equals(option, currentValue, StringComparison.OrdinalIgnoreCase));
-        if (selectedIndex < 0) selectedIndex = 0;
-
-        ImGui.SetNextItemWidth(220);
-        if (!ImGui.Combo(label, ref selectedIndex, options, options.Length)) return false;
-
-        value = includeDistalOption && selectedIndex == 0 ? "" : options[selectedIndex];
-        return true;
-    }
-
-    private void SetVanillaIkTargetFromCurrentEnd(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame)
-    {
-        if (!TryGetConfiguredVanillaIkChain(out VanillaIkChain chain, out string chainError))
-        {
-            _vanillaStatus = chainError;
-            return;
-        }
-
-        if (!TryCreateVanillaIkDragCache(row, entry, keyFrame, chain, out VanillaIkDragCache? cache, out string error) || cache == null)
+        if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, out VanillaIkCcdCache? cache, out string error) || cache == null)
         {
             _vanillaStatus = error;
             return;
@@ -3068,10 +3153,10 @@ public sealed partial class DebugWindowManager
         _vanillaIkTargetY = (float)cache.EndOrigin.Y;
         _vanillaIkTargetZ = (float)cache.EndOrigin.Z;
         _vanillaIkHasTarget = true;
-        _vanillaStatus = $"IK target set from {GetVanillaIkEndLabel(chain)}.";
+        _vanillaStatus = $"IK target set from distal end of {chain.EndElementName}.";
     }
 
-    private void ApplyVanillaIkTarget(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame)
+    private void ApplyVanillaIkTarget(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, VanillaIkManualChain chain)
     {
         if (!_vanillaIkHasTarget)
         {
@@ -3079,28 +3164,24 @@ public sealed partial class DebugWindowManager
             return;
         }
 
-        if (!TryGetConfiguredVanillaIkChain(out VanillaIkChain chain, out string chainError))
-        {
-            _vanillaStatus = chainError;
-            return;
-        }
-
-        if (!TryCreateVanillaIkDragCache(row, entry, keyFrame, chain, out VanillaIkDragCache? cache, out string error) || cache == null)
+        if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, out VanillaIkCcdCache? cache, out string error) || cache == null)
         {
             _vanillaStatus = error;
             return;
         }
 
         Vec3d target = new(_vanillaIkTargetX, _vanillaIkTargetY, _vanillaIkTargetZ);
-        if (!TrySolveVanillaIkToTarget(cache, target, out AnimationKeyFrameElement solvedUpper, out AnimationKeyFrameElement solvedLower, out string solveError))
+        if (!TrySolveVanillaIkCcdToTarget(cache, target, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
             return;
         }
 
-        ApplyVanillaIkSolvedElements(keyFrame, chain, solvedUpper, solvedLower);
-        ApplyVanillaElementEdit(row, entry, keyFrame, chain.UpperElementName, chain.LowerElementName);
-        _vanillaStatus = $"Solved IK for {chain.UpperElementName} / {chain.LowerElementName} at frame {keyFrame.Frame}.";
+        ApplyVanillaIkSolvedElements(keyFrame, chain, solvedElements);
+        ApplyVanillaElementEdit(row, entry, keyFrame, chain.ElementNames.ToArray());
+        _vanillaStatus = finalDistance <= VanillaIkSolveTolerance
+            ? $"Solved IK for {chain.ElementNames.Count} element(s) at frame {keyFrame.Frame}."
+            : $"Solved IK best effort for {chain.ElementNames.Count} element(s); remaining distance {finalDistance:0.###}.";
     }
 
     private void DrawVanillaSymmetryPairSelector(VanillaAnimationDocument document, string selectedElementName, string[] allElements)
@@ -3400,16 +3481,16 @@ public sealed partial class DebugWindowManager
         int keyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, entry.Animation.KeyFrames.Length - 1);
         AnimationKeyFrame keyFrame = entry.Animation.KeyFrames[keyFrameIndex];
 
-        if (!TryGetConfiguredVanillaIkChain(out VanillaIkChain chain, out string chainError))
+        if (!TryGetManualVanillaIkChain(entry.Document.Shape, out VanillaIkManualChain chain, out string chainError, out _))
         {
             _vanillaStatus = chainError;
             return false;
         }
 
         string selectedElementName = _vanillaSelection.ElementName;
-        if (!string.Equals(selectedElementName, chain.HandleElementName, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(selectedElementName, chain.EndElementName, StringComparison.OrdinalIgnoreCase))
         {
-            _vanillaStatus = $"IK Move handle is {chain.HandleElementName}; select that element before dragging.";
+            _vanillaStatus = $"IK Move handle is {chain.EndElementName}; select that element before dragging.";
             return false;
         }
 
@@ -3419,7 +3500,7 @@ public sealed partial class DebugWindowManager
             _vanillaIkDragKeyFrameIndex != keyFrameIndex ||
             !string.Equals(_vanillaIkDragElementName, selectedElementName, StringComparison.OrdinalIgnoreCase))
         {
-            if (!TryCreateVanillaIkDragCache(row, entry, keyFrame, chain, out VanillaIkDragCache? cache, out string error) || cache == null)
+            if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, out VanillaIkCcdCache? cache, out string error) || cache == null)
             {
                 _vanillaStatus = error;
                 return false;
@@ -3435,101 +3516,21 @@ public sealed partial class DebugWindowManager
         AnimationKeyFrameElement desiredElement = CloneElement(_vanillaIkDragCache.SelectedStartElement);
         SetVanillaGizmoAxisValue(desiredElement, TransformGizmoMode.Move, axis, value);
         Vec3d target = GetVanillaIkDesiredEndTarget(_vanillaIkDragCache, desiredElement);
-        if (!TrySolveVanillaIkToTarget(_vanillaIkDragCache, target, out AnimationKeyFrameElement solvedUpper, out AnimationKeyFrameElement solvedLower, out string solveError))
+        if (!TrySolveVanillaIkCcdToTarget(_vanillaIkDragCache, target, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
             return false;
         }
 
-        ApplyVanillaIkSolvedElements(keyFrame, chain, solvedUpper, solvedLower);
-        ApplyVanillaElementEdit(row, entry, keyFrame, chain.UpperElementName, chain.LowerElementName);
-        _vanillaStatus = $"IK Move solved {chain.UpperElementName} / {chain.LowerElementName}.";
+        ApplyVanillaIkSolvedElements(keyFrame, chain, solvedElements);
+        ApplyVanillaElementEdit(row, entry, keyFrame, chain.ElementNames.ToArray());
+        _vanillaStatus = finalDistance <= VanillaIkSolveTolerance
+            ? $"IK Move solved {chain.ElementNames.Count} element(s)."
+            : $"IK Move solved best effort; remaining distance {finalDistance:0.###}.";
         return true;
     }
 
-    private static bool TryInferVanillaIkChain(Shape? shape, string selectedElementName, out VanillaIkChain chain)
-    {
-        chain = default;
-        if (!TryFindShapeElementWithParent(shape, selectedElementName, out ShapeElement? selected, out ShapeElement? parent) || selected == null)
-        {
-            return false;
-        }
-
-        string selectedName = string.IsNullOrWhiteSpace(selected.Name) ? selectedElementName : selected.Name;
-        if (string.IsNullOrWhiteSpace(selectedName)) return false;
-
-        if (parent != null &&
-            !string.IsNullOrWhiteSpace(parent.Name) &&
-            TryFindShapeElementWithParent(shape, parent.Name, out _, out ShapeElement? grandParent) &&
-            grandParent != null &&
-            !string.IsNullOrWhiteSpace(grandParent.Name))
-        {
-            chain = new(grandParent.Name, parent.Name, selectedName, selectedName);
-            return IsValidVanillaIkChain(chain);
-        }
-
-        if (parent != null && !string.IsNullOrWhiteSpace(parent.Name))
-        {
-            chain = new(parent.Name, selectedName, "", selectedName);
-            return IsValidVanillaIkChain(chain);
-        }
-
-        ShapeElement? lowerChild = GetFirstNamedChild(selected);
-        if (lowerChild == null || string.IsNullOrWhiteSpace(lowerChild.Name)) return false;
-
-        ShapeElement? endChild = GetFirstNamedChild(lowerChild);
-        string endName = endChild?.Name ?? "";
-        string handleName = string.IsNullOrWhiteSpace(endName) ? lowerChild.Name : endName;
-        chain = new(selectedName, lowerChild.Name, endName, handleName);
-        return IsValidVanillaIkChain(chain);
-    }
-
-    private bool TryGetConfiguredVanillaIkChain(out VanillaIkChain chain, out string error)
-    {
-        string upper = _trim(_vanillaIkUpperElementName);
-        string lower = _trim(_vanillaIkLowerElementName);
-        string end = _trim(_vanillaIkEndElementName);
-        string handle = string.IsNullOrWhiteSpace(end) ? lower : end;
-
-        chain = new(upper, lower, end, handle);
-        if (string.IsNullOrWhiteSpace(upper) || string.IsNullOrWhiteSpace(lower))
-        {
-            error = "IK needs an upper and lower element.";
-            return false;
-        }
-
-        if (!IsValidVanillaIkChain(chain))
-        {
-            error = "IK chain elements must be distinct.";
-            return false;
-        }
-
-        error = "";
-        return true;
-
-        static string _trim(string value) => value?.Trim() ?? "";
-    }
-
-    private static bool IsValidVanillaIkChain(VanillaIkChain chain)
-    {
-        if (string.IsNullOrWhiteSpace(chain.UpperElementName) || string.IsNullOrWhiteSpace(chain.LowerElementName)) return false;
-        if (string.Equals(chain.UpperElementName, chain.LowerElementName, StringComparison.OrdinalIgnoreCase)) return false;
-        if (!string.IsNullOrWhiteSpace(chain.EndElementName) &&
-            (string.Equals(chain.EndElementName, chain.UpperElementName, StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(chain.EndElementName, chain.LowerElementName, StringComparison.OrdinalIgnoreCase)))
-        {
-            return false;
-        }
-
-        return !string.IsNullOrWhiteSpace(chain.HandleElementName);
-    }
-
-    private static string GetVanillaIkEndLabel(VanillaIkChain chain)
-    {
-        return string.IsNullOrWhiteSpace(chain.EndElementName) ? $"distal end of {chain.LowerElementName}" : chain.EndElementName;
-    }
-
-    private bool TryCreateVanillaIkDragCache(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, VanillaIkChain chain, out VanillaIkDragCache? cache, out string error)
+    private bool TryCreateVanillaIkCcdCache(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, VanillaIkManualChain chain, out VanillaIkCcdCache? cache, out string error)
     {
         cache = null;
         error = "";
@@ -3543,68 +3544,53 @@ public sealed partial class DebugWindowManager
 
         scene.Scrub(Math.Clamp(keyFrame.Frame, 0, Math.Max(0, scene.QuantityFrames - 1)));
 
-        if (!TryGetVanillaIkPoseInfo(scene, chain.UpperElementName, out VanillaIkPoseInfo upperInfo, out error)) return false;
-        if (!TryGetVanillaIkPoseInfo(scene, chain.LowerElementName, out VanillaIkPoseInfo lowerInfo, out error)) return false;
-        if (!TryGetVanillaIkPoseInfo(scene, chain.HandleElementName, out VanillaIkPoseInfo selectedInfo, out error)) return false;
-
-        Vec3d endOrigin;
-        if (!string.IsNullOrWhiteSpace(chain.EndElementName))
+        var infos = new List<VanillaIkPoseInfo>();
+        foreach (string elementName in chain.ElementNames)
         {
-            if (!TryGetVanillaIkPoseInfo(scene, chain.EndElementName, out VanillaIkPoseInfo endInfo, out error)) return false;
-            endOrigin = endInfo.Origin;
+            if (!TryGetVanillaIkPoseInfo(scene, elementName, out VanillaIkPoseInfo info, out error)) return false;
+            infos.Add(info);
         }
-        else if (!TryGetVanillaDistalEndpointModel(lowerInfo.Pose, lowerInfo.Origin, out endOrigin))
+
+        if (infos.Count == 0)
         {
-            error = $"Could not find a distal endpoint for {chain.LowerElementName}.";
+            error = "IK needs at least one chain element.";
             return false;
         }
 
-        double upperOriginDistance = Distance(upperInfo.Origin, lowerInfo.Origin);
-        double lowerOriginDistance = Distance(lowerInfo.Origin, endOrigin);
-        double upperLength = GetVanillaBoneLength(upperInfo.Pose.ForElement, upperOriginDistance);
-        double lowerLength = GetVanillaBoneLength(lowerInfo.Pose.ForElement, lowerOriginDistance);
-        if (upperLength <= 0.0001 || lowerLength <= 0.0001)
+        VanillaIkPoseInfo endInfo = infos[^1];
+        if (!TryGetVanillaDistalEndpointModel(endInfo.Pose, endInfo.Origin, out Vec3d endOrigin))
         {
-            error = $"IK chain {chain.UpperElementName} / {chain.LowerElementName} has no usable bone length.";
+            error = $"Could not find a distal endpoint for {chain.EndElementName}.";
             return false;
         }
 
-        AnimationKeyFrameElement selectedStart = CloneElement(GetVanillaIkElementOrDefault(keyFrame, chain.HandleElementName));
-        AnimationKeyFrameElement upperStart = CloneElement(GetVanillaIkElementOrDefault(keyFrame, chain.UpperElementName));
-        AnimationKeyFrameElement lowerStart = CloneElement(GetVanillaIkElementOrDefault(keyFrame, chain.LowerElementName));
+        Vec3d[] jointPositions = new Vec3d[infos.Count + 1];
+        for (int index = 0; index < infos.Count; index++)
+        {
+            jointPositions[index] = infos[index].Origin;
+        }
+        jointPositions[^1] = endOrigin;
+
+        for (int index = 0; index < jointPositions.Length - 1; index++)
+        {
+            if (Distance(jointPositions[index], jointPositions[index + 1]) > 0.0001) continue;
+
+            error = $"IK chain segment at {chain.ElementNames[index]} has no usable length.";
+            return false;
+        }
 
         TransformGizmoAxes selectedAxes = new(
-            SafeNormalize(selectedInfo.WorldRotation.TransformDirection(new Vec3d(1, 0, 0)), new Vec3d(1, 0, 0)),
-            SafeNormalize(selectedInfo.WorldRotation.TransformDirection(new Vec3d(0, 1, 0)), new Vec3d(0, 1, 0)),
-            SafeNormalize(selectedInfo.WorldRotation.TransformDirection(new Vec3d(0, 0, 1)), new Vec3d(0, 0, 1)));
+            SafeNormalize(endInfo.WorldRotation.TransformDirection(new Vec3d(1, 0, 0)), new Vec3d(1, 0, 0)),
+            SafeNormalize(endInfo.WorldRotation.TransformDirection(new Vec3d(0, 1, 0)), new Vec3d(0, 1, 0)),
+            SafeNormalize(endInfo.WorldRotation.TransformDirection(new Vec3d(0, 0, 1)), new Vec3d(0, 0, 1)));
 
-        Vec3d rootToEnd = SafeNormalize(Sub(endOrigin, upperInfo.Origin), upperInfo.WorldRotation.TransformDirection(new Vec3d(0, 0, 1)));
-        Vec3d poleHint = ProjectOntoPlane(Sub(lowerInfo.Origin, upperInfo.Origin), rootToEnd);
-        if (poleHint.LengthSq() < 0.000001)
-        {
-            poleHint = ProjectOntoPlane(upperInfo.WorldRotation.TransformDirection(new Vec3d(0, 0, GetVanillaIkPoleSign(chain))), rootToEnd);
-        }
-        poleHint = SafeNormalize(poleHint, SafePoleFallback(rootToEnd));
+        AnimationKeyFrameElement[] startElements = chain.ElementNames
+            .Select(name => CloneElement(GetVanillaIkElementOrDefault(keyFrame, name)))
+            .ToArray();
+        AnimationKeyFrameElement selectedStart = CloneElement(GetVanillaIkElementOrDefault(keyFrame, chain.EndElementName));
 
-        cache = new(
-            chain,
-            upperInfo,
-            lowerInfo,
-            selectedInfo.Origin,
-            endOrigin,
-            selectedAxes,
-            selectedStart,
-            upperStart,
-            lowerStart,
-            upperLength,
-            lowerLength,
-            poleHint);
+        cache = new VanillaIkCcdCache(chain, infos.ToArray(), jointPositions, endOrigin, selectedAxes, selectedStart, startElements);
         return true;
-    }
-
-    private static double GetVanillaIkPoleSign(VanillaIkChain chain)
-    {
-        return InferVanillaSymmetrySide(chain.HandleElementName) == VanillaSymmetrySide.Left ? -1 : 1;
     }
 
     private static AnimationKeyFrameElement GetVanillaIkElementOrDefault(AnimationKeyFrame keyFrame, string elementName)
@@ -3619,7 +3605,7 @@ public sealed partial class DebugWindowManager
         return new AnimationKeyFrameElement();
     }
 
-    private static Vec3d GetVanillaIkDesiredEndTarget(VanillaIkDragCache cache, AnimationKeyFrameElement desiredElement)
+    private static Vec3d GetVanillaIkDesiredEndTarget(VanillaIkCcdCache cache, AnimationKeyFrameElement desiredElement)
     {
         double dx = ((desiredElement.OffsetX ?? 0) - (cache.SelectedStartElement.OffsetX ?? 0)) / 16.0;
         double dy = ((desiredElement.OffsetY ?? 0) - (cache.SelectedStartElement.OffsetY ?? 0)) / 16.0;
@@ -3628,56 +3614,66 @@ public sealed partial class DebugWindowManager
         return Add(cache.EndOrigin, Add(Add(Scale(cache.SelectedAxes.X, dx), Scale(cache.SelectedAxes.Y, dy)), Scale(cache.SelectedAxes.Z, dz)));
     }
 
-    private static bool TrySolveVanillaIkToTarget(VanillaIkDragCache cache, Vec3d requestedTarget, out AnimationKeyFrameElement solvedUpper, out AnimationKeyFrameElement solvedLower, out string error)
+    private static bool TrySolveVanillaIkCcdToTarget(VanillaIkCcdCache cache, Vec3d requestedTarget, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string error)
     {
-        solvedUpper = cache.UpperStartElement;
-        solvedLower = cache.LowerStartElement;
+        solvedElements = cache.StartElements.Select(CloneElement).ToArray();
+        finalDistance = Distance(cache.EndOrigin, requestedTarget);
         error = "";
 
-        Vec3d root = cache.UpperInfo.Origin;
-        Vec3d rootToTarget = Sub(requestedTarget, root);
-        double requestedDistance = rootToTarget.Length();
-        if (requestedDistance < 0.0001)
+        int count = cache.BoneInfos.Count;
+        if (count == 0)
         {
-            error = "IK target is too close to the upper bone root.";
+            error = "IK needs at least one chain element.";
             return false;
         }
 
-        Vec3d axis = Scale(rootToTarget, 1.0 / requestedDistance);
-        const double epsilon = 0.0001;
-        double minDistance = Math.Abs(cache.UpperLength - cache.LowerLength) + epsilon;
-        double maxDistance = cache.UpperLength + cache.LowerLength - epsilon;
-        double distance = Math.Clamp(requestedDistance, minDistance, maxDistance);
-        Vec3d target = Add(root, Scale(axis, distance));
+        Vec3d[] joints = cache.JointPositions.Select(point => new Vec3d(point.X, point.Y, point.Z)).ToArray();
+        RigIkMatrix3[] rotations = cache.BoneInfos.Select(info => info.WorldRotation).ToArray();
+        double initialDistance = Distance(joints[^1], requestedTarget);
 
-        double upperSquared = cache.UpperLength * cache.UpperLength;
-        double lowerSquared = cache.LowerLength * cache.LowerLength;
-        double along = (upperSquared - lowerSquared + distance * distance) / (2.0 * distance);
-        double heightSquared = Math.Max(0, upperSquared - along * along);
-        double height = Math.Sqrt(heightSquared);
+        const int maxIterations = 24;
+        const double vectorEpsilon = 0.000001;
+        for (int iteration = 0; iteration < maxIterations; iteration++)
+        {
+            for (int boneIndex = count - 1; boneIndex >= 0; boneIndex--)
+            {
+                Vec3d origin = joints[boneIndex];
+                Vec3d currentVector = Sub(joints[^1], origin);
+                Vec3d targetVector = Sub(requestedTarget, origin);
+                if (currentVector.LengthSq() < vectorEpsilon || targetVector.LengthSq() < vectorEpsilon) continue;
 
-        Vec3d pole = ProjectOntoPlane(cache.PoleHint, axis);
-        if (pole.LengthSq() < 0.000001) pole = ProjectOntoPlane(new Vec3d(0, 1, 0), axis);
-        if (pole.LengthSq() < 0.000001) pole = ProjectOntoPlane(new Vec3d(1, 0, 0), axis);
-        pole = SafeNormalize(pole, SafePoleFallback(axis));
+                RigIkMatrix3 delta = RigIkMatrix3.FromTo(currentVector, targetVector).Orthonormalized();
+                for (int jointIndex = boneIndex + 1; jointIndex < joints.Length; jointIndex++)
+                {
+                    joints[jointIndex] = Add(origin, delta.TransformDirection(Sub(joints[jointIndex], origin)));
+                }
 
-        Vec3d joint = Add(Add(root, Scale(axis, along)), Scale(pole, height));
+                for (int rotationIndex = boneIndex; rotationIndex < rotations.Length; rotationIndex++)
+                {
+                    rotations[rotationIndex] = delta.Mul(rotations[rotationIndex]).Orthonormalized();
+                }
 
-        Vec3d upperStartDirection = SafeNormalize(Sub(cache.LowerInfo.Origin, cache.UpperInfo.Origin), cache.UpperInfo.WorldRotation.TransformDirection(new Vec3d(0, 0, 1)));
-        Vec3d upperTargetDirection = SafeNormalize(Sub(joint, cache.UpperInfo.Origin), upperStartDirection);
-        Vec3d lowerStartDirection = SafeNormalize(Sub(cache.EndOrigin, cache.LowerInfo.Origin), cache.LowerInfo.WorldRotation.TransformDirection(new Vec3d(0, 0, 1)));
-        Vec3d lowerTargetDirection = SafeNormalize(Sub(target, joint), lowerStartDirection);
+                if (Distance(joints[^1], requestedTarget) <= VanillaIkSolveTolerance) break;
+            }
 
-        RigIkMatrix3 upperWorld = RigIkMatrix3.FromTo(upperStartDirection, upperTargetDirection).Mul(cache.UpperInfo.WorldRotation).Orthonormalized();
-        RigIkMatrix3 upperLocal = cache.UpperInfo.ParentWorldRotation.Inverted().Mul(upperWorld).Orthonormalized();
-        Vec3d upperEuler = Sub(upperLocal.ToEulerDegrees(), cache.UpperInfo.BaseRotationDegrees);
+            if (Distance(joints[^1], requestedTarget) <= VanillaIkSolveTolerance) break;
+        }
 
-        RigIkMatrix3 lowerWorld = RigIkMatrix3.FromTo(lowerStartDirection, lowerTargetDirection).Mul(cache.LowerInfo.WorldRotation).Orthonormalized();
-        RigIkMatrix3 lowerLocal = upperWorld.Inverted().Mul(lowerWorld).Orthonormalized();
-        Vec3d lowerEuler = Sub(lowerLocal.ToEulerDegrees(), cache.LowerInfo.BaseRotationDegrees);
+        finalDistance = Distance(joints[^1], requestedTarget);
+        if (finalDistance > VanillaIkSolveTolerance && finalDistance >= initialDistance - VanillaIkSolveImprovementEpsilon)
+        {
+            error = $"IK target did not improve. Remaining distance {finalDistance:0.###}.";
+            return false;
+        }
 
-        solvedUpper = WithVanillaIkRotation(cache.UpperStartElement, upperEuler);
-        solvedLower = WithVanillaIkRotation(cache.LowerStartElement, lowerEuler);
+        for (int index = 0; index < count; index++)
+        {
+            RigIkMatrix3 parentWorld = index > 0 ? rotations[index - 1] : cache.BoneInfos[index].ParentWorldRotation;
+            RigIkMatrix3 local = parentWorld.Inverted().Mul(rotations[index]).Orthonormalized();
+            Vec3d euler = Sub(local.ToEulerDegrees(), cache.BoneInfos[index].BaseRotationDegrees);
+            solvedElements[index] = WithVanillaIkRotation(cache.StartElements[index], euler);
+        }
+
         return true;
     }
 
@@ -3691,11 +3687,13 @@ public sealed partial class DebugWindowManager
         return result;
     }
 
-    private static void ApplyVanillaIkSolvedElements(AnimationKeyFrame keyFrame, VanillaIkChain chain, AnimationKeyFrameElement solvedUpper, AnimationKeyFrameElement solvedLower)
+    private static void ApplyVanillaIkSolvedElements(AnimationKeyFrame keyFrame, VanillaIkManualChain chain, IReadOnlyList<AnimationKeyFrameElement> solvedElements)
     {
         keyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
-        keyFrame.Elements[chain.UpperElementName] = solvedUpper;
-        keyFrame.Elements[chain.LowerElementName] = solvedLower;
+        for (int index = 0; index < chain.ElementNames.Count && index < solvedElements.Count; index++)
+        {
+            keyFrame.Elements[chain.ElementNames[index]] = solvedElements[index];
+        }
     }
 
     private static bool TryGetVanillaIkPoseInfo(VanillaAnimationPreviewScene scene, string elementName, out VanillaIkPoseInfo info, out string error)
@@ -3805,58 +3803,35 @@ public sealed partial class DebugWindowManager
         return best > 0.000001;
     }
 
-    private static double GetVanillaBoneLength(ShapeElement? element, double originDistance)
+    private static bool TryFindShapeElementPath(Shape? shape, string elementName, out List<ShapeElement> path)
     {
-        if (originDistance > 0.0001) return originDistance;
-        if (element?.From == null || element.To == null || element.From.Length < 3 || element.To.Length < 3) return 0;
-
-        double x = Math.Abs(element.To[0] - element.From[0]) / 16.0;
-        double y = Math.Abs(element.To[1] - element.From[1]) / 16.0;
-        double z = Math.Abs(element.To[2] - element.From[2]) / 16.0;
-        double length = Math.Max(x, Math.Max(y, z));
-        return length > 0.0001 ? length : 0;
-    }
-
-    private static bool TryFindShapeElementWithParent(Shape? shape, string elementName, out ShapeElement? element, out ShapeElement? parent)
-    {
-        element = default!;
-        parent = default!;
+        path = [];
         if (shape?.Elements == null || string.IsNullOrWhiteSpace(elementName)) return false;
 
         foreach (ShapeElement root in shape.Elements)
         {
-            if (TryFindShapeElementWithParentRecursive(root, null, elementName, out element, out parent)) return true;
+            if (TryFindShapeElementPathRecursive(root, elementName, path)) return true;
         }
 
+        path.Clear();
         return false;
     }
 
-    private static bool TryFindShapeElementWithParentRecursive(ShapeElement current, ShapeElement? currentParent, string elementName, out ShapeElement? element, out ShapeElement? parent)
+    private static bool TryFindShapeElementPathRecursive(ShapeElement current, string elementName, List<ShapeElement> path)
     {
-        if (string.Equals(current.Name, elementName, StringComparison.OrdinalIgnoreCase))
-        {
-            element = current;
-            parent = currentParent;
-            return true;
-        }
+        path.Add(current);
+        if (string.Equals(current.Name, elementName, StringComparison.OrdinalIgnoreCase)) return true;
 
         if (current.Children != null)
         {
             foreach (ShapeElement child in current.Children)
             {
-                if (TryFindShapeElementWithParentRecursive(child, current, elementName, out element, out parent)) return true;
+                if (TryFindShapeElementPathRecursive(child, elementName, path)) return true;
             }
         }
 
-        element = default!;
-        parent = default!;
+        path.RemoveAt(path.Count - 1);
         return false;
-    }
-
-    private static ShapeElement? GetFirstNamedChild(ShapeElement element)
-    {
-        if (element.Children == null) return null;
-        return element.Children.FirstOrDefault(child => !string.IsNullOrWhiteSpace(child.Name));
     }
 
     private void DrawVanillaMetadataInspector(VanillaBrowserRow row, VanillaAnimationMetaEntry entry)
@@ -4768,22 +4743,18 @@ public sealed partial class DebugWindowManager
 
     private readonly record struct VanillaSymmetryPairCandidate(string ElementName, VanillaSymmetrySide SourceSide);
     private readonly record struct VanillaSymmetryResult(bool Applied, int Written, int CreatedKeyFrames, int OverwrittenElements, string Message);
-    private readonly record struct VanillaIkChain(string UpperElementName, string LowerElementName, string EndElementName, string HandleElementName);
+    private readonly record struct VanillaIkManualChain(IReadOnlyList<string> ElementNames, string EndElementName, string DisplayName);
+    private readonly record struct VanillaIkChainNode(string ElementName, string ParentElementName, int Depth);
     private readonly record struct VanillaIkPoseInfo(ElementPose Pose, Vec3d Origin, RigIkMatrix3 WorldRotation, RigIkMatrix3 ParentWorldRotation, Vec3d BaseRotationDegrees);
 
-    private sealed record VanillaIkDragCache(
-        VanillaIkChain Chain,
-        VanillaIkPoseInfo UpperInfo,
-        VanillaIkPoseInfo LowerInfo,
-        Vec3d SelectedOrigin,
+    private sealed record VanillaIkCcdCache(
+        VanillaIkManualChain Chain,
+        IReadOnlyList<VanillaIkPoseInfo> BoneInfos,
+        Vec3d[] JointPositions,
         Vec3d EndOrigin,
         TransformGizmoAxes SelectedAxes,
         AnimationKeyFrameElement SelectedStartElement,
-        AnimationKeyFrameElement UpperStartElement,
-        AnimationKeyFrameElement LowerStartElement,
-        double UpperLength,
-        double LowerLength,
-        Vec3d PoleHint);
+        IReadOnlyList<AnimationKeyFrameElement> StartElements);
 
     private enum VanillaEntitySelectorMode
     {
