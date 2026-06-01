@@ -613,7 +613,8 @@ public sealed partial class DebugWindowManager : IDisposable
         RecipeEditor,
         Particles,
         Transforms,
-        BlockItemJson
+        BlockItemJson,
+        LootDrops
     }
 
     private readonly AnimationEditorHistory _animationHistory = new();
@@ -809,6 +810,13 @@ public sealed partial class DebugWindowManager : IDisposable
                     BlockItemJsonEditorTab(deltaSeconds, _showEditorDiagnostics);
                     ImGui.EndTabItem();
                 }
+                bool lootDropsTabOpen = true;
+                if (ImGui.BeginTabItem("Loot/Drops##tab", ref lootDropsTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.LootDrops;
+                    LootDropEditorTab(deltaSeconds, _showEditorDiagnostics);
+                    ImGui.EndTabItem();
+                }
                 ImGui.EndTabBar();
             }
             ImGui.SetWindowFontScale(1f);
@@ -932,6 +940,9 @@ public sealed partial class DebugWindowManager : IDisposable
             case DevToolsTab.BlockItemJson:
                 ApplyBlockItemJsonRuntime(force);
                 break;
+            case DevToolsTab.LootDrops:
+                ApplyLootDropRuntime(force);
+                break;
         }
     }
 
@@ -942,6 +953,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _particleEffectsManager.ClearParticleLiveApplyState();
         ClearTransformLiveApplyState();
         ClearBlockItemJsonLiveApplyState();
+        ClearLootDropLiveApplyState();
     }
 
     private void ResetDevToolsLayout()
@@ -952,6 +964,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _particleEffectsManager.ResetLayout();
         ResetTransformsLayout();
         ResetBlockItemJsonLayout();
+        ResetLootDropLayout();
     }
 
     private void CollidersTab()
