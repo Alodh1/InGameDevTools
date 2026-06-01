@@ -584,17 +584,64 @@ public sealed partial class DebugWindowManager
 
     private JArray BuildSourceDropArray(LootDropEntry entry)
     {
+        if (entry.SourceJson?["drops"] is JArray sourceDrops)
+        {
+            return (JArray)sourceDrops.DeepClone();
+        }
+
         if (entry.Kind == LootDropKind.BlockDrops && entry.Block?.Drops != null)
         {
-            return JArray.FromObject(entry.Block.Drops, JsonSerializer.Create());
+            return BuildRuntimeDropArray(entry.Block.Drops);
         }
 
         if (entry.Kind == LootDropKind.EntityDrops && entry.Entity?.Drops != null)
         {
-            return JArray.FromObject(entry.Entity.Drops, JsonSerializer.Create());
+            return BuildRuntimeDropArray(entry.Entity.Drops);
         }
 
-        return entry.SourceJson?["drops"] as JArray ?? new JArray();
+        return new JArray();
+    }
+
+    private static JArray BuildRuntimeDropArray(IEnumerable<BlockDropItemStack> drops)
+    {
+        JArray result = new();
+        foreach (BlockDropItemStack drop in drops)
+        {
+            result.Add(BuildRuntimeDropToken(drop));
+        }
+
+        return result;
+    }
+
+    private static JObject BuildRuntimeDropToken(BlockDropItemStack drop)
+    {
+        NatFloat quantity = drop.Quantity ?? NatFloat.One;
+        JObject token = new()
+        {
+            ["type"] = drop.Type.ToString(),
+            ["code"] = drop.Code?.ToString() ?? "",
+            ["quantity"] = new JObject
+            {
+                ["offset"] = quantity.offset,
+                ["avg"] = quantity.avg,
+                ["var"] = quantity.var,
+                ["dist"] = quantity.dist.ToString()
+            }
+        };
+
+        if (drop.Attributes?.Token != null)
+        {
+            token["attributes"] = drop.Attributes.Token.DeepClone();
+        }
+        if (drop.LastDrop) token["lastDrop"] = true;
+        if (drop.Tool != null) token["tool"] = drop.Tool.Value.ToString();
+        if (!string.IsNullOrWhiteSpace(drop.DropModbyStat)) token["dropModbyStat"] = drop.DropModbyStat;
+        if (drop is WeightedBlockDropItemstack weighted && Math.Abs(weighted.Weight - 1f) > 0.0001f)
+        {
+            token["weight"] = weighted.Weight;
+        }
+
+        return token;
     }
 
     private string CurrentLootDropJson()
@@ -714,7 +761,7 @@ public sealed partial class DebugWindowManager
                 }
             },
             Path.Combine("assets", entry.Domain, "runtime-loot-drops", entry.Code.Replace(':', '_').Replace('/', '_') + ".json"),
-            () => JArray.FromObject(original ?? [], JsonSerializer.Create()).ToString(Formatting.Indented),
+            () => BuildRuntimeDropArray(original ?? []).ToString(Formatting.Indented),
             "loot-drops");
     }
 
