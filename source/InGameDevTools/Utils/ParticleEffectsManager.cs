@@ -85,6 +85,7 @@ public class ParticleEffectsManager
             catch (Exception exception)
             {
                 _scanDiagnostics.ParseFailures++;
+                _diagnostics.Exception($"Named particle asset parse failed for {asset.Location}", exception);
                 LoggerUtil.Error(api, this, $"Error on parsing particle effects for '{asset.Location.Domain}':\n{exception}");
             }
         }
@@ -127,6 +128,7 @@ public class ParticleEffectsManager
             catch (Exception exception)
             {
                 _scanDiagnostics.TextReadFailures++;
+                _diagnostics.Warning($"Particle asset load failed: {asset.Location}", exception.ToString());
                 AddVerboseSample(_scanDiagnostics.SkippedSamples, $"load failed: {asset.Location} ({exception.Message})");
                 continue;
             }
@@ -139,6 +141,7 @@ public class ParticleEffectsManager
             catch (Exception exception)
             {
                 _scanDiagnostics.TextReadFailures++;
+                _diagnostics.Warning($"Particle asset text read failed: {asset.Location}", exception.ToString());
                 AddVerboseSample(_scanDiagnostics.SkippedSamples, $"text read failed: {asset.Location} ({exception.Message})");
                 continue;
             }
@@ -171,6 +174,7 @@ public class ParticleEffectsManager
             catch (Exception exception)
             {
                 _scanDiagnostics.ParseFailures++;
+                _diagnostics.Exception($"Embedded particle asset parse failed for {asset.Location}", exception);
                 LoggerUtil.Warn(api, this, $"Error on parsing embedded particle assets for '{asset.Location}':\n{exception}");
             }
         }
@@ -241,6 +245,7 @@ public class ParticleEffectsManager
             catch (Exception exception)
             {
                 _scanDiagnostics.ParseFailures++;
+                _diagnostics.Exception($"Runtime particle clone failed for {collectible.Code}", exception);
                 LoggerUtil.Warn(api, this, $"Error on cloning runtime particle effect '{collectible.Code}' from '{sourceKind}':\n{exception}");
             }
         }
@@ -507,7 +512,7 @@ public class ParticleEffectsManager
         DrawEditor(id, deltaSeconds, 1f);
     }
 
-    public void DrawEditor(string id, float deltaSeconds, float uiScale, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager = null)
+    public void DrawEditor(string id, float deltaSeconds, float uiScale, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager = null, bool showDiagnostics = false)
     {
         List<ParticleEffectFamily> families = BuildParticleFamilies();
         ParticleEffectFamily[] visibleFamilies = families
@@ -624,6 +629,7 @@ public class ParticleEffectsManager
             ImGui.SeparatorText("Status");
             ImGui.TextWrapped(_particleStatus);
         }
+        _diagnostics.Draw($"{id}-diagnostics", showDiagnostics);
         ImGui.EndChild();
     }
 
@@ -1589,6 +1595,7 @@ public class ParticleEffectsManager
     private int _selectedParticleEmitterIndex;
     private bool _particleVariantOnlyEdit;
     private string _particleStatus = "";
+    private readonly DevToolsEditorDiagnostics _diagnostics = new("Particles");
     private readonly Dictionary<string, ParticlePreviewPlacement> _previewPlacementCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _particleLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _particleLiveOverrideKeysByScope = new(StringComparer.OrdinalIgnoreCase);
@@ -2162,6 +2169,7 @@ public class ParticleEffectsManager
         }
         catch (Exception exception)
         {
+            _diagnostics.Warning($"Particle reference model failed for {entry.Key}", exception.ToString());
             LoggerUtil.Verbose(_api, this, $"Particle reference model failed for '{entry.Key}': {exception.Message}");
         }
 
@@ -2746,6 +2754,7 @@ public class ParticleEffectsManager
         catch (Exception exception)
         {
             _previewStatus = $"Runtime tick preview failed for {runtimePreviewSource}: {exception.Message}; using emitter-list fallback.";
+            _diagnostics.Exception($"Runtime tick preview failed for {runtimePreviewSource}", exception);
             LoggerUtil.Verbose(_api, this, _previewStatus);
             return EmitPreviewParticles(emitters, intensity, GetPreviewParticleOrigin(selectedVariant.ReferenceKey));
         }
@@ -3226,6 +3235,7 @@ public class ParticleEffectsManager
         }
         catch (Exception exception)
         {
+            _diagnostics.Exception($"Spawn particles failed for {packet.Code}", exception);
             LoggerUtil.Error(_api, this, $"Error on spawning particles: {exception}");
             return;
         }

@@ -359,6 +359,7 @@ public sealed partial class DebugWindowManager
         {
             ImGui.TextWrapped(_vanillaStatus);
         }
+        _animationDiagnostics.Draw("vanilla-browser", _showEditorDiagnostics);
 
         ImGui.Separator();
         ImGui.TextDisabled($"Showing {rows.Count} / {_vanillaBrowserAllRows.Count} indexed animations");
@@ -1286,6 +1287,7 @@ public sealed partial class DebugWindowManager
         }
         else if (!string.IsNullOrWhiteSpace(previewSkipReason))
         {
+            _animationDiagnostics.Warning($"Preview skipped: {previewSkipReason}", $"Scene: {scene.Key}\nMode: {effectiveMode}\nSize: {viewportWidth:0}x{viewportHeight:0}");
             uint warning = ImGui.ColorConvertFloat4ToU32(new NVector4(0.95f, 0.72f, 0.43f, 1f));
             float skipY = string.IsNullOrWhiteSpace(ghostOverlayStatus) ? 54f : 70f;
             drawList.AddText(new NVector2(min.X + 12f, min.Y + skipY), warning, $"Preview skipped: {previewSkipReason}");
@@ -2763,6 +2765,7 @@ public sealed partial class DebugWindowManager
         {
             DisposeVanillaPreviewScene();
             _vanillaStatus = $"Preview failed for {row.Label}: {exception.Message}";
+            _animationDiagnostics.Exception($"Preview failed for {row.Label}", exception);
             LoggerUtil.Warn(_api, this, $"Vanilla preview failed for '{row.Label}' ({row.Key}): {exception}");
         }
     }

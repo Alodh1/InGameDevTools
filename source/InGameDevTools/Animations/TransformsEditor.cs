@@ -1078,6 +1078,7 @@ public sealed partial class DebugWindowManager
                 ImGui.SeparatorText("Status");
                 ImGui.TextWrapped(_transformsStatus);
             }
+            _transformDiagnostics.Draw("transforms-inspector", _showEditorDiagnostics);
         }
         finally
         {
@@ -1330,6 +1331,7 @@ public sealed partial class DebugWindowManager
         catch (Exception exception)
         {
             _transformsStatus = $"Transform preview failed: {exception.Message}";
+            _transformDiagnostics.Exception("Transform preview failed", exception);
         }
     }
 

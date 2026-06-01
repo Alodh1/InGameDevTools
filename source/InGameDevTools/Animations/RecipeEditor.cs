@@ -13,19 +13,21 @@ public sealed partial class DebugWindowManager
 {
     private readonly RecipeEditorState _recipeEditor = new();
 
-    private void RecipeEditorTab(float deltaSeconds)
+    private void RecipeEditorTab(float deltaSeconds, bool showDiagnostics)
     {
         ClearActiveTransformGizmo();
         try
         {
-            _recipeEditor.Draw(_api, _devToolsUiScale, _liveApplyManager);
+            _recipeEditor.Draw(_api, _devToolsUiScale, _liveApplyManager, showDiagnostics);
         }
         catch (Exception exception)
         {
             _api.Logger.Error("[InGameDevTools] Recipe editor draw failed: {0}", exception);
             _recipeEditor.SetStatus($"Recipe editor error: {exception.Message}");
+            _recipeEditor.Diagnostics.Exception("Recipe editor draw failed", exception);
             ImGui.TextWrapped("Recipe editor hit an error. The error was written to the client log.");
             ImGui.TextWrapped(exception.Message);
+            _recipeEditor.Diagnostics.Draw("recipe-outer", showDiagnostics);
         }
     }
 
@@ -84,15 +86,18 @@ public sealed partial class DebugWindowManager
         private readonly ImGuiThreePanelLayoutState _layout = new(0.24f, 0.30f);
         private readonly Dictionary<string, string> _stackCodeFilters = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _recipeLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
+        public DevToolsEditorDiagnostics Diagnostics { get; } = new("Recipes");
         private ICoreClientAPI? _api;
         private DevToolsLiveApplyManager? _liveApplyManager;
+        private bool _showDiagnostics;
 
-        public void Draw(ICoreClientAPI api, float uiScale, DevToolsLiveApplyManager? liveApplyManager)
+        public void Draw(ICoreClientAPI api, float uiScale, DevToolsLiveApplyManager? liveApplyManager, bool showDiagnostics)
         {
             try
             {
                 _api = api;
                 _liveApplyManager = liveApplyManager;
+                _showDiagnostics = showDiagnostics;
                 EnsureLoaded(api);
 
                 NVector2 available = ImGui.GetContentRegionAvail();
@@ -125,8 +130,10 @@ public sealed partial class DebugWindowManager
             catch (Exception exception)
             {
                 _status = $"Recipe editor error: {exception.Message}";
+                Diagnostics.Exception("Recipe editor failed", exception);
                 api.Logger.Error("[InGameDevTools] Recipe editor failed: {0}", exception);
                 ImGui.TextWrapped(_status);
+                Diagnostics.Draw("recipe-main", showDiagnostics);
             }
         }
 
@@ -189,6 +196,7 @@ public sealed partial class DebugWindowManager
                     catch (Exception exception)
                     {
                         _status = $"Skipped {asset.Location}: {exception.Message}";
+                        Diagnostics.Warning(_status, exception.ToString());
                     }
                 }
 
@@ -200,6 +208,7 @@ public sealed partial class DebugWindowManager
             {
                 _loaded = true;
                 _status = $"Recipe scan failed: {exception.Message}";
+                Diagnostics.Exception("Recipe scan failed", exception);
             }
         }
 
@@ -302,6 +311,7 @@ public sealed partial class DebugWindowManager
             catch (Exception exception)
             {
                 _status = $"Recipe browser error: {exception.Message}";
+                Diagnostics.Exception("Recipe browser failed", exception);
                 ImGui.TextWrapped(_status);
             }
             finally
@@ -343,6 +353,7 @@ public sealed partial class DebugWindowManager
             catch (Exception exception)
             {
                 _status = $"Recipe preview error: {exception.Message}";
+                Diagnostics.Exception("Recipe preview failed", exception);
                 ImGui.TextWrapped(_status);
             }
             finally
@@ -407,11 +418,14 @@ public sealed partial class DebugWindowManager
                     ImGui.SeparatorText("Status");
                     ImGui.TextWrapped(_status);
                 }
+                Diagnostics.Draw("recipe-inspector", _showDiagnostics);
             }
             catch (Exception exception)
             {
                 _status = $"Recipe inspector error: {exception.Message}";
+                Diagnostics.Exception("Recipe inspector failed", exception);
                 ImGui.TextWrapped(_status);
+                Diagnostics.Draw("recipe-inspector-error", _showDiagnostics);
             }
             finally
             {

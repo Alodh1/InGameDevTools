@@ -592,6 +592,9 @@ public sealed partial class DebugWindowManager : IDisposable
     private bool _drawSubscribed;
     private SourceAssetIndex? _sourceAssetIndex;
     private bool _fovReflectionWarningLogged;
+    private bool _showEditorDiagnostics;
+    private readonly DevToolsEditorDiagnostics _animationDiagnostics = new("Animations");
+    private readonly DevToolsEditorDiagnostics _transformDiagnostics = new("Transforms");
 
     private string _animationsFilter = "";
     private string _legacyTransformFilter = "";
@@ -781,14 +784,14 @@ public sealed partial class DebugWindowManager : IDisposable
                 if (ImGui.BeginTabItem("Recipe Editor##tab", ref recipeTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.RecipeEditor;
-                    RecipeEditorTab(deltaSeconds);
+                    RecipeEditorTab(deltaSeconds, _showEditorDiagnostics);
                     ImGui.EndTabItem();
                 }
                 bool particlesTabOpen = true;
                 if (ImGui.BeginTabItem("Particles##tab", ref particlesTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.Particles;
-                    _particleEffectsManager.DrawEditor("devtools-particles", deltaSeconds, _devToolsUiScale, _liveApplyManager);
+                    _particleEffectsManager.DrawEditor("devtools-particles", deltaSeconds, _devToolsUiScale, _liveApplyManager, _showEditorDiagnostics);
                     ImGui.EndTabItem();
                 }
                 bool transformsTabOpen = true;
@@ -862,6 +865,12 @@ public sealed partial class DebugWindowManager : IDisposable
         {
             _liveApplyManager.RevertAll();
             ClearLiveApplyState();
+        }
+        ImGui.SameLine();
+        ImGui.Checkbox("Diagnostics##devtools-diagnostics", ref _showEditorDiagnostics);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Show detailed editor diagnostic messages for caught exceptions and skipped previews.");
         }
 
         ImGui.Separator();
