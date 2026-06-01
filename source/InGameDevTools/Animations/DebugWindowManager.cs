@@ -617,6 +617,8 @@ public sealed partial class DebugWindowManager : IDisposable
         LootDrops
     }
 
+    private static readonly bool BlockItemJsonEditorVisible = false;
+
     private readonly AnimationEditorHistory _animationHistory = new();
     private TransformGizmoRenderer? _transformGizmoRenderer;
     private ImGuiAnimationViewportRenderer? _imguiAnimationViewportRenderer;
@@ -771,6 +773,10 @@ public sealed partial class DebugWindowManager : IDisposable
             ImGui.SetWindowFontScale(1f);
             DrawDevToolsToolbar();
             ImGui.SetWindowFontScale(_devToolsUiScale);
+            if (!BlockItemJsonEditorVisible && _activeDevToolsTab == DevToolsTab.BlockItemJson)
+            {
+                _activeDevToolsTab = DevToolsTab.Animations;
+            }
 
             if (ImGui.BeginTabBar($"##main_tab_bar"))
             {
@@ -805,7 +811,7 @@ public sealed partial class DebugWindowManager : IDisposable
                     ImGui.EndTabItem();
                 }
                 bool blockItemJsonTabOpen = true;
-                if (ImGui.BeginTabItem("Block/Item JSON##tab", ref blockItemJsonTabOpen))
+                if (BlockItemJsonEditorVisible && ImGui.BeginTabItem("Block/Item JSON##tab", ref blockItemJsonTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.BlockItemJson;
                     BlockItemJsonEditorTab(deltaSeconds, _showEditorDiagnostics);
@@ -939,7 +945,10 @@ public sealed partial class DebugWindowManager : IDisposable
                 ApplySelectedTransformLive(force);
                 break;
             case DevToolsTab.BlockItemJson:
-                ApplyBlockItemJsonRuntime(force);
+                if (BlockItemJsonEditorVisible)
+                {
+                    ApplyBlockItemJsonRuntime(force);
+                }
                 break;
             case DevToolsTab.LootDrops:
                 ApplyLootDropRuntime(force);
