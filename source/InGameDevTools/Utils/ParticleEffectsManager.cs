@@ -554,7 +554,8 @@ public class ParticleEffectsManager
         foreach (ParticleEffectFamily family in visibleFamilies)
         {
             bool selected = family.Key.Equals(_selectedParticleFamilyKey, StringComparison.OrdinalIgnoreCase);
-            if (ImGui.Selectable($"{family.DisplayKey}##particle-family-{family.Key}", selected))
+            string familyLabel = family.IsModified ? $"{family.DisplayKey} *" : family.DisplayKey;
+            if (ImGui.Selectable($"{familyLabel}##particle-family-{family.Key}", selected))
             {
                 SelectParticleFamily(family);
                 selectedFamily = family;
@@ -600,6 +601,7 @@ public class ParticleEffectsManager
         ImGui.BeginChild($"##particles-properties-{id}", new System.Numerics.Vector2(rightWidth, available.Y), true, ImGuiWindowFlags.HorizontalScrollbar);
         ImGui.SeparatorText("Values");
         DrawParticleEditScopeControls(id, selectedFamily, selectedVariant);
+        DrawParticleResetControls(id, selectedFamily, selectedVariant, _selectedParticleEmitterIndex, liveApplyManager);
         DrawParticleLiveControls(id, selectedFamily, selectedVariant, _selectedParticleEmitterIndex, liveApplyManager);
         if (selectedEmitter == null)
         {
@@ -650,10 +652,12 @@ public class ParticleEffectsManager
     private void DrawParticleVariantAndEmitterSelectors(string id, ParticleEffectFamily family, ref ParticleEffectVariant? selectedVariant)
     {
         ImGui.SeparatorText("Selected source");
-        ImGui.TextWrapped(family.DisplayKey);
-        ImGui.TextDisabled($"{family.Variants.Count} variant(s), {family.MaxEmitterCount} emitter slot(s)");
+        ImGui.TextWrapped(family.IsModified ? $"{family.DisplayKey} *" : family.DisplayKey);
+        ImGui.TextDisabled($"{family.Variants.Count} variant(s), {family.MaxEmitterCount} emitter slot(s), {family.ModifiedEmitterCount} modified emitter(s)");
 
-        string[] variantLabels = family.Variants.Select(variant => variant.DisplayKey).ToArray();
+        string[] variantLabels = family.Variants
+            .Select(variant => variant.IsModified ? $"{variant.DisplayKey} *" : variant.DisplayKey)
+            .ToArray();
         int variantIndex = Math.Max(0, family.Variants.FindIndex(variant => variant.Key.Equals(_selectedParticleVariantKey, StringComparison.OrdinalIgnoreCase)));
         ImGui.SetNextItemWidth(-1);
         if (variantLabels.Length > 0 && ImGui.Combo($"Variant##particle-variant-{id}", ref variantIndex, variantLabels, variantLabels.Length))
@@ -668,8 +672,10 @@ public class ParticleEffectsManager
         ImGui.SeparatorText("Emitters");
         for (int emitterIndex = 0; emitterIndex < family.MaxEmitterCount; emitterIndex++)
         {
-            bool hasEmitter = selectedVariant?.GetEmitter(emitterIndex) != null;
-            string label = hasEmitter ? $"ParticleProperties[{emitterIndex}]" : $"ParticleProperties[{emitterIndex}] missing";
+            ParticleEffectEntry? emitter = selectedVariant?.GetEmitter(emitterIndex);
+            bool hasEmitter = emitter != null;
+            string modifiedMarker = emitter?.IsModified == true ? " *" : "";
+            string label = hasEmitter ? $"ParticleProperties[{emitterIndex}]{modifiedMarker}" : $"ParticleProperties[{emitterIndex}] missing";
             if (ImGui.Selectable($"{label}##particle-emitter-{id}-{emitterIndex}", emitterIndex == _selectedParticleEmitterIndex))
             {
                 _selectedParticleEmitterIndex = emitterIndex;
@@ -690,6 +696,140 @@ public class ParticleEffectsManager
         ImGui.TextDisabled(groupEdit
             ? $"Editing all {family.Variants.Count} variants"
             : $"Editing only {variant.DisplayKey}");
+    }
+
+    private void DrawParticleResetControls(string id, ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
+    {
+        ImGui.SeparatorText("Original");
+        ImGui.TextDisabled($"{family.ModifiedEmitterCount} modified emitter(s) in family; {variant.ModifiedEmitterCount} in selected variant.");
+
+        bool emitterCanReset = GetParticleResetEmitterTargets(family, variant, emitterIndex, out _).Any(entry => entry.IsModified);
+        bool variantCanReset = variant.IsModified;
+        bool familyCanReset = family.IsModified;
+
+        if (!emitterCanReset) ImGui.BeginDisabled();
+        if (ImGui.Button($"Reset emitter##particle-reset-emitter-{id}"))
+        {
+            ResetParticleEmitterToOriginal(family, variant, emitterIndex, liveApplyManager);
+        }
+        if (!emitterCanReset) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (!variantCanReset) ImGui.BeginDisabled();
+        if (ImGui.Button($"Reset variant##particle-reset-variant-{id}"))
+        {
+            ResetParticleVariantToOriginal(family, variant, liveApplyManager);
+        }
+        if (!variantCanReset) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (!familyCanReset) ImGui.BeginDisabled();
+        if (ImGui.Button($"Reset family##particle-reset-family-{id}"))
+        {
+            ResetParticleFamilyToOriginal(family, variant, liveApplyManager);
+        }
+        if (!familyCanReset) ImGui.EndDisabled();
+    }
+
+    private List<ParticleEffectEntry> GetParticleResetEmitterTargets(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, out int skipped)
+    {
+        skipped = 0;
+        List<ParticleEffectEntry> targets = [];
+        if (_particleVariantOnlyEdit)
+        {
+            ParticleEffectEntry? entry = variant.GetEmitter(emitterIndex);
+            if (entry != null)
+            {
+                targets.Add(entry);
+            }
+            else
+            {
+                skipped++;
+            }
+
+            return targets;
+        }
+
+        foreach (ParticleEffectVariant targetVariant in family.Variants)
+        {
+            ParticleEffectEntry? entry = targetVariant.GetEmitter(emitterIndex);
+            if (entry != null)
+            {
+                targets.Add(entry);
+            }
+            else
+            {
+                skipped++;
+            }
+        }
+
+        return targets;
+    }
+
+    private void ResetParticleEmitterToOriginal(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
+    {
+        List<ParticleEffectEntry> targets = GetParticleResetEmitterTargets(family, variant, emitterIndex, out int skipped);
+        int reset = ResetParticleEntriesToOriginal(targets);
+        if (reset == 0)
+        {
+            _particleStatus = targets.Count == 0
+                ? $"No ParticleProperties[{emitterIndex}] emitter exists in the selected reset scope."
+                : $"ParticleProperties[{emitterIndex}] is already at its original value.";
+            return;
+        }
+
+        ClearParticleLiveHashesForEmitter(family, variant, emitterIndex);
+        ResetPreview(variant.ReferenceKey);
+        string runtimeStatus = ApplyParticleResetLiveEmitter(family, variant, emitterIndex, liveApplyManager);
+        _particleStatus = _particleVariantOnlyEdit
+            ? $"Reset ParticleProperties[{emitterIndex}] for {variant.DisplayKey}; {runtimeStatus}"
+            : $"Reset ParticleProperties[{emitterIndex}] for {reset} {family.DisplayKey} variant(s){(skipped > 0 ? $"; skipped {skipped} missing variant(s)" : "")}; {runtimeStatus}";
+    }
+
+    private void ResetParticleVariantToOriginal(ParticleEffectFamily family, ParticleEffectVariant variant, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
+    {
+        List<ParticleEffectEntry> targets = variant.EmittersWithParticles.ToList();
+        int reset = ResetParticleEntriesToOriginal(targets);
+        if (reset == 0)
+        {
+            _particleStatus = $"{variant.DisplayKey} is already at its original particle values.";
+            return;
+        }
+
+        ClearParticleLiveHashesForVariant(family, variant);
+        ResetPreview(variant.ReferenceKey);
+        string runtimeStatus = ApplyParticleResetLiveVariant(variant, liveApplyManager);
+        _particleStatus = $"Reset {reset} emitter(s) for {variant.DisplayKey}; {runtimeStatus}";
+    }
+
+    private void ResetParticleFamilyToOriginal(ParticleEffectFamily family, ParticleEffectVariant selectedVariant, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
+    {
+        List<ParticleEffectEntry> targets = family.Variants.SelectMany(variant => variant.EmittersWithParticles).ToList();
+        int reset = ResetParticleEntriesToOriginal(targets);
+        if (reset == 0)
+        {
+            _particleStatus = $"{family.DisplayKey} is already at its original particle values.";
+            return;
+        }
+
+        ClearParticleLiveHashesForFamily(family);
+        ResetPreview(selectedVariant.ReferenceKey);
+        string runtimeStatus = ApplyParticleResetLiveFamily(family, liveApplyManager);
+        _particleStatus = $"Reset {reset} emitter(s) for {family.DisplayKey}; {runtimeStatus}";
+    }
+
+    private static int ResetParticleEntriesToOriginal(IEnumerable<ParticleEffectEntry> entries)
+    {
+        int reset = 0;
+        foreach (ParticleEffectEntry entry in entries.Distinct())
+        {
+            if (!entry.IsModified) continue;
+
+            entry.ResetToOriginal();
+            reset++;
+        }
+
+        return reset;
     }
 
     private List<ParticleEffectFamily> BuildParticleFamilies()
@@ -904,13 +1044,32 @@ public class ParticleEffectsManager
     private string ApplySelectedParticleLive(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, DebugWindowManager.DevToolsLiveApplyManager liveApplyManager, bool force = false)
     {
         List<ParticleEffectEntry> targets = GetParticleLiveTargets(family, variant, emitterIndex).ToList();
+        string scopeKey = GetParticleLiveScopeKey(family, variant, emitterIndex);
+        return ApplyParticleLiveEntries(
+            scopeKey,
+            family.DisplayKey,
+            emitterIndex,
+            targets,
+            liveApplyManager,
+            force,
+            $"No runtime ParticleProperties[{emitterIndex}] target for {family.DisplayKey}.");
+    }
+
+    private string ApplyParticleLiveEntries(
+        string scopeKey,
+        string displayName,
+        int emitterIndex,
+        IReadOnlyCollection<ParticleEffectEntry> targets,
+        DebugWindowManager.DevToolsLiveApplyManager liveApplyManager,
+        bool force,
+        string noTargetsMessage)
+    {
         if (targets.Count == 0)
         {
-            liveApplyManager.LastStatus = $"No runtime ParticleProperties[{emitterIndex}] target for {family.DisplayKey}.";
+            liveApplyManager.LastStatus = noTargetsMessage;
             return liveApplyManager.LastStatus;
         }
 
-        string scopeKey = GetParticleLiveScopeKey(family, variant, emitterIndex);
         Dictionary<string, ParticleRuntimeTarget> runtimeTargets = new(StringComparer.OrdinalIgnoreCase);
         foreach (ParticleEffectEntry entry in targets)
         {
@@ -937,7 +1096,7 @@ public class ParticleEffectsManager
 
         string status = liveApplyManager.Apply(
             scopeKey,
-            family.DisplayKey,
+            displayName,
             () => CaptureParticleGroupLiveSnapshot(scopeKey, runtimeTargets.Values.Select(target => target.Collectible)),
             () =>
             {
@@ -947,7 +1106,7 @@ public class ParticleEffectsManager
                     TrackParticleRuntimeOverride(scopeKey, target);
                 }
             },
-            $"Applied ParticleProperties[{emitterIndex}] to {runtimeTargets.Count} {family.DisplayKey} variant(s).");
+            $"Applied ParticleProperties[{emitterIndex}] to {runtimeTargets.Count} {displayName} variant(s).");
         _particleLiveAppliedHashes[scopeKey] = desiredHash;
         return status;
     }
@@ -1030,8 +1189,122 @@ public class ParticleEffectsManager
     private string GetParticleLiveScopeKey(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex)
     {
         return _particleVariantOnlyEdit
-            ? $"particle:{variant.Key}:ParticleProperties[{emitterIndex}]"
-            : $"particle-family:{family.Key}:ParticleProperties[{emitterIndex}]";
+            ? GetParticleVariantLiveScopeKey(variant, emitterIndex)
+            : GetParticleFamilyLiveScopeKey(family, emitterIndex);
+    }
+
+    private static string GetParticleVariantLiveScopeKey(ParticleEffectVariant variant, int emitterIndex)
+    {
+        return $"particle:{variant.Key}:ParticleProperties[{emitterIndex}]";
+    }
+
+    private static string GetParticleFamilyLiveScopeKey(ParticleEffectFamily family, int emitterIndex)
+    {
+        return $"particle-family:{family.Key}:ParticleProperties[{emitterIndex}]";
+    }
+
+    private void ClearParticleLiveHashesForEmitter(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex)
+    {
+        _particleLiveAppliedHashes.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
+        foreach (ParticleEffectVariant memberVariant in family.Variants)
+        {
+            _particleLiveAppliedHashes.Remove(GetParticleVariantLiveScopeKey(memberVariant, emitterIndex));
+        }
+    }
+
+    private void ClearParticleLiveHashesForVariant(ParticleEffectFamily family, ParticleEffectVariant variant)
+    {
+        for (int emitterIndex = 0; emitterIndex < variant.EmitterCount; emitterIndex++)
+        {
+            _particleLiveAppliedHashes.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
+            _particleLiveAppliedHashes.Remove(GetParticleVariantLiveScopeKey(variant, emitterIndex));
+        }
+    }
+
+    private void ClearParticleLiveHashesForFamily(ParticleEffectFamily family)
+    {
+        for (int emitterIndex = 0; emitterIndex < family.MaxEmitterCount; emitterIndex++)
+        {
+            _particleLiveAppliedHashes.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
+            foreach (ParticleEffectVariant variant in family.Variants)
+            {
+                _particleLiveAppliedHashes.Remove(GetParticleVariantLiveScopeKey(variant, emitterIndex));
+            }
+        }
+    }
+
+    private string ApplyParticleResetLiveEmitter(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
+    {
+        if (liveApplyManager == null) return "runtime apply unavailable; runtime not updated.";
+        if (!liveApplyManager.AutoApply) return "runtime apply disabled; runtime not updated.";
+
+        List<ParticleEffectEntry> targets = GetParticleResetEmitterTargets(family, variant, emitterIndex, out _);
+        string scopeKey = _particleVariantOnlyEdit
+            ? GetParticleVariantLiveScopeKey(variant, emitterIndex)
+            : GetParticleFamilyLiveScopeKey(family, emitterIndex);
+        string displayName = _particleVariantOnlyEdit ? variant.DisplayKey : family.DisplayKey;
+        return ApplyParticleLiveEntries(
+            scopeKey,
+            displayName,
+            emitterIndex,
+            targets,
+            liveApplyManager,
+            force: true,
+            $"No runtime ParticleProperties[{emitterIndex}] target for {displayName}.");
+    }
+
+    private string ApplyParticleResetLiveVariant(ParticleEffectVariant variant, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
+    {
+        if (liveApplyManager == null) return "runtime apply unavailable; runtime not updated.";
+        if (!liveApplyManager.AutoApply) return "runtime apply disabled; runtime not updated.";
+
+        int applied = 0;
+        for (int emitterIndex = 0; emitterIndex < variant.EmitterCount; emitterIndex++)
+        {
+            ParticleEffectEntry? entry = variant.GetEmitter(emitterIndex);
+            if (entry == null) continue;
+
+            ApplyParticleLiveEntries(
+                GetParticleVariantLiveScopeKey(variant, emitterIndex),
+                variant.DisplayKey,
+                emitterIndex,
+                [entry],
+                liveApplyManager,
+                force: true,
+                $"No runtime ParticleProperties[{emitterIndex}] target for {variant.DisplayKey}.");
+            applied++;
+        }
+
+        return applied == 0 ? "runtime apply had no emitters to update." : $"runtime apply processed {applied} emitter slot(s).";
+    }
+
+    private string ApplyParticleResetLiveFamily(ParticleEffectFamily family, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
+    {
+        if (liveApplyManager == null) return "runtime apply unavailable; runtime not updated.";
+        if (!liveApplyManager.AutoApply) return "runtime apply disabled; runtime not updated.";
+
+        int applied = 0;
+        for (int emitterIndex = 0; emitterIndex < family.MaxEmitterCount; emitterIndex++)
+        {
+            List<ParticleEffectEntry> entries = family.Variants
+                .Select(variant => variant.GetEmitter(emitterIndex))
+                .Where(entry => entry != null)
+                .Cast<ParticleEffectEntry>()
+                .ToList();
+            if (entries.Count == 0) continue;
+
+            ApplyParticleLiveEntries(
+                GetParticleFamilyLiveScopeKey(family, emitterIndex),
+                family.DisplayKey,
+                emitterIndex,
+                entries,
+                liveApplyManager,
+                force: true,
+                $"No runtime ParticleProperties[{emitterIndex}] target for {family.DisplayKey}.");
+            applied++;
+        }
+
+        return applied == 0 ? "runtime apply had no emitters to update." : $"runtime apply processed {applied} emitter slot(s).";
     }
 
     private DebugWindowManager.LivePatchSnapshot CaptureParticleGroupLiveSnapshot(string targetKey, IEnumerable<CollectibleObject> collectibles)
@@ -1133,6 +1406,23 @@ public class ParticleEffectsManager
         };
 
         return JToken.FromObject(particleProperties, JsonSerializer.Create(settings));
+    }
+
+    private static AdvancedParticleProperties CloneNormalizedParticleProperties(AdvancedParticleProperties particleProperties)
+    {
+        AdvancedParticleProperties clone = particleProperties.Clone();
+        NormalizeParticleProperties(clone);
+        return clone;
+    }
+
+    private static JToken NormalizedParticlePropertiesToToken(AdvancedParticleProperties particleProperties)
+    {
+        return ParticlePropertiesToToken(CloneNormalizedParticleProperties(particleProperties));
+    }
+
+    private static bool ParticlePropertiesMatch(AdvancedParticleProperties left, AdvancedParticleProperties right)
+    {
+        return JToken.DeepEquals(NormalizedParticlePropertiesToToken(left), NormalizedParticlePropertiesToToken(right));
     }
 
     private static void ApplyParticleJsonDiff(JToken target, JToken before, JToken after)
@@ -1323,7 +1613,8 @@ public class ParticleEffectsManager
             Key = key;
             Source = source;
             SourceKind = sourceKind;
-            Properties = properties;
+            Properties = CloneNormalizedParticleProperties(properties);
+            OriginalProperties = CloneNormalizedParticleProperties(Properties);
             Domain = ImGuiLayoutHelper.GetDomainFromAssetCode(key);
             DisplayKey = ImGuiLayoutHelper.CompactAssetCode(key);
             SearchText = $"{key} {source} {SourceKindLabel}";
@@ -1336,6 +1627,8 @@ public class ParticleEffectsManager
         public string SearchText { get; }
         public ParticleEffectSourceKind SourceKind { get; }
         public AdvancedParticleProperties Properties { get; private set; }
+        public AdvancedParticleProperties OriginalProperties { get; }
+        public bool IsModified => !ParticlePropertiesMatch(Properties, OriginalProperties);
         public string SourceKindLabel => SourceKind switch
         {
             ParticleEffectSourceKind.NamedConfig => "Named config",
@@ -1346,7 +1639,12 @@ public class ParticleEffectsManager
 
         public void ReplaceProperties(AdvancedParticleProperties properties)
         {
-            Properties = properties;
+            Properties = CloneNormalizedParticleProperties(properties);
+        }
+
+        public void ResetToOriginal()
+        {
+            Properties = CloneNormalizedParticleProperties(OriginalProperties);
         }
     }
 
@@ -2421,6 +2719,8 @@ public class ParticleEffectsManager
         public string Tooltip { get; } = tooltip;
         public List<ParticleEffectVariant> Variants { get; } = variants;
         public int MaxEmitterCount { get; } = maxEmitterCount;
+        public int ModifiedEmitterCount => Variants.Sum(variant => variant.ModifiedEmitterCount);
+        public bool IsModified => ModifiedEmitterCount > 0;
     }
 
     private sealed class ParticleEffectVariant(
@@ -2445,6 +2745,8 @@ public class ParticleEffectsManager
         public string SearchText { get; } = searchText;
         public int EmitterCount => Emitters.Count;
         public IReadOnlyList<ParticleEffectEntry> EmittersWithParticles => Emitters.Where(entry => entry != null).Cast<ParticleEffectEntry>().ToList();
+        public int ModifiedEmitterCount => Emitters.Count(entry => entry?.IsModified == true);
+        public bool IsModified => ModifiedEmitterCount > 0;
 
         public ParticleEffectEntry? GetEmitter(int index)
         {
