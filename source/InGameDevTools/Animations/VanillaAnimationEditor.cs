@@ -85,7 +85,7 @@ public sealed partial class DebugWindowManager
     private bool _vanillaShowLiveSymmetryGhost = true;
     private float _vanillaLiveSymmetryGhostOpacity = 0.35f;
     private bool _vanillaIkFollowMove;
-    private bool _vanillaIkViewportPickMode = true;
+    private VanillaIkChainMode _vanillaIkMode = VanillaIkChainMode.AutoLimb;
     private readonly List<string> _vanillaIkChainElementNames = [];
     private bool _vanillaIkHasTarget;
     private float _vanillaIkTargetX;
@@ -1385,19 +1385,20 @@ public sealed partial class DebugWindowManager
 
         ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
         drawList.PushClipRect(min, max, true);
-        uint boundsColor = ContainsVanillaIkChainElement(hit.ElementName)
+        bool manualChainHit = _vanillaIkMode == VanillaIkChainMode.ManualOverride && ContainsVanillaIkChainElement(hit.ElementName);
+        uint boundsColor = manualChainHit
             ? ImGui.ColorConvertFloat4ToU32(new NVector4(0.42f, 0.86f, 1f, 0.95f))
             : ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.86f, 0.36f, 0.92f));
         uint labelColor = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.96f, 0.78f, 1f));
         DrawVanillaViewportBoxBounds(drawList, hit.BoundsCorners, boundsColor, 2.2f);
-        string action = _vanillaIkViewportPickMode ? "IK" : "select";
+        string action = _vanillaIkMode == VanillaIkChainMode.ManualOverride ? "manual IK" : "select";
         drawList.AddText(hit.Center + new NVector2(8f, -18f), labelColor, $"{hit.ElementName} ({action})");
         drawList.PopClipRect();
 
         if (suppressClick || !ImGui.IsMouseClicked(ImGuiMouseButton.Left)) return;
 
         _vanillaSelection.ElementName = hit.ElementName;
-        if (_vanillaIkViewportPickMode)
+        if (_vanillaIkMode == VanillaIkChainMode.ManualOverride)
         {
             ToggleVanillaIkChainElement(hit.ElementName);
         }
@@ -2996,21 +2997,25 @@ public sealed partial class DebugWindowManager
         {
             string elementName = elementNames[index];
             bool selected = string.Equals(elementName, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase);
-            bool inIkChain = ContainsVanillaIkChainElement(elementName);
+            bool inIkChain = _vanillaIkMode == VanillaIkChainMode.ManualOverride && ContainsVanillaIkChainElement(elementName);
             string label = inIkChain ? $"[IK] {elementName}##vanilla-element-{index}" : $"{elementName}##vanilla-element-{index}";
 
             if (ImGui.Selectable(label, selected))
             {
                 _vanillaSelection.ElementName = elementName;
-                if (io.KeyCtrl)
+                if (io.KeyCtrl && _vanillaIkMode == VanillaIkChainMode.ManualOverride)
                 {
                     ToggleVanillaIkChainElement(elementName);
+                }
+                else if (io.KeyCtrl)
+                {
+                    _vanillaStatus = "Manual IK chain editing is available in Manual override mode.";
                 }
             }
 
             if (inIkChain && ImGui.IsItemHovered())
             {
-                ImGui.SetTooltip("Selected for the manual IK chain. Ctrl+Click here or click the body part in the viewport to remove it.");
+                ImGui.SetTooltip("Selected for the manual IK chain. Switch to Manual override to edit this chain.");
             }
         }
 
@@ -3251,30 +3256,34 @@ public sealed partial class DebugWindowManager
         }
 
         PruneVanillaIkChainElements(allElements);
-        bool hasChain = TryGetManualVanillaIkChain(document.Shape, out VanillaIkManualChain chain, out string chainError, out string chainWarning);
+
+        if (ImGui.RadioButton("Auto limb##vanilla-ik-mode", _vanillaIkMode == VanillaIkChainMode.AutoLimb))
+        {
+            _vanillaIkMode = VanillaIkChainMode.AutoLimb;
+            _vanillaIkHasTarget = false;
+            ClearVanillaViewportGizmoDrag();
+            _vanillaStatus = "IK mode: auto limb. Select a paired limb part; torso/root ancestors are ignored.";
+        }
+
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Manual override##vanilla-ik-mode", _vanillaIkMode == VanillaIkChainMode.ManualOverride))
+        {
+            _vanillaIkMode = VanillaIkChainMode.ManualOverride;
+            _vanillaIkHasTarget = false;
+            ClearVanillaViewportGizmoDrag();
+            _vanillaStatus = "IK mode: manual override. Click body parts or Ctrl+Click elements to edit the chain.";
+        }
+
+        bool hasChain = TryGetActiveVanillaIkChain(document, entry.Animation, keyFrame, selectedElementName, out VanillaIkManualChain chain, out string chainError, out string chainWarning);
 
         if (ImGui.Checkbox("IK on Move##vanilla-ik-follow-move", ref _vanillaIkFollowMove))
         {
             _vanillaStatus = _vanillaIkFollowMove
-                ? "IK Move enabled. Select the end of a valid manual chain and drag the Move gizmo."
+                ? "IK Move enabled. Drag the Move gizmo on the active IK chain end."
                 : "IK Move disabled.";
         }
 
-        ImGui.SameLine();
-        bool viewportPick = _vanillaIkViewportPickMode;
-        if (ImGui.Checkbox("Viewport body-pick IK##vanilla-ik-viewport-pick", ref viewportPick))
-        {
-            _vanillaIkViewportPickMode = viewportPick;
-            _vanillaStatus = _vanillaIkViewportPickMode
-                ? "Viewport body-pick IK enabled. Click model body parts to add or remove chain bones."
-                : "Viewport body-pick IK disabled. Viewport clicks select body parts only.";
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("When enabled, left-click body parts in the Orbit preview to add/remove them in the manual IK chain.");
-        }
-
-        if (ImGui.Button("Clear IK chain##vanilla-ik-clear"))
+        if (_vanillaIkMode == VanillaIkChainMode.ManualOverride && ImGui.Button("Clear IK chain##vanilla-ik-clear"))
         {
             _vanillaIkChainElementNames.Clear();
             _vanillaIkHasTarget = false;
@@ -3284,7 +3293,9 @@ public sealed partial class DebugWindowManager
 
         if (hasChain)
         {
-            ImGui.TextDisabled($"Chain: {chain.DisplayName} -> distal end of {chain.EndElementName}");
+            ImGui.TextDisabled(_vanillaIkMode == VanillaIkChainMode.AutoLimb
+                ? $"Auto chain: {chain.DisplayName} -> distal end of {chain.EndElementName}"
+                : $"Manual chain: {chain.DisplayName} -> distal end of {chain.EndElementName}");
             if (!string.IsNullOrWhiteSpace(chainWarning))
             {
                 ImGui.TextColored(new NVector4(1f, 0.72f, 0.32f, 1f), chainWarning);
@@ -3292,7 +3303,7 @@ public sealed partial class DebugWindowManager
 
             if (!string.Equals(selectedElementName, chain.EndElementName, StringComparison.OrdinalIgnoreCase))
             {
-                ImGui.TextDisabled($"IK Move handle: select {chain.EndElementName} before dragging.");
+                ImGui.TextDisabled($"IK Move handle: {chain.EndElementName}.");
             }
         }
         else
@@ -3330,9 +3341,9 @@ public sealed partial class DebugWindowManager
             ImGui.TextDisabled("Set a target from the current end or edit target coordinates.");
         }
 
-        ImGui.TextDisabled(_vanillaIkViewportPickMode
-            ? "Orbit viewport: click body parts to build the IK chain. The list Ctrl+Click path still works."
-            : "Orbit viewport: click body parts to select them; Ctrl+Click in the element list still edits the IK chain.");
+        ImGui.TextDisabled(_vanillaIkMode == VanillaIkChainMode.AutoLimb
+            ? "Orbit viewport: click body parts to select them. IK automatically uses paired limb chains and ignores torso/root ancestors."
+            : "Manual override: click body parts or Ctrl+Click elements to add/remove IK chain bones.");
     }
 
     private void PruneVanillaIkChainElements(string[] allElements)
@@ -3347,6 +3358,91 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private bool TryGetActiveVanillaIkChain(
+        VanillaAnimationDocument document,
+        VanillaAnimation animation,
+        AnimationKeyFrame keyFrame,
+        string selectedElementName,
+        out VanillaIkManualChain chain,
+        out string error,
+        out string warning)
+    {
+        return _vanillaIkMode == VanillaIkChainMode.ManualOverride
+            ? TryGetManualVanillaIkChain(document.Shape, out chain, out error, out warning)
+            : TryGetAutoVanillaIkLimbChain(document, animation, keyFrame, selectedElementName, out chain, out error, out warning);
+    }
+
+    private bool TryGetAutoVanillaIkLimbChain(
+        VanillaAnimationDocument document,
+        VanillaAnimation animation,
+        AnimationKeyFrame keyFrame,
+        string selectedElementName,
+        out VanillaIkManualChain chain,
+        out string error,
+        out string warning)
+    {
+        chain = default;
+        error = "";
+        warning = "";
+
+        if (string.IsNullOrWhiteSpace(selectedElementName))
+        {
+            error = "Select a paired limb element for auto IK.";
+            return false;
+        }
+
+        Shape? shape = document.Shape;
+        if (shape?.Elements == null || shape.Elements.Length == 0)
+        {
+            error = "IK needs a loaded shape hierarchy.";
+            return false;
+        }
+
+        if (!TryFindShapeElementPath(shape, selectedElementName, out List<ShapeElement> path) || path.Count == 0)
+        {
+            error = $"IK element {selectedElementName} was not found in the shape hierarchy.";
+            return false;
+        }
+
+        string[] allElements = BuildVanillaSymmetryElementUniverse(document, animation, keyFrame);
+        int startIndex = -1;
+        for (int index = 0; index < path.Count; index++)
+        {
+            string elementName = path[index].Name ?? "";
+            if (string.IsNullOrWhiteSpace(elementName)) continue;
+            if (!TryResolveVanillaSymmetryPair(document, elementName, allElements, out _, out VanillaSymmetrySide sourceSide, out _)) continue;
+            if (sourceSide == VanillaSymmetrySide.Unknown) continue;
+
+            startIndex = index;
+            break;
+        }
+
+        if (startIndex < 0)
+        {
+            error = "No paired limb chain found; use Manual override.";
+            return false;
+        }
+
+        string[] orderedNames = path
+            .Skip(startIndex)
+            .Select(element => element.Name ?? "")
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToArray();
+        if (orderedNames.Length == 0)
+        {
+            error = "No paired limb chain found; use Manual override.";
+            return false;
+        }
+
+        if (startIndex == 0)
+        {
+            warning = "Auto chain starts at a root paired element; verify this is intended.";
+        }
+
+        chain = new VanillaIkManualChain(orderedNames, orderedNames[^1], string.Join(" -> ", orderedNames));
+        return true;
+    }
+
     private bool TryGetManualVanillaIkChain(Shape? shape, out VanillaIkManualChain chain, out string error, out string warning)
     {
         chain = default;
@@ -3355,7 +3451,7 @@ public sealed partial class DebugWindowManager
 
         if (_vanillaIkChainElementNames.Count == 0)
         {
-            error = "Click body parts in the Orbit viewport, or Ctrl+Click elements in the list, to build a manual IK chain.";
+            error = "Switch to Manual override, then click body parts or Ctrl+Click elements to build a manual IK chain.";
             return false;
         }
 
@@ -3391,7 +3487,7 @@ public sealed partial class DebugWindowManager
 
         if (nodes.Count == 0)
         {
-            error = "Click body parts in the Orbit viewport, or Ctrl+Click elements in the list, to build a manual IK chain.";
+            error = "Switch to Manual override, then click body parts or Ctrl+Click elements to build a manual IK chain.";
             return false;
         }
 
@@ -3766,7 +3862,7 @@ public sealed partial class DebugWindowManager
         int keyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, entry.Animation.KeyFrames.Length - 1);
         AnimationKeyFrame keyFrame = entry.Animation.KeyFrames[keyFrameIndex];
 
-        if (!TryGetManualVanillaIkChain(entry.Document.Shape, out VanillaIkManualChain chain, out string chainError, out _))
+        if (!TryGetActiveVanillaIkChain(entry.Document, entry.Animation, keyFrame, _vanillaSelection.ElementName, out VanillaIkManualChain chain, out string chainError, out _))
         {
             _vanillaStatus = chainError;
             return false;
@@ -5024,6 +5120,12 @@ public sealed partial class DebugWindowManager
         SelectedElement,
         LeftDrivesRight,
         RightDrivesLeft
+    }
+
+    private enum VanillaIkChainMode
+    {
+        AutoLimb,
+        ManualOverride
     }
 
     private readonly record struct VanillaSymmetryPairCandidate(string ElementName, VanillaSymmetrySide SourceSide);
