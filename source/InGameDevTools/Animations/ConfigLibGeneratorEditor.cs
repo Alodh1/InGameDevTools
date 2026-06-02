@@ -88,7 +88,7 @@ public sealed partial class DebugWindowManager
         if (!Directory.Exists(modConfigPath))
         {
             _configLibIndexed = true;
-            _configLibStatus = $"ModConfig folder not found: {modConfigPath}";
+            _configLibStatus = $"ModConfig folder not found: {modConfigPath}. Run the target mod once so it writes its ModConfig JSON, then reload.";
             return;
         }
 
@@ -175,7 +175,7 @@ public sealed partial class DebugWindowManager
         ImGui.TextDisabled($"{_visibleConfigLibSources.Count} / {_configLibSources.Count}");
         if (_visibleConfigLibSources.Count == 0)
         {
-            ImGui.TextDisabled("No JSON ModConfig files with editable values.");
+            DrawConfigLibEmptyStateHint();
             ImGui.EndChild();
             return;
         }
@@ -206,6 +206,21 @@ public sealed partial class DebugWindowManager
         ImGui.EndChild();
     }
 
+    private void DrawConfigLibEmptyStateHint()
+    {
+        string modConfigPath = Path.Combine(GetVintageStoryDataDirectory(), "ModConfig");
+        if (_configLibSources.Count == 0)
+        {
+            ImGui.TextWrapped($"No editable JSON ModConfig files were found in {modConfigPath}.");
+            ImGui.TextWrapped("Run the target mod once so it writes its ModConfig JSON, then press Reload.");
+            ImGui.TextWrapped("The generator can only infer ConfigLib settings from generated ModConfig files that already exist.");
+            return;
+        }
+
+        ImGui.TextWrapped("No configs match the current filter.");
+        ImGui.TextWrapped("Clear the filter, or run the target mod once so it writes its ModConfig JSON and press Reload.");
+    }
+
     private void DrawConfigLibSettingsPanel(NVector2 size)
     {
         ImGui.BeginChild("##configlib-settings", size, true);
@@ -213,6 +228,7 @@ public sealed partial class DebugWindowManager
         if (entry == null)
         {
             ImGui.TextDisabled("Select a ModConfig JSON file.");
+            DrawConfigLibEmptyStateHint();
             ImGui.EndChild();
             return;
         }
@@ -376,6 +392,7 @@ public sealed partial class DebugWindowManager
         if (entry == null)
         {
             ImGui.TextDisabled("No selected config file.");
+            DrawConfigLibEmptyStateHint();
             _configLibDiagnostics.Draw("configlib", showDiagnostics);
             ImGui.EndChild();
             return;
@@ -417,8 +434,12 @@ public sealed partial class DebugWindowManager
         string patchOutputPath = GetConfigLibPatchOutputPath(targetDomain);
         string modConfigOutputPath = GetConfigLibModConfigOutputPath(entry);
         ImGui.TextWrapped($"File: {entry.RelativeFilePath}");
-        ImGui.TextWrapped($"ConfigLib: {patchOutputPath}");
-        ImGui.TextWrapped($"ModConfig: {modConfigOutputPath}");
+        ImGui.TextWrapped("Authored outputs:");
+        ImGui.BulletText($"ConfigLib patch: assets/{targetDomain}/config/configlib-patches.json");
+        ImGui.BulletText($"ModConfig default: ModConfig/{entry.RelativeFilePath}");
+        ImGui.TextWrapped($"ConfigLib path: {patchOutputPath}");
+        ImGui.TextWrapped($"ModConfig path: {modConfigOutputPath}");
+        ImGui.TextWrapped("The ModConfig output is an authored default file. Saving it here does not overwrite the active VintagestoryData/ModConfig file.");
 
         ImGui.Checkbox("ModConfig included settings only##configlib-modconfig-included-only", ref _configLibModConfigIncludedOnly);
         if (ImGui.IsItemHovered())
@@ -523,10 +544,10 @@ public sealed partial class DebugWindowManager
             string oldText = BuildConfigLibBundlePreview(patchPath, File.Exists(patchPath) ? File.ReadAllText(patchPath) : "", modConfigPath, File.Exists(modConfigPath) ? File.ReadAllText(modConfigPath) : "");
             string newText = BuildConfigLibBundlePreview(patchPath, patchText, modConfigPath, modConfigText);
             SourceSaveRequest request = new(
-                patchPath,
+                $"ConfigLib bundle: {patchPath}; {modConfigPath}",
                 oldText,
                 newText,
-                $"Saved ConfigLib definition and ModConfig default for {entry.RelativeFilePath}.",
+                $"Saved ConfigLib definition to {patchPath} and ModConfig default to {modConfigPath}.",
                 () =>
                 {
                     WriteAuthoredFile(patchPath, patchText);
