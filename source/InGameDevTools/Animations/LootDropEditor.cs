@@ -21,6 +21,7 @@ public sealed partial class DebugWindowManager
     private readonly List<LootDropEntry> _lootDropEntries = [];
     private readonly List<LootDropEntry> _visibleLootDropEntries = [];
     private readonly List<LootDropDraft> _lootDropDrafts = [];
+    private readonly Dictionary<string, LootDropDraftState> _lootDropDraftStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Block> _lootDropIndexBlocks = [];
     private readonly List<EntityProperties> _lootDropIndexEntities = [];
     private readonly List<LootDropEntitySourceAsset> _lootDropIndexEntitySources = [];
@@ -45,6 +46,11 @@ public sealed partial class DebugWindowManager
     private string _lootDropTradeJson = "";
     private string _lootDropStatus = "";
     private string _lootDropLiveAppliedHash = "";
+    private string _lootDropCurrentJson = "";
+    private bool _lootDropDirtyCached;
+    private bool _lootDropDataValid;
+    private string _lootDropValidationStatus = "No loot/drop source loaded.";
+    private BlockDropItemStack[] _lootDropValidatedRuntimeDrops = [];
     private int _lootDropSimulationRuns = 1000;
     private string _lootDropSimulationText = "";
 
@@ -133,8 +139,14 @@ public sealed partial class DebugWindowManager
             _lootDropOriginalJson = "";
             _lootDropTradeJson = "";
             _lootDropLiveAppliedHash = "";
+            _lootDropCurrentJson = "";
+            _lootDropDirtyCached = false;
+            _lootDropDataValid = false;
+            _lootDropValidationStatus = "No loot/drop source loaded.";
+            _lootDropValidatedRuntimeDrops = [];
             _lootDropSimulationText = "";
             _lootDropDrafts.Clear();
+            _lootDropDraftStates.Clear();
             _lootDropSelectedDraftIndex = 0;
         }
 
@@ -302,6 +314,8 @@ public sealed partial class DebugWindowManager
     {
         string filter = _lootDropFilter.Trim();
         LootDropEntry? selected = SelectedLootDropEntry;
+        string loadedKey = _lootDropLoadedKey;
+        bool loadedDirty = _lootDropDirtyCached;
         _visibleLootDropEntries.Clear();
 
         foreach (LootDropEntry entry in _lootDropEntries)
@@ -310,7 +324,7 @@ public sealed partial class DebugWindowManager
             if (_lootDropKindFilter == 1 && entry.Kind != LootDropKind.BlockDrops) continue;
             if (_lootDropKindFilter == 2 && entry.Kind != LootDropKind.EntityDrops) continue;
             if (_lootDropKindFilter == 3 && entry.Kind != LootDropKind.TradeTable) continue;
-            if (_lootDropDirtyOnly && (!string.Equals(entry.Key, _lootDropLoadedKey, StringComparison.OrdinalIgnoreCase) || !IsLootDropDirty)) continue;
+            if (_lootDropDirtyOnly && !IsLootDropEntryDirty(entry, loadedKey, loadedDirty)) continue;
             if (!string.IsNullOrWhiteSpace(filter) && !entry.SearchText.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
             _visibleLootDropEntries.Add(entry);
         }
@@ -333,7 +347,13 @@ public sealed partial class DebugWindowManager
             ? null
             : _visibleLootDropEntries[Math.Clamp(_lootDropEntryIndex, 0, _visibleLootDropEntries.Count - 1)];
 
-    private bool IsLootDropDirty => !string.Equals(CurrentLootDropJson(), _lootDropOriginalJson, StringComparison.Ordinal);
+    private bool IsLootDropDirty => _lootDropDirtyCached;
+
+    private bool IsLootDropEntryDirty(LootDropEntry entry, string loadedKey, bool loadedDirty)
+    {
+        if (string.Equals(entry.Key, loadedKey, StringComparison.OrdinalIgnoreCase)) return loadedDirty;
+        return _lootDropDraftStates.TryGetValue(entry.Key, out LootDropDraftState? state) && state.IsDirty;
+    }
 
     private void DrawLootDropBrowser(NVector2 size)
     {
@@ -398,7 +418,7 @@ public sealed partial class DebugWindowManager
             {
                 LootDropEntry entry = _visibleLootDropEntries[index];
                 bool selected = index == _lootDropEntryIndex;
-                string marker = IsLootDropDirty && string.Equals(entry.Key, _lootDropLoadedKey, StringComparison.OrdinalIgnoreCase) ? "*" : "";
+                string marker = IsLootDropEntryDirty(entry, _lootDropLoadedKey, _lootDropDirtyCached) ? "*" : "";
                 if (ImGui.Selectable($"{marker}{entry.Label}##loot-drop-entry-{index}", selected))
                 {
                     _lootDropEntryIndex = index;
@@ -695,14 +715,16 @@ public sealed partial class DebugWindowManager
         }
 
         EnsureLootDropEntryLoaded(entry);
-        bool valid = entry.Kind == LootDropKind.TradeTable
-            ? TryParseJsonToken(_lootDropTradeJson) != null
-            : TryBuildRuntimeDrops(out _, out _);
+        bool valid = _lootDropDataValid;
 
         ImGui.SeparatorText("Status");
         ImGui.TextDisabled($"{entry.KindLabel}: {entry.Code}");
         ImGui.TextDisabled($"Domain: {entry.Domain}");
         ImGui.TextColored(valid ? new NVector4(0.42f, 0.85f, 0.42f, 1f) : new NVector4(1f, 0.38f, 0.32f, 1f), valid ? "Data valid" : "Data invalid");
+        if (!valid || !string.Equals(_lootDropValidationStatus, "Data valid", StringComparison.Ordinal))
+        {
+            ImGui.TextWrapped(_lootDropValidationStatus);
+        }
         ImGui.TextWrapped(entry.SourceAsset?.Location.ToString() ?? "Source asset: unresolved; save will create an authored override.");
         if (entry.Kind != LootDropKind.TradeTable && HasWeightedLootDrops(_lootDropDrafts))
         {
@@ -765,6 +787,7 @@ public sealed partial class DebugWindowManager
         if (ImGui.Button("Simulate drops##loot-drop-simulate"))
         {
             _lootDropSimulationText = SimulateLootDrops(_lootDropDrafts, _lootDropSimulationRuns);
+            SaveCurrentLootDropDraftState();
         }
 
         if (!string.IsNullOrWhiteSpace(_lootDropSimulationText))
@@ -781,14 +804,30 @@ public sealed partial class DebugWindowManager
 
     private void LoadLootDropEntry(LootDropEntry entry, bool keepDirty)
     {
-        if (keepDirty && IsLootDropDirty && !string.IsNullOrWhiteSpace(_lootDropLoadedKey)) return;
+        _ = keepDirty;
+        if (string.Equals(_lootDropLoadedKey, entry.Key, StringComparison.OrdinalIgnoreCase)) return;
+        SaveCurrentLootDropDraftState();
 
         try
         {
             _lootDropDrafts.Clear();
             _lootDropTradeJson = "";
             _lootDropSimulationText = "";
-            if (entry.Kind == LootDropKind.TradeTable)
+            _lootDropSelectedDraftIndex = 0;
+
+            if (_lootDropDraftStates.TryGetValue(entry.Key, out LootDropDraftState? retainedState))
+            {
+                foreach (LootDropDraft draft in retainedState.Drafts)
+                {
+                    _lootDropDrafts.Add(draft.Clone());
+                }
+
+                _lootDropTradeJson = retainedState.TradeJson;
+                _lootDropOriginalJson = retainedState.OriginalJson;
+                _lootDropSimulationText = retainedState.SimulationText;
+                _lootDropLiveAppliedHash = retainedState.LiveAppliedHash;
+            }
+            else if (entry.Kind == LootDropKind.TradeTable)
             {
                 _lootDropTradeJson = (entry.TradeToken?.DeepClone() ?? new JObject()).ToString(Formatting.Indented);
             }
@@ -801,10 +840,18 @@ public sealed partial class DebugWindowManager
             }
 
             _lootDropLoadedKey = entry.Key;
-            _lootDropOriginalJson = CurrentLootDropJson();
-            _lootDropSelectedDraftIndex = Math.Clamp(_lootDropSelectedDraftIndex, 0, Math.Max(0, _lootDropDrafts.Count - 1));
-            _lootDropLiveAppliedHash = "";
-            _lootDropStatus = HasWeightedLootDrops(_lootDropDrafts)
+            if (retainedState == null)
+            {
+                _lootDropOriginalJson = BuildCurrentLootDropJson(entry);
+                _lootDropLiveAppliedHash = "";
+            }
+
+            RefreshLootDropCachedState(entry);
+            _lootDropStatus = retainedState != null
+                ? retainedState.IsDirty
+                    ? $"Restored unsaved editor state for {entry.Label}."
+                    : $"Restored editor state for {entry.Label}."
+                : HasWeightedLootDrops(_lootDropDrafts)
                 ? $"Loaded {entry.Label}. Weighted drops are editable and preserved; simulation remains approximate."
                 : $"Loaded {entry.Label}.";
         }
@@ -813,6 +860,19 @@ public sealed partial class DebugWindowManager
             _lootDropDiagnostics.Exception($"Failed to load {entry.Label}", exception);
             _lootDropStatus = $"Failed to load {entry.Label}: {exception.Message}";
         }
+    }
+
+    private void SaveCurrentLootDropDraftState()
+    {
+        if (string.IsNullOrWhiteSpace(_lootDropLoadedKey)) return;
+
+        _lootDropDraftStates[_lootDropLoadedKey] = LootDropDraftState.Capture(
+            _lootDropDrafts,
+            _lootDropTradeJson,
+            _lootDropOriginalJson,
+            _lootDropSimulationText,
+            _lootDropLiveAppliedHash,
+            _lootDropCurrentJson);
     }
 
     private JArray BuildSourceDropArray(LootDropEntry entry)
@@ -898,13 +958,58 @@ public sealed partial class DebugWindowManager
 
     private string CurrentLootDropJson()
     {
-        LootDropEntry? entry = SelectedLootDropEntry;
+        return _lootDropCurrentJson;
+    }
+
+    private string BuildCurrentLootDropJson(LootDropEntry? entry)
+    {
         if (entry?.Kind == LootDropKind.TradeTable) return NormalizeJsonForHash(_lootDropTradeJson);
         return BuildDropDraftArray().ToString(Formatting.None);
     }
 
+    private void RefreshLootDropCachedState(LootDropEntry? entry = null)
+    {
+        entry ??= SelectedLootDropEntry;
+        _lootDropCurrentJson = BuildCurrentLootDropJson(entry);
+        _lootDropDirtyCached = !string.IsNullOrWhiteSpace(_lootDropLoadedKey) &&
+            !string.Equals(_lootDropCurrentJson, _lootDropOriginalJson, StringComparison.Ordinal);
+        _lootDropDataValid = false;
+        _lootDropValidatedRuntimeDrops = [];
+
+        if (entry == null)
+        {
+            _lootDropValidationStatus = "No loot/drop source loaded.";
+            return;
+        }
+
+        if (entry.Kind == LootDropKind.TradeTable)
+        {
+            _lootDropDataValid = TryParseJsonToken(_lootDropTradeJson) != null;
+            _lootDropValidationStatus = _lootDropDataValid ? "Data valid" : "Trade JSON is invalid.";
+            return;
+        }
+
+        if (!TryValidateLootDropDraftReferences(out string referenceError))
+        {
+            _lootDropValidationStatus = referenceError;
+            return;
+        }
+
+        if (!TryBuildRuntimeDropsFromDrafts(out BlockDropItemStack[] drops, out string error))
+        {
+            _lootDropValidationStatus = error;
+            return;
+        }
+
+        _lootDropValidatedRuntimeDrops = drops;
+        _lootDropDataValid = true;
+        _lootDropValidationStatus = "Data valid";
+    }
+
     private void OnLootDropDraftChanged()
     {
+        RefreshLootDropCachedState();
+        SaveCurrentLootDropDraftState();
         RebuildVisibleLootDropEntries();
         _lootDropStatus = "Loot/drop data edited.";
         if (_liveApplyManager.AutoApply)
@@ -930,14 +1035,16 @@ public sealed partial class DebugWindowManager
             return;
         }
 
-        if (!TryBuildRuntimeDrops(out BlockDropItemStack[] drops, out string error))
+        RefreshLootDropCachedState(entry);
+        if (!_lootDropDataValid)
         {
-            _lootDropStatus = $"Runtime apply skipped: {error}";
+            _lootDropStatus = $"Runtime apply skipped: {_lootDropValidationStatus}";
             _liveApplyManager.LastStatus = _lootDropStatus;
             return;
         }
 
-        string hash = BuildDropDraftArray().ToString(Formatting.None);
+        BlockDropItemStack[] drops = _lootDropValidatedRuntimeDrops.Select(drop => drop.Clone()).ToArray();
+        string hash = _lootDropCurrentJson;
         if (!force && string.Equals(_lootDropLiveAppliedHash, hash, StringComparison.Ordinal)) return;
 
         string key = GetLootDropLiveKey(entry);
@@ -948,9 +1055,10 @@ public sealed partial class DebugWindowManager
             () => ApplyRuntimeDrops(entry, drops),
             $"Live applied {drops.Length} drop row(s) for {entry.Label}.");
         _lootDropLiveAppliedHash = hash;
+        SaveCurrentLootDropDraftState();
     }
 
-    private bool TryBuildRuntimeDrops(out BlockDropItemStack[] drops, out string error)
+    private bool TryBuildRuntimeDropsFromDrafts(out BlockDropItemStack[] drops, out string error)
     {
         try
         {
@@ -972,6 +1080,93 @@ public sealed partial class DebugWindowManager
             drops = [];
             error = exception.Message;
             return false;
+        }
+    }
+
+    private bool TryValidateLootDropDraftReferences(out string error)
+    {
+        List<string> issues = [];
+        for (int index = 0; index < _lootDropDrafts.Count; index++)
+        {
+            LootDropDraft draft = _lootDropDrafts[index];
+            string code = draft.Code.Trim();
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                issues.Add($"Row {index}: drop code is blank.");
+                continue;
+            }
+
+            if (!Enum.TryParse(draft.Type, ignoreCase: true, out EnumItemClass itemClass))
+            {
+                issues.Add($"Row {index}: unknown drop type '{draft.Type}'.");
+                continue;
+            }
+
+            if (HasRuntimeResolvedLootDropCode(code)) continue;
+
+            if (itemClass == EnumItemClass.Block && ResolveLootDropBlock(code) == null)
+            {
+                issues.Add($"Row {index}: unresolved block '{code}'.");
+            }
+            else if (itemClass == EnumItemClass.Item && ResolveLootDropItem(code) == null)
+            {
+                issues.Add($"Row {index}: unresolved item '{code}'.");
+            }
+        }
+
+        if (issues.Count == 0)
+        {
+            error = "";
+            return true;
+        }
+
+        error = string.Join(Environment.NewLine, issues.Take(6));
+        if (issues.Count > 6) error += Environment.NewLine + $"...and {issues.Count - 6} more unresolved row(s).";
+        return false;
+    }
+
+    private static bool HasRuntimeResolvedLootDropCode(string code)
+    {
+        return code.Contains('*', StringComparison.Ordinal) ||
+            code.Contains('{', StringComparison.Ordinal) ||
+            code.Contains('}', StringComparison.Ordinal) ||
+            code.Contains('[', StringComparison.Ordinal) ||
+            code.Contains(']', StringComparison.Ordinal);
+    }
+
+    private Block? ResolveLootDropBlock(string code)
+    {
+        try
+        {
+            AssetLocation location = AssetLocation.Create(code, "game");
+            Block? block = _api.World.GetBlock(location);
+            if (block != null) return block;
+
+            return location.Domain.Equals("game", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : _api.World.GetBlock(new AssetLocation("game", location.Path));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private Item? ResolveLootDropItem(string code)
+    {
+        try
+        {
+            AssetLocation location = AssetLocation.Create(code, "game");
+            Item? item = _api.World.GetItem(location);
+            if (item != null) return item;
+
+            return location.Domain.Equals("game", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : _api.World.GetItem(new AssetLocation("game", location.Path));
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -1039,6 +1234,7 @@ public sealed partial class DebugWindowManager
             string outputPath = GetToolAuthoredAssetPath("loot-drops", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
             string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : sourceText;
             string newText = json.ToString(Formatting.Indented);
+            string savedJson = _lootDropCurrentJson;
             SourceSaveRequest request = new(
                 outputPath,
                 oldText,
@@ -1047,7 +1243,7 @@ public sealed partial class DebugWindowManager
                 () =>
                 {
                     string result = WriteAuthoredFile(outputPath, newText);
-                    _lootDropOriginalJson = CurrentLootDropJson();
+                    MarkLootDropEntrySaved(entry, savedJson);
                     RebuildVisibleLootDropEntries();
                     return result;
                 });
@@ -1057,6 +1253,22 @@ public sealed partial class DebugWindowManager
         {
             _lootDropDiagnostics.Exception($"Save failed for {entry.Label}", exception);
             return SourceSaveResult.Fail($"Save failed for {entry.Label}: {exception.Message}");
+        }
+    }
+
+    private void MarkLootDropEntrySaved(LootDropEntry entry, string savedJson)
+    {
+        if (string.Equals(_lootDropLoadedKey, entry.Key, StringComparison.OrdinalIgnoreCase))
+        {
+            _lootDropOriginalJson = savedJson;
+            RefreshLootDropCachedState(entry);
+            SaveCurrentLootDropDraftState();
+            return;
+        }
+
+        if (_lootDropDraftStates.TryGetValue(entry.Key, out LootDropDraftState? state))
+        {
+            _lootDropDraftStates[entry.Key] = state.WithOriginalJson(savedJson);
         }
     }
 
@@ -1643,6 +1855,49 @@ public sealed partial class DebugWindowManager
     private sealed record LootDropEntitySourceAsset(IAsset Asset, string SourceCode, JObject SourceJson);
 
     private sealed record LootDropVariantGroup(string Code, IReadOnlyList<string> States);
+
+    private sealed class LootDropDraftState
+    {
+        public List<LootDropDraft> Drafts { get; init; } = [];
+        public string TradeJson { get; init; } = "";
+        public string OriginalJson { get; init; } = "";
+        public string SimulationText { get; init; } = "";
+        public string LiveAppliedHash { get; init; } = "";
+        public string CurrentJson { get; init; } = "";
+        public bool IsDirty => !string.Equals(CurrentJson, OriginalJson, StringComparison.Ordinal);
+
+        public LootDropDraftState WithOriginalJson(string originalJson)
+        {
+            return new()
+            {
+                Drafts = Drafts.Select(draft => draft.Clone()).ToList(),
+                TradeJson = TradeJson,
+                OriginalJson = originalJson,
+                SimulationText = SimulationText,
+                LiveAppliedHash = LiveAppliedHash,
+                CurrentJson = CurrentJson
+            };
+        }
+
+        public static LootDropDraftState Capture(
+            IEnumerable<LootDropDraft> drafts,
+            string tradeJson,
+            string originalJson,
+            string simulationText,
+            string liveAppliedHash,
+            string currentJson)
+        {
+            return new()
+            {
+                Drafts = drafts.Select(draft => draft.Clone()).ToList(),
+                TradeJson = tradeJson,
+                OriginalJson = originalJson,
+                SimulationText = simulationText,
+                LiveAppliedHash = liveAppliedHash,
+                CurrentJson = currentJson
+            };
+        }
+    }
 
     private sealed class LootDropDraft
     {
