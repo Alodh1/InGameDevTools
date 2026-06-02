@@ -137,16 +137,28 @@ public sealed partial class DebugWindowManager
             _worldgenDraftStates.Clear();
         }
 
-        foreach (IAsset asset in _api.Assets.AllAssets.Values)
+        HashSet<string> indexedLocations = new(StringComparer.OrdinalIgnoreCase);
+        AddWorldgenIndexAssets(_api.Assets.GetManyInCategory("worldgen", ""), indexedLocations);
+        AddWorldgenIndexAssets(_api.Assets.AllAssets.Values.Where(IsWorldgenJsonAsset), indexedLocations);
+
+        _worldgenIndexAssets.Sort((left, right) => string.Compare(left.Location.ToString(), right.Location.ToString(), StringComparison.OrdinalIgnoreCase));
+        _worldgenStatus = BuildWorldgenIndexProgressText();
+    }
+
+    private void AddWorldgenIndexAssets(IEnumerable<IAsset> assets, HashSet<string> indexedLocations)
+    {
+        foreach (IAsset asset in assets)
         {
-            if (IsWorldgenJsonAsset(asset))
+            if (asset?.Location == null) continue;
+
+            string path = asset.Location.Path.Replace('\\', '/');
+            if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
+            string key = asset.Location.ToString();
+            if (indexedLocations.Add(key))
             {
                 _worldgenIndexAssets.Add(asset);
             }
         }
-
-        _worldgenIndexAssets.Sort((left, right) => string.Compare(left.Location.ToString(), right.Location.ToString(), StringComparison.OrdinalIgnoreCase));
-        _worldgenStatus = BuildWorldgenIndexProgressText();
     }
 
     private void ProcessWorldgenIndexBatch()
