@@ -80,28 +80,10 @@ public sealed partial class DebugWindowManager
     private float _worldgenPreviewZoom = 1f;
     private bool _worldgenPreviewInitialized;
     private ICoreServerAPI? _worldgenPreviewServerApi;
+    private GenMaps? _worldgenPreviewGenMaps;
     private string _worldgenPreviewServerStatus = "Singleplayer server API not checked.";
-    private double _worldgenPreviewMapSizeZ = 1024000d;
-    private int _worldgenPreviewPolarEquatorDistance = 50000;
-    private int _worldgenPreviewSpawnMinTemp = -20;
-    private int _worldgenPreviewSpawnMaxTemp = 30;
-    private NoiseClimate? _worldgenPreviewClimateNoise;
-    private long _worldgenPreviewClimateSeed = long.MinValue;
-    private double _worldgenPreviewClimateMapSizeZ;
-    private int _worldgenPreviewClimatePolarEquatorDistance;
-    private int _worldgenPreviewClimateSpawnMinTemp;
-    private int _worldgenPreviewClimateSpawnMaxTemp;
-    private int _worldgenPreviewMapLayerScale = 3;
-    private float _worldgenPreviewOceanLandcover = 1f;
-    private float _worldgenPreviewOceanScaleMultiplier = 1f;
     private MapLayerBase? _worldgenPreviewMapLayer;
     private int _worldgenPreviewMapLayerMode = -1;
-    private long _worldgenPreviewMapLayerSeed = long.MinValue;
-    private int _worldgenPreviewMapLayerScaleCache;
-    private float _worldgenPreviewMapLayerOceanLandcoverCache;
-    private float _worldgenPreviewMapLayerOceanScaleMultiplierCache;
-    private int _worldgenPreviewMapLayerOriginXCache;
-    private int _worldgenPreviewMapLayerOriginZCache;
     private string _worldgenPreviewMapLayerStatus = "";
     private WorldgenPreviewRasterCacheKey? _worldgenPreviewRasterCacheKey;
     private uint[]? _worldgenPreviewRasterCache;
@@ -875,15 +857,13 @@ public sealed partial class DebugWindowManager
         int hoverZ = (int)MathF.Floor(centerZ + (mouse.Y - (min.Y + actual.Y * 0.5f)) / pixelsPerBlock);
         string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
         string hoverDetails = BuildWorldgenPreviewHoverText(_worldgenPreviewMode, seed, hoverX, hoverZ);
-        string modeStatus = _worldgenPreviewMode == WorldgenPreviewModeClimate
-            ? $"{modeLabel}: engine NoiseClimateRealistic"
-            : WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
-                ? $"{modeLabel}: engine GenMaps layer"
+        string modeStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
+            ? $"{modeLabel}: live server {GetWorldgenPreviewMapLayerFieldName(_worldgenPreviewMode)}"
+            : _worldgenPreviewMode == WorldgenPreviewModeClimate
+                ? $"{modeLabel}: live server climateGen"
                 : $"{modeLabel}: viewport host";
-        string inputStatus = _worldgenPreviewMode == WorldgenPreviewModeClimate
-            ? "RMB/MMB pans. Mouse wheel zooms. Sampling GetClimateAt."
-            : WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
-                ? "RMB/MMB pans. Mouse wheel zooms. Sampling MapLayerBase.GenLayer."
+        string inputStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
+            ? "RMB/MMB pans. Mouse wheel zooms. Sampling live MapLayerBase.GenLayer."
                 : "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.";
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, inputStatus);
@@ -901,66 +881,12 @@ public sealed partial class DebugWindowManager
 
     private void DrawWorldgenClimatePreviewControls()
     {
-        ImGui.SetNextItemWidth(-float.Epsilon);
-        float mapSizeZ = (float)_worldgenPreviewMapSizeZ;
-        if (ImGui.InputFloat("Map size Z##worldgen-preview-map-size-z", ref mapSizeZ, 1000f, 10000f, "%.0f"))
-        {
-            _worldgenPreviewMapSizeZ = Math.Max(1d, mapSizeZ);
-            _worldgenPreviewClimateNoise = null;
-            InvalidateWorldgenPreviewRasterCache();
-        }
-
-        float halfWidth = Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.48f);
-        ImGui.PushItemWidth(halfWidth);
-        if (ImGui.InputInt("Polar eq dist##worldgen-preview-polar-dist", ref _worldgenPreviewPolarEquatorDistance))
-        {
-            _worldgenPreviewPolarEquatorDistance = Math.Max(1, _worldgenPreviewPolarEquatorDistance);
-            _worldgenPreviewClimateNoise = null;
-            InvalidateWorldgenPreviewRasterCache();
-        }
-        ImGui.SameLine();
-        if (ImGui.InputInt("Spawn min C##worldgen-preview-spawn-min-temp", ref _worldgenPreviewSpawnMinTemp))
-        {
-            _worldgenPreviewClimateNoise = null;
-            InvalidateWorldgenPreviewRasterCache();
-        }
-        if (ImGui.InputInt("Spawn max C##worldgen-preview-spawn-max-temp", ref _worldgenPreviewSpawnMaxTemp))
-        {
-            _worldgenPreviewClimateNoise = null;
-            InvalidateWorldgenPreviewRasterCache();
-        }
-        ImGui.PopItemWidth();
+        ImGui.TextDisabled("Using the running server's climateGen layer; climate scale comes from the active world config.");
     }
 
     private void DrawWorldgenMapLayerPreviewControls()
     {
-        ImGui.SetNextItemWidth(-float.Epsilon);
-        if (ImGui.InputInt("Map scale##worldgen-preview-map-layer-scale", ref _worldgenPreviewMapLayerScale))
-        {
-            _worldgenPreviewMapLayerScale = Math.Max(1, _worldgenPreviewMapLayerScale);
-            _worldgenPreviewMapLayer = null;
-            InvalidateWorldgenPreviewRasterCache();
-        }
-
-        if (_worldgenPreviewMode == WorldgenPreviewModeOcean)
-        {
-            float halfWidth = Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.48f);
-            ImGui.PushItemWidth(halfWidth);
-            if (ImGui.InputFloat("Landcover##worldgen-preview-ocean-landcover", ref _worldgenPreviewOceanLandcover, 0.05f, 0.2f, "%.2f"))
-            {
-                _worldgenPreviewOceanLandcover = Math.Clamp(_worldgenPreviewOceanLandcover, 0.01f, 1f);
-                _worldgenPreviewMapLayer = null;
-                InvalidateWorldgenPreviewRasterCache();
-            }
-            ImGui.SameLine();
-            if (ImGui.InputFloat("Scale mul##worldgen-preview-ocean-scale-mul", ref _worldgenPreviewOceanScaleMultiplier, 0.05f, 0.2f, "%.2f"))
-            {
-                _worldgenPreviewOceanScaleMultiplier = Math.Max(0.01f, _worldgenPreviewOceanScaleMultiplier);
-                _worldgenPreviewMapLayer = null;
-                InvalidateWorldgenPreviewRasterCache();
-            }
-            ImGui.PopItemWidth();
-        }
+        ImGui.TextDisabled("Using the running server's initialized GenMaps layer; map scale comes from the active world config.");
     }
 
     private void EnsureWorldgenPreviewDefaults()
@@ -1106,52 +1032,21 @@ public sealed partial class DebugWindowManager
             : 0L;
     }
 
-    private NoiseClimate? GetWorldgenPreviewClimateNoise(long seed)
-    {
-        if (_worldgenPreviewClimateNoise != null &&
-            _worldgenPreviewClimateSeed == seed &&
-            Math.Abs(_worldgenPreviewClimateMapSizeZ - _worldgenPreviewMapSizeZ) < 0.001d &&
-            _worldgenPreviewClimatePolarEquatorDistance == _worldgenPreviewPolarEquatorDistance &&
-            _worldgenPreviewClimateSpawnMinTemp == _worldgenPreviewSpawnMinTemp &&
-            _worldgenPreviewClimateSpawnMaxTemp == _worldgenPreviewSpawnMaxTemp)
-        {
-            return _worldgenPreviewClimateNoise;
-        }
-
-        try
-        {
-            _worldgenPreviewClimateNoise = new NoiseClimateRealistic(
-                seed,
-                _worldgenPreviewMapSizeZ,
-                _worldgenPreviewPolarEquatorDistance,
-                _worldgenPreviewSpawnMinTemp,
-                _worldgenPreviewSpawnMaxTemp);
-            _worldgenPreviewClimateSeed = seed;
-            _worldgenPreviewClimateMapSizeZ = _worldgenPreviewMapSizeZ;
-            _worldgenPreviewClimatePolarEquatorDistance = _worldgenPreviewPolarEquatorDistance;
-            _worldgenPreviewClimateSpawnMinTemp = _worldgenPreviewSpawnMinTemp;
-            _worldgenPreviewClimateSpawnMaxTemp = _worldgenPreviewSpawnMaxTemp;
-            return _worldgenPreviewClimateNoise;
-        }
-        catch (Exception exception)
-        {
-            _worldgenPreviewClimateNoise = null;
-            _worldgenDiagnostics.Exception("Worldgen climate preview failed to construct NoiseClimateRealistic", exception);
-            return null;
-        }
-    }
-
     private string BuildWorldgenPreviewHoverText(int mode, long seed, int blockX, int blockZ)
     {
+        _ = seed;
+
         if (WorldgenPreviewModeUsesMapLayer(mode))
         {
-            MapLayerBase? layer = GetWorldgenPreviewMapLayer(mode, seed);
+            MapLayerBase? layer = GetWorldgenPreviewMapLayer(mode);
             if (layer == null) return _worldgenPreviewMapLayerStatus;
 
             try
             {
                 int value = layer.GenLayer(blockX, blockZ, 1, 1)[0];
-                return $"{WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)]} value: {value}";
+                return mode == WorldgenPreviewModeClimate
+                    ? FormatWorldgenClimateMapValue(value)
+                    : $"{WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)]} value: {value}";
             }
             catch (Exception exception)
             {
@@ -1162,80 +1057,105 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        if (mode != 1) return "";
-
-        NoiseClimate? climate = GetWorldgenPreviewClimateNoise(seed);
-        if (climate == null) return "Climate: unavailable";
-
-        try
-        {
-            int packed = climate.GetClimateAt(blockX, blockZ);
-            int temp = (packed >> 16) & 0xff;
-            int rain = (packed >> 8) & 0xff;
-            int aux = packed & 0xff;
-            return $"Climate packed: temp {temp}, rain {rain}, aux {aux}";
-        }
-        catch (Exception exception)
-        {
-            _worldgenDiagnostics.Exception("Worldgen climate hover sample failed", exception);
-            return "Climate: sample failed";
-        }
+        return "";
     }
 
-    private MapLayerBase? GetWorldgenPreviewMapLayer(int mode, long seed)
+    private MapLayerBase? GetWorldgenPreviewMapLayer(int mode)
     {
         if (_worldgenPreviewMapLayer != null &&
-            _worldgenPreviewMapLayerMode == mode &&
-            _worldgenPreviewMapLayerSeed == seed &&
-            _worldgenPreviewMapLayerScaleCache == _worldgenPreviewMapLayerScale &&
-            Math.Abs(_worldgenPreviewMapLayerOceanLandcoverCache - _worldgenPreviewOceanLandcover) < 0.001f &&
-            Math.Abs(_worldgenPreviewMapLayerOceanScaleMultiplierCache - _worldgenPreviewOceanScaleMultiplier) < 0.001f &&
-            _worldgenPreviewMapLayerOriginXCache == _worldgenPreviewOriginX &&
-            _worldgenPreviewMapLayerOriginZCache == _worldgenPreviewOriginZ)
+            _worldgenPreviewMapLayerMode == mode)
         {
             return _worldgenPreviewMapLayer;
         }
 
         try
         {
+            GenMaps? genMaps = GetWorldgenPreviewGenMaps();
+            if (genMaps == null)
+            {
+                _worldgenPreviewMapLayer = null;
+                _worldgenPreviewMapLayerMode = mode;
+                _worldgenPreviewMapLayerStatus = "Live GenMaps unavailable; open a singleplayer world and press Refresh SP.";
+                return null;
+            }
+
             _worldgenPreviewMapLayer = mode switch
             {
-                WorldgenPreviewModeForest => GenMaps.GetForestMapGen(seed, _worldgenPreviewMapLayerScale),
-                WorldgenPreviewModeUpheaval => GenMaps.GetGeoUpheavelMapGen(seed, _worldgenPreviewMapLayerScale),
-                WorldgenPreviewModeOcean => GenMaps.GetOceanMapGen(
-                    seed,
-                    _worldgenPreviewOceanLandcover,
-                    _worldgenPreviewMapLayerScale,
-                    _worldgenPreviewOceanScaleMultiplier,
-                    [new XZ(_worldgenPreviewOriginX, _worldgenPreviewOriginZ)],
-                    false),
+                WorldgenPreviewModeClimate => genMaps.climateGen,
+                WorldgenPreviewModeForest => genMaps.forestGen,
+                WorldgenPreviewModeUpheaval => genMaps.upheavelGen,
+                WorldgenPreviewModeOcean => genMaps.oceanGen,
+                WorldgenPreviewModeLandform => genMaps.landformsGen,
+                WorldgenPreviewModeProvince => genMaps.geologicprovinceGen,
                 _ => null
             };
             _worldgenPreviewMapLayerMode = mode;
-            _worldgenPreviewMapLayerSeed = seed;
-            _worldgenPreviewMapLayerScaleCache = _worldgenPreviewMapLayerScale;
-            _worldgenPreviewMapLayerOceanLandcoverCache = _worldgenPreviewOceanLandcover;
-            _worldgenPreviewMapLayerOceanScaleMultiplierCache = _worldgenPreviewOceanScaleMultiplier;
-            _worldgenPreviewMapLayerOriginXCache = _worldgenPreviewOriginX;
-            _worldgenPreviewMapLayerOriginZCache = _worldgenPreviewOriginZ;
             _worldgenPreviewMapLayerStatus = _worldgenPreviewMapLayer == null
-                ? "Map layer mode has no standalone renderer yet."
-                : $"{WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)]}: engine GenMaps layer.";
+                ? "Map layer mode has no live GenMaps layer yet."
+                : $"{WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)]}: live GenMaps.{GetWorldgenPreviewMapLayerFieldName(mode)}.";
             return _worldgenPreviewMapLayer;
         }
         catch (Exception exception)
         {
             _worldgenPreviewMapLayer = null;
-            _worldgenPreviewMapLayerStatus = $"{WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)]} layer unavailable: {exception.Message}";
+            _worldgenPreviewMapLayerStatus = $"{WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)]} live layer unavailable: {exception.Message}";
             _worldgenDiagnostics.Exception("Worldgen map layer construction failed", exception);
             return null;
         }
+    }
+
+    private GenMaps? GetWorldgenPreviewGenMaps()
+    {
+        if (_worldgenPreviewGenMaps != null) return _worldgenPreviewGenMaps;
+        if (_worldgenPreviewServerApi == null) return null;
+
+        try
+        {
+            _worldgenPreviewGenMaps = _worldgenPreviewServerApi.ModLoader.GetModSystem<GenMaps>();
+            return _worldgenPreviewGenMaps;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen GenMaps lookup failed", exception);
+            return null;
+        }
+    }
+
+    private static string GetWorldgenPreviewMapLayerFieldName(int mode)
+    {
+        return mode switch
+        {
+            WorldgenPreviewModeClimate => "climateGen",
+            WorldgenPreviewModeForest => "forestGen",
+            WorldgenPreviewModeUpheaval => "upheavelGen",
+            WorldgenPreviewModeOcean => "oceanGen",
+            WorldgenPreviewModeLandform => "landformsGen",
+            WorldgenPreviewModeProvince => "geologicprovinceGen",
+            _ => "unknown"
+        };
+    }
+
+    private static string FormatWorldgenClimateMapValue(int value)
+    {
+        if ((value & ~0xff) == 0)
+        {
+            return $"Climate value: {value}";
+        }
+
+        int temp = (value >> 16) & 0xff;
+        int rain = (value >> 8) & 0xff;
+        int aux = value & 0xff;
+        return $"Climate packed: temp {temp}, rain {rain}, aux {aux}";
     }
 
     private void RefreshWorldgenServerApi()
     {
         try
         {
+            _worldgenPreviewGenMaps = null;
+            _worldgenPreviewMapLayer = null;
+            InvalidateWorldgenPreviewRasterCache();
+
             if (TryFindWorldgenServerApi(out ICoreServerAPI? serverApi, out string source))
             {
                 _worldgenPreviewServerApi = serverApi;
@@ -1425,12 +1345,17 @@ public sealed partial class DebugWindowManager
 
     private static bool WorldgenPreviewModeUsesMapLayer(int mode)
     {
-        return mode is WorldgenPreviewModeForest or WorldgenPreviewModeUpheaval or WorldgenPreviewModeOcean;
+        return mode is WorldgenPreviewModeClimate or
+            WorldgenPreviewModeForest or
+            WorldgenPreviewModeUpheaval or
+            WorldgenPreviewModeOcean or
+            WorldgenPreviewModeLandform or
+            WorldgenPreviewModeProvince;
     }
 
     private static bool WorldgenPreviewModeRequiresServer(int mode)
     {
-        return mode is WorldgenPreviewModeLandform or WorldgenPreviewModeProvince or WorldgenPreviewModeOre or WorldgenPreviewModeRegion3D;
+        return mode != WorldgenPreviewModeGradient;
     }
 
     private static void DrawWorldgenPreviewUnavailable(
@@ -1508,8 +1433,6 @@ public sealed partial class DebugWindowManager
         int sampleStartZ = (int)MathF.Floor(centerZ - halfHeightBlocks);
         int sampleEndX = (int)MathF.Ceiling(centerX + halfWidthBlocks);
         int sampleEndZ = (int)MathF.Ceiling(centerZ + halfHeightBlocks);
-        int oceanLandcoverKey = (int)MathF.Round(_worldgenPreviewOceanLandcover * 1000f);
-        int oceanScaleMultiplierKey = (int)MathF.Round(_worldgenPreviewOceanScaleMultiplier * 1000f);
         WorldgenPreviewRasterCacheKey key = new(
             _worldgenPreviewMode,
             seed,
@@ -1518,14 +1441,7 @@ public sealed partial class DebugWindowManager
             sampleEndX,
             sampleEndZ,
             cellsX,
-            cellsZ,
-            _worldgenPreviewMapLayerScale,
-            oceanLandcoverKey,
-            oceanScaleMultiplierKey,
-            (int)Math.Round(_worldgenPreviewMapSizeZ),
-            _worldgenPreviewPolarEquatorDistance,
-            _worldgenPreviewSpawnMinTemp,
-            _worldgenPreviewSpawnMaxTemp);
+            cellsZ);
 
         if (_worldgenPreviewRasterCache != null &&
             _worldgenPreviewRasterCacheKey == key &&
@@ -1539,7 +1455,7 @@ public sealed partial class DebugWindowManager
         colors = new uint[cellsX * cellsZ];
         if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
-            if (!TryBuildWorldgenMapLayerRaster(seed, sampleStartX, sampleStartZ, cellsX, cellsZ, colors, out error))
+            if (!TryBuildWorldgenMapLayerRaster(centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
             {
                 colors = null;
                 return false;
@@ -1547,16 +1463,13 @@ public sealed partial class DebugWindowManager
         }
         else
         {
-            NoiseClimate? climate = _worldgenPreviewMode == WorldgenPreviewModeClimate ? GetWorldgenPreviewClimateNoise(seed) : null;
             for (int z = 0; z < cellsZ; z++)
             {
                 float worldZ = centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ);
                 for (int x = 0; x < cellsX; x++)
                 {
                     float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
-                    colors[z * cellsX + x] = climate == null
-                        ? BuildWorldgenPreviewColor(seed, worldX, worldZ, _worldgenPreviewMode)
-                        : BuildWorldgenClimatePreviewColor(climate, (int)MathF.Floor(worldX), (int)MathF.Floor(worldZ));
+                    colors[z * cellsX + x] = BuildWorldgenPreviewColor(seed, worldX, worldZ, _worldgenPreviewMode);
                 }
             }
         }
@@ -1568,9 +1481,17 @@ public sealed partial class DebugWindowManager
         return true;
     }
 
-    private bool TryBuildWorldgenMapLayerRaster(long seed, int startX, int startZ, int cellsX, int cellsZ, uint[] colors, out string error)
+    private bool TryBuildWorldgenMapLayerRaster(
+        float centerX,
+        float centerZ,
+        float halfWidthBlocks,
+        float halfHeightBlocks,
+        int cellsX,
+        int cellsZ,
+        uint[] colors,
+        out string error)
     {
-        MapLayerBase? mapLayer = GetWorldgenPreviewMapLayer(_worldgenPreviewMode, seed);
+        MapLayerBase? mapLayer = GetWorldgenPreviewMapLayer(_worldgenPreviewMode);
         if (mapLayer == null)
         {
             error = string.IsNullOrWhiteSpace(_worldgenPreviewMapLayerStatus) ? "Map layer unavailable." : _worldgenPreviewMapLayerStatus;
@@ -1579,10 +1500,15 @@ public sealed partial class DebugWindowManager
 
         try
         {
-            int[] mapValues = mapLayer.GenLayer(startX, startZ, cellsX, cellsZ);
-            for (int i = 0; i < colors.Length; i++)
+            for (int z = 0; z < cellsZ; z++)
             {
-                colors[i] = BuildWorldgenMapLayerPreviewColor(_worldgenPreviewMode, mapValues[i]);
+                int worldZ = (int)MathF.Floor(centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ));
+                for (int x = 0; x < cellsX; x++)
+                {
+                    int worldX = (int)MathF.Floor(centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX));
+                    int value = mapLayer.GenLayer(worldX, worldZ, 1, 1)[0];
+                    colors[z * cellsX + x] = BuildWorldgenMapLayerPreviewColor(_worldgenPreviewMode, value);
+                }
             }
             error = "";
             return true;
@@ -1609,6 +1535,7 @@ public sealed partial class DebugWindowManager
         float normalized = Math.Clamp(value / 255f, 0f, 1f);
         NVector4 color = mode switch
         {
+            WorldgenPreviewModeClimate => BuildWorldgenClimateMapLayerColor(value),
             WorldgenPreviewModeForest => new NVector4(0.04f + normalized * 0.14f, 0.16f + normalized * 0.66f, 0.07f + normalized * 0.18f, 1f),
             WorldgenPreviewModeUpheaval => new NVector4(0.10f + normalized * 0.52f, 0.11f + normalized * 0.36f, 0.12f + normalized * 0.22f, 1f),
             WorldgenPreviewModeOcean => new NVector4(0.08f + (1f - normalized) * 0.24f, 0.16f + (1f - normalized) * 0.26f, 0.28f + normalized * 0.64f, 1f),
@@ -1617,18 +1544,23 @@ public sealed partial class DebugWindowManager
         return ImGui.ColorConvertFloat4ToU32(color);
     }
 
-    private static uint BuildWorldgenClimatePreviewColor(NoiseClimate climate, int blockX, int blockZ)
+    private static NVector4 BuildWorldgenClimateMapLayerColor(int value)
     {
-        int packed = climate.GetClimateAt(blockX, blockZ);
-        float temp = ((packed >> 16) & 0xff) / 255f;
-        float rain = ((packed >> 8) & 0xff) / 255f;
-        float aux = (packed & 0xff) / 255f;
+        if ((value & ~0xff) == 0)
+        {
+            float normalized = Math.Clamp(value / 255f, 0f, 1f);
+            return new NVector4(0.10f + normalized * 0.45f, 0.20f + normalized * 0.38f, 0.76f - normalized * 0.42f, 1f);
+        }
 
+        float temp = ((value >> 16) & 0xff) / 255f;
+        float rain = ((value >> 8) & 0xff) / 255f;
+        float aux = (value & 0xff) / 255f;
         float dry = 1f - rain;
-        float r = Math.Clamp(0.14f + temp * 0.58f + dry * 0.18f, 0f, 1f);
-        float g = Math.Clamp(0.16f + rain * 0.42f + temp * 0.18f + aux * 0.08f, 0f, 1f);
-        float b = Math.Clamp(0.18f + rain * 0.45f + (1f - temp) * 0.22f, 0f, 1f);
-        return ImGui.ColorConvertFloat4ToU32(new NVector4(r, g, b, 1f));
+        return new NVector4(
+            Math.Clamp(0.14f + temp * 0.58f + dry * 0.18f, 0f, 1f),
+            Math.Clamp(0.16f + rain * 0.42f + temp * 0.18f + aux * 0.08f, 0f, 1f),
+            Math.Clamp(0.18f + rain * 0.45f + (1f - temp) * 0.22f, 0f, 1f),
+            1f);
     }
 
     private static uint BuildWorldgenPreviewColor(long seed, float worldX, float worldZ, int mode)
@@ -2241,12 +2173,5 @@ public sealed partial class DebugWindowManager
         int EndX,
         int EndZ,
         int CellsX,
-        int CellsZ,
-        int MapLayerScale,
-        int OceanLandcover,
-        int OceanScaleMultiplier,
-        int ClimateMapSizeZ,
-        int ClimatePolarEquatorDistance,
-        int ClimateSpawnMinTemp,
-        int ClimateSpawnMaxTemp);
+        int CellsZ);
 }
