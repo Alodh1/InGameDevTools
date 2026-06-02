@@ -7,6 +7,7 @@ using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
 using Vintagestory.API.Common;
 using Vintagestory.API.Datastructures;
+using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
 using Vintagestory.ServerMods;
 
@@ -900,10 +901,10 @@ public sealed partial class DebugWindowManager
 
     private void DrawWorldgenOrePreviewControls()
     {
-        if (TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string status))
+        if (TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string source, out string status))
         {
             string generator = TryGetWorldgenPreviewDepositGenerator(variant!) ?? "unknown generator";
-            ImGui.TextDisabled($"Using live deposit: {code ?? "unnamed"} ({generator}).");
+            ImGui.TextDisabled($"Using {source}: {code ?? "unnamed"} ({generator}).");
         }
         else
         {
@@ -1208,7 +1209,7 @@ public sealed partial class DebugWindowManager
 
     private string BuildWorldgenOreHoverText(int blockX, int blockZ)
     {
-        if (!TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string status))
+        if (!TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string source, out string status))
         {
             return status;
         }
@@ -1219,7 +1220,7 @@ public sealed partial class DebugWindowManager
             int chunkX = FloorDiv(blockX, chunkSize);
             int chunkZ = FloorDiv(blockZ, chunkSize);
             float factor = variant!.GetOreMapFactor(chunkX, chunkZ);
-            return $"Ore: {code ?? "unnamed"} factor {factor.ToString("0.###", CultureInfo.InvariantCulture)} at chunk {chunkX}, {chunkZ}";
+            return $"Ore: {code ?? "unnamed"} {factor.ToString("0.###", CultureInfo.InvariantCulture)} at chunk {chunkX}, {chunkZ} ({source})";
         }
         catch (Exception exception)
         {
@@ -1320,16 +1321,26 @@ public sealed partial class DebugWindowManager
         return string.IsNullOrWhiteSpace(code) ? null : code;
     }
 
-    private bool TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string status)
+    private bool TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string source, out string status)
     {
         variant = null;
         code = GetSelectedWorldgenDepositCode();
+        source = "";
 
         GenDeposits? genDeposits = GetWorldgenPreviewGenDeposits();
         if (genDeposits?.Deposits == null || genDeposits.Deposits.Length == 0)
         {
             status = "Live GenDeposits unavailable; open a singleplayer world and press Refresh SP.";
             return false;
+        }
+
+        if (TryBuildWorldgenPreviewDraftDepositVariant(genDeposits, out DepositVariant? draftVariant, out string? draftCode, out string draftStatus))
+        {
+            variant = draftVariant;
+            code = draftCode ?? code;
+            source = "draft deposit";
+            status = draftStatus;
+            return true;
         }
 
         if (!string.IsNullOrWhiteSpace(code))
@@ -1356,7 +1367,10 @@ public sealed partial class DebugWindowManager
             return false;
         }
 
-        status = $"Live deposit: {code ?? "unnamed"}.";
+        source = "live deposit";
+        status = string.IsNullOrWhiteSpace(draftStatus)
+            ? $"Live deposit: {code ?? "unnamed"}."
+            : $"Live deposit: {code ?? "unnamed"}; draft unavailable: {draftStatus}";
         return true;
     }
 
@@ -1377,15 +1391,91 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private string? GetSelectedWorldgenDepositCode()
+    private bool TryBuildWorldgenPreviewDraftDepositVariant(
+        GenDeposits genDeposits,
+        out DepositVariant? variant,
+        out string? code,
+        out string status)
     {
+        variant = null;
+        code = null;
+
+        if (!TryGetSelectedWorldgenDepositRow(out JObject? row) || row == null)
+        {
+            status = "no selected deposit draft row";
+            return false;
+        }
+
+        code = row["code"]?.ToString();
+
+        try
+        {
+            DepositVariant? draft = row.ToObject<DepositVariant>();
+            if (draft == null)
+            {
+                status = "selected deposit draft did not deserialize";
+                return false;
+            }
+
+            if (!TryGetWorldgenPreviewDepositInitDependencies(
+                genDeposits,
+                out LCGRandom? depositRand,
+                out NormalizedSimplexNoise? shapeNoise,
+                out string dependencyStatus))
+            {
+                status = dependencyStatus;
+                return false;
+            }
+
+            draft.Init(_worldgenPreviewServerApi!, depositRand!, shapeNoise!);
+            variant = draft;
+            code = GetWorldgenPreviewDepositCode(draft) ?? code;
+            status = $"Draft deposit: {code ?? "unnamed"}.";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen draft deposit init failed", exception);
+            status = exception.Message;
+            return false;
+        }
+    }
+
+    private static bool TryGetWorldgenPreviewDepositInitDependencies(
+        GenDeposits genDeposits,
+        out LCGRandom? depositRand,
+        out NormalizedSimplexNoise? shapeNoise,
+        out string status)
+    {
+        depositRand = TryGetReflectedMember(genDeposits, "depositRand") as LCGRandom;
+        shapeNoise = TryGetReflectedMember(genDeposits, "depositShapeDistortNoise") as NormalizedSimplexNoise;
+
+        if (depositRand == null || shapeNoise == null)
+        {
+            status = "live GenDeposits init dependencies are unavailable";
+            return false;
+        }
+
+        status = "";
+        return true;
+    }
+
+    private bool TryGetSelectedWorldgenDepositRow(out JObject? row)
+    {
+        row = null;
         WorldgenAssetEntry? entry = SelectedWorldgenEntry;
-        if (entry?.Kind != WorldgenAssetKind.Deposits) return null;
-        if (!TryParseJsonToken(_worldgenCurrentText, out JToken? root, out _) || root == null) return null;
-        if (!TryGetWorldgenRows(root, WorldgenAssetKind.Deposits, out JArray? rows, out _) || rows == null || rows.Count == 0) return null;
+        if (entry?.Kind != WorldgenAssetKind.Deposits) return false;
+        if (!TryParseJsonToken(_worldgenCurrentText, out JToken? root, out _) || root == null) return false;
+        if (!TryGetWorldgenRows(root, WorldgenAssetKind.Deposits, out JArray? rows, out _) || rows == null || rows.Count == 0) return false;
 
         int index = Math.Clamp(_worldgenRowIndex, 0, rows.Count - 1);
-        return rows[index] is JObject row
+        row = rows[index] as JObject;
+        return row != null;
+    }
+
+    private string? GetSelectedWorldgenDepositCode()
+    {
+        return TryGetSelectedWorldgenDepositRow(out JObject? row) && row != null
             ? row["code"]?.ToString()
             : null;
     }
@@ -1813,7 +1903,7 @@ public sealed partial class DebugWindowManager
         uint[] colors,
         out string error)
     {
-        if (!TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out _, out string status))
+        if (!TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out _, out _, out string status))
         {
             error = status;
             return false;
