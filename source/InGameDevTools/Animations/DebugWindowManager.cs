@@ -613,6 +613,7 @@ public sealed partial class DebugWindowManager : IDisposable
         RecipeEditor,
         Particles,
         Transforms,
+        ConfigLib,
         BlockItemJson,
         LootDrops
     }
@@ -810,6 +811,13 @@ public sealed partial class DebugWindowManager : IDisposable
                     TransformsEditorTab(deltaSeconds);
                     ImGui.EndTabItem();
                 }
+                bool configLibTabOpen = true;
+                if (ImGui.BeginTabItem("ConfigLib##tab", ref configLibTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.ConfigLib;
+                    ConfigLibGeneratorTab(deltaSeconds, _showEditorDiagnostics);
+                    ImGui.EndTabItem();
+                }
                 bool blockItemJsonTabOpen = true;
                 if (BlockItemJsonEditorVisible && ImGui.BeginTabItem("Block/Item JSON##tab", ref blockItemJsonTabOpen))
                 {
@@ -944,6 +952,9 @@ public sealed partial class DebugWindowManager : IDisposable
             case DevToolsTab.Transforms:
                 ApplySelectedTransformLive(force);
                 break;
+            case DevToolsTab.ConfigLib:
+                _liveApplyManager.LastStatus = "ConfigLib generator writes authored files; it has no runtime apply target.";
+                break;
             case DevToolsTab.BlockItemJson:
                 if (BlockItemJsonEditorVisible)
                 {
@@ -973,6 +984,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _recipeEditor.ResetLayout();
         _particleEffectsManager.ResetLayout();
         ResetTransformsLayout();
+        ResetConfigLibGeneratorLayout();
         ResetBlockItemJsonLayout();
         ResetLootDropLayout();
     }
