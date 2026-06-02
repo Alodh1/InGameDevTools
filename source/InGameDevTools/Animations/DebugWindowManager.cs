@@ -616,7 +616,8 @@ public sealed partial class DebugWindowManager : IDisposable
         ConfigLib,
         BlockItemJson,
         LootDrops,
-        Worldgen
+        Worldgen,
+        Patches
     }
 
     private static readonly bool BlockItemJsonEditorVisible = false;
@@ -840,6 +841,13 @@ public sealed partial class DebugWindowManager : IDisposable
                     WorldgenEditorTab(deltaSeconds, _showEditorDiagnostics);
                     ImGui.EndTabItem();
                 }
+                bool patchesTabOpen = true;
+                if (ImGui.BeginTabItem("Patches##tab", ref patchesTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.Patches;
+                    PatchCreatorTab(deltaSeconds, _showEditorDiagnostics);
+                    ImGui.EndTabItem();
+                }
                 ImGui.EndTabBar();
             }
             ImGui.SetWindowFontScale(1f);
@@ -975,6 +983,9 @@ public sealed partial class DebugWindowManager : IDisposable
             case DevToolsTab.Worldgen:
                 ApplyWorldgenRuntime(force);
                 break;
+            case DevToolsTab.Patches:
+                ApplyPatchCreatorRuntime(force);
+                break;
         }
     }
 
@@ -987,6 +998,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ClearBlockItemJsonLiveApplyState();
         ClearLootDropLiveApplyState();
         ClearWorldgenLiveApplyState();
+        ClearPatchCreatorLiveApplyState();
     }
 
     private void ResetDevToolsLayout()
@@ -1000,6 +1012,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ResetBlockItemJsonLayout();
         ResetLootDropLayout();
         ResetWorldgenLayout();
+        ResetPatchCreatorLayout();
     }
 
     private void CollidersTab()
