@@ -13,6 +13,9 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
+    private const float DefaultLootDropWeight = 1f;
+    private const float LootDropWeightEpsilon = 0.0001f;
+
     private readonly List<LootDropEntry> _lootDropEntries = [];
     private readonly List<LootDropEntry> _visibleLootDropEntries = [];
     private readonly List<LootDropDraft> _lootDropDrafts = [];
@@ -293,7 +296,8 @@ public sealed partial class DebugWindowManager
         for (int index = 0; index < _lootDropDrafts.Count; index++)
         {
             LootDropDraft draft = _lootDropDrafts[index];
-            if (ImGui.Selectable($"{index}: {draft.Type}:{draft.Code} x{draft.QuantityAvg:0.##}##loot-drop-row-{index}", index == _lootDropSelectedDraftIndex))
+            string weightLabel = IsWeightedLootDrop(draft) ? $" w{draft.Weight:0.###}" : "";
+            if (ImGui.Selectable($"{index}: {draft.Type}:{draft.Code} x{draft.QuantityAvg:0.##}{weightLabel}##loot-drop-row-{index}", index == _lootDropSelectedDraftIndex))
             {
                 _lootDropSelectedDraftIndex = index;
             }
@@ -333,6 +337,16 @@ public sealed partial class DebugWindowManager
 
         ImGui.SetNextItemWidth(-float.Epsilon);
         changed |= ImGui.InputText($"Code##loot-drop-code-{index}", ref draft.Code, 240);
+
+        if (DrawFloatField($"Weight##loot-drop-weight-{index}", ref draft.Weight, 0.01f))
+        {
+            draft.Weight = Math.Max(0f, draft.Weight);
+            changed = true;
+        }
+        if (IsWeightedLootDrop(draft))
+        {
+            ImGui.TextColored(new NVector4(1f, 0.78f, 0.32f, 1f), "Weighted drop. Weight is preserved in duplicate, runtime apply, and authored save.");
+        }
 
         changed |= DrawFloatField($"Quantity avg##loot-drop-qavg-{index}", ref draft.QuantityAvg, 0.05f);
         changed |= DrawFloatField($"Quantity var##loot-drop-qvar-{index}", ref draft.QuantityVar, 0.05f);
@@ -477,6 +491,10 @@ public sealed partial class DebugWindowManager
         ImGui.TextDisabled($"Domain: {entry.Domain}");
         ImGui.TextColored(valid ? new NVector4(0.42f, 0.85f, 0.42f, 1f) : new NVector4(1f, 0.38f, 0.32f, 1f), valid ? "Data valid" : "Data invalid");
         ImGui.TextWrapped(entry.SourceAsset?.Location.ToString() ?? "Source asset: unresolved; save will create an authored override.");
+        if (entry.Kind != LootDropKind.TradeTable && HasWeightedLootDrops(_lootDropDrafts))
+        {
+            ImGui.TextColored(new NVector4(1f, 0.78f, 0.32f, 1f), "Weighted drops detected. Weight is editable and preserved; simulation still treats rows as independent rolls.");
+        }
 
         if (entry.Kind != LootDropKind.TradeTable)
         {
@@ -573,7 +591,9 @@ public sealed partial class DebugWindowManager
             _lootDropOriginalJson = CurrentLootDropJson();
             _lootDropSelectedDraftIndex = Math.Clamp(_lootDropSelectedDraftIndex, 0, Math.Max(0, _lootDropDrafts.Count - 1));
             _lootDropLiveAppliedHash = "";
-            _lootDropStatus = $"Loaded {entry.Label}.";
+            _lootDropStatus = HasWeightedLootDrops(_lootDropDrafts)
+                ? $"Loaded {entry.Label}. Weighted drops are editable and preserved; simulation remains approximate."
+                : $"Loaded {entry.Label}.";
         }
         catch (Exception exception)
         {
@@ -861,6 +881,7 @@ public sealed partial class DebugWindowManager
     {
         if (drafts.Count == 0) return "No drops configured.";
 
+        bool hasWeightedDrops = HasWeightedLootDrops(drafts);
         Random random = new(8675309);
         Dictionary<string, double> totals = new(StringComparer.OrdinalIgnoreCase);
         for (int run = 0; run < runs; run++)
@@ -878,9 +899,13 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        if (totals.Count == 0) return $"Simulated {runs} run(s): no drops.";
+        string prefix = hasWeightedDrops
+            ? "Weighted drops are preserved, but this simulation still treats rows as independent rolls until weighted-group simulation is implemented." + Environment.NewLine
+            : "";
 
-        return string.Join(Environment.NewLine, totals
+        if (totals.Count == 0) return $"{prefix}Simulated {runs} run(s): no drops.";
+
+        return prefix + string.Join(Environment.NewLine, totals
             .OrderByDescending(entry => entry.Value)
             .Select(entry => $"{entry.Key}: total {entry.Value:0.##}, avg/run {entry.Value / runs:0.###}"));
     }
@@ -893,6 +918,16 @@ public sealed partial class DebugWindowManager
         NatFloat value = NatFloat.create(dist, draft.QuantityAvg, draft.QuantityVar);
         value.offset = draft.QuantityOffset;
         return value;
+    }
+
+    private static bool HasWeightedLootDrops(IEnumerable<LootDropDraft> drafts)
+    {
+        return drafts.Any(IsWeightedLootDrop);
+    }
+
+    private static bool IsWeightedLootDrop(LootDropDraft draft)
+    {
+        return Math.Abs(draft.Weight - DefaultLootDropWeight) > LootDropWeightEpsilon;
     }
 
     private static bool TryFindTradeToken(JObject sourceJson, out List<string> path, out JToken? token)
@@ -1159,6 +1194,7 @@ public sealed partial class DebugWindowManager
         public float QuantityAvg = 1;
         public float QuantityVar;
         public string QuantityDist = EnumDistribution.UNIFORM.ToString();
+        public float Weight = DefaultLootDropWeight;
         public string AttributesJson = "";
         public bool LastDrop;
         public string Tool = "";
@@ -1176,6 +1212,7 @@ public sealed partial class DebugWindowManager
                 QuantityAvg = QuantityAvg,
                 QuantityVar = QuantityVar,
                 QuantityDist = QuantityDist,
+                Weight = Weight,
                 AttributesJson = AttributesJson,
                 LastDrop = LastDrop,
                 Tool = Tool,
@@ -1195,6 +1232,7 @@ public sealed partial class DebugWindowManager
                 QuantityAvg = quantity["avg"]?.Value<float?>() ?? 1,
                 QuantityVar = quantity["var"]?.Value<float?>() ?? 0,
                 QuantityDist = quantity["dist"]?.ToString() ?? EnumDistribution.UNIFORM.ToString(),
+                Weight = Math.Max(0f, obj["weight"]?.Value<float?>() ?? DefaultLootDropWeight),
                 AttributesJson = obj["attributes"]?.ToString(Formatting.Indented) ?? "",
                 LastDrop = obj["lastDrop"]?.Value<bool?>() ?? false,
                 Tool = obj["tool"]?.ToString() ?? "",
@@ -1219,6 +1257,10 @@ public sealed partial class DebugWindowManager
             if (!string.IsNullOrWhiteSpace(AttributesJson) && TryParseJsonToken(AttributesJson) is JToken attributes)
             {
                 obj["attributes"] = attributes;
+            }
+            if (Math.Abs(Weight - DefaultLootDropWeight) > LootDropWeightEpsilon)
+            {
+                obj["weight"] = Math.Max(0f, Weight);
             }
             if (LastDrop) obj["lastDrop"] = true;
             if (!string.IsNullOrWhiteSpace(Tool)) obj["tool"] = Tool;
