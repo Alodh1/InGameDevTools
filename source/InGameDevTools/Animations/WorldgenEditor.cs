@@ -63,6 +63,7 @@ public sealed partial class DebugWindowManager
     private string _worldgenPreviewConfigStatus = "World config not read yet.";
     private int _worldgenPreviewOriginX;
     private int _worldgenPreviewOriginZ;
+    private int _worldgenPreviewResolution = 96;
     private float _worldgenPreviewPanX;
     private float _worldgenPreviewPanZ;
     private float _worldgenPreviewZoom = 1f;
@@ -91,6 +92,9 @@ public sealed partial class DebugWindowManager
     private int _worldgenPreviewMapLayerOriginXCache;
     private int _worldgenPreviewMapLayerOriginZCache;
     private string _worldgenPreviewMapLayerStatus = "";
+    private WorldgenPreviewRasterCacheKey? _worldgenPreviewRasterCacheKey;
+    private uint[]? _worldgenPreviewRasterCache;
+    private string _worldgenPreviewRasterStatus = "Raster cache empty.";
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -755,6 +759,11 @@ public sealed partial class DebugWindowManager
         ImGui.InputInt("Origin X##worldgen-preview-origin-x", ref _worldgenPreviewOriginX);
         ImGui.SameLine();
         ImGui.InputInt("Z##worldgen-preview-origin-z", ref _worldgenPreviewOriginZ);
+        if (ImGui.InputInt("Resolution##worldgen-preview-resolution", ref _worldgenPreviewResolution))
+        {
+            _worldgenPreviewResolution = Math.Clamp(_worldgenPreviewResolution, 32, 192);
+            InvalidateWorldgenPreviewRasterCache();
+        }
         ImGui.PopItemWidth();
 
         if (_worldgenPreviewMode == 1)
@@ -860,6 +869,7 @@ public sealed partial class DebugWindowManager
         {
             drawList.AddText(new NVector2(min.X + 12f, min.Y + 110f), muted, hoverDetails);
         }
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 130f), muted, _worldgenPreviewRasterStatus);
 
         ImGui.EndChild();
     }
@@ -872,6 +882,7 @@ public sealed partial class DebugWindowManager
         {
             _worldgenPreviewMapSizeZ = Math.Max(1d, mapSizeZ);
             _worldgenPreviewClimateNoise = null;
+            InvalidateWorldgenPreviewRasterCache();
         }
 
         float halfWidth = Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.48f);
@@ -880,15 +891,18 @@ public sealed partial class DebugWindowManager
         {
             _worldgenPreviewPolarEquatorDistance = Math.Max(1, _worldgenPreviewPolarEquatorDistance);
             _worldgenPreviewClimateNoise = null;
+            InvalidateWorldgenPreviewRasterCache();
         }
         ImGui.SameLine();
         if (ImGui.InputInt("Spawn min C##worldgen-preview-spawn-min-temp", ref _worldgenPreviewSpawnMinTemp))
         {
             _worldgenPreviewClimateNoise = null;
+            InvalidateWorldgenPreviewRasterCache();
         }
         if (ImGui.InputInt("Spawn max C##worldgen-preview-spawn-max-temp", ref _worldgenPreviewSpawnMaxTemp))
         {
             _worldgenPreviewClimateNoise = null;
+            InvalidateWorldgenPreviewRasterCache();
         }
         ImGui.PopItemWidth();
     }
@@ -900,6 +914,7 @@ public sealed partial class DebugWindowManager
         {
             _worldgenPreviewMapLayerScale = Math.Max(1, _worldgenPreviewMapLayerScale);
             _worldgenPreviewMapLayer = null;
+            InvalidateWorldgenPreviewRasterCache();
         }
 
         if (_worldgenPreviewMode == 4)
@@ -910,12 +925,14 @@ public sealed partial class DebugWindowManager
             {
                 _worldgenPreviewOceanLandcover = Math.Clamp(_worldgenPreviewOceanLandcover, 0.01f, 1f);
                 _worldgenPreviewMapLayer = null;
+                InvalidateWorldgenPreviewRasterCache();
             }
             ImGui.SameLine();
             if (ImGui.InputFloat("Scale mul##worldgen-preview-ocean-scale-mul", ref _worldgenPreviewOceanScaleMultiplier, 0.05f, 0.2f, "%.2f"))
             {
                 _worldgenPreviewOceanScaleMultiplier = Math.Max(0.01f, _worldgenPreviewOceanScaleMultiplier);
                 _worldgenPreviewMapLayer = null;
+                InvalidateWorldgenPreviewRasterCache();
             }
             ImGui.PopItemWidth();
         }
@@ -1360,67 +1377,155 @@ public sealed partial class DebugWindowManager
     {
         uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.02f, 0.02f, 0.018f, 1f));
         drawList.AddRectFilled(min, max, background, 4f);
-        NoiseClimate? climate = _worldgenPreviewMode == 1 ? GetWorldgenPreviewClimateNoise(seed) : null;
-        MapLayerBase? mapLayer = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
-            ? GetWorldgenPreviewMapLayer(_worldgenPreviewMode, seed)
-            : null;
-        if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode) && mapLayer == null)
+
+        int cellsX = Math.Clamp(_worldgenPreviewResolution, 32, 192);
+        int cellsZ = Math.Clamp(_worldgenPreviewResolution, 32, 192);
+        float cellWidth = (max.X - min.X) / cellsX;
+        float cellHeight = (max.Y - min.Y) / cellsZ;
+        float halfWidthBlocks = (max.X - min.X) / (2f * pixelsPerBlock);
+        float halfHeightBlocks = (max.Y - min.Y) / (2f * pixelsPerBlock);
+
+        if (!TryGetWorldgenPreviewRasterColors(
+            seed,
+            centerX,
+            centerZ,
+            halfWidthBlocks,
+            halfHeightBlocks,
+            cellsX,
+            cellsZ,
+            out uint[]? colors,
+            out string error))
         {
             DrawWorldgenPreviewUnavailable(
                 drawList,
                 min,
                 max,
-                string.IsNullOrWhiteSpace(_worldgenPreviewMapLayerStatus) ? "Map layer unavailable." : _worldgenPreviewMapLayerStatus,
+                error,
                 "This layer needs more engine context; use another mode or continue the W1 setup.");
             return;
         }
-
-        int cellsX = Math.Clamp((int)((max.X - min.X) / 7f), 32, 112);
-        int cellsZ = Math.Clamp((int)((max.Y - min.Y) / 7f), 32, 112);
-        float cellWidth = (max.X - min.X) / cellsX;
-        float cellHeight = (max.Y - min.Y) / cellsZ;
-        float halfWidthBlocks = (max.X - min.X) / (2f * pixelsPerBlock);
-        float halfHeightBlocks = (max.Y - min.Y) / (2f * pixelsPerBlock);
-        int[]? mapValues = null;
-        if (mapLayer != null)
-        {
-            int mapStartX = (int)MathF.Floor(centerX - halfWidthBlocks);
-            int mapStartZ = (int)MathF.Floor(centerZ - halfHeightBlocks);
-            try
-            {
-                mapValues = mapLayer.GenLayer(mapStartX, mapStartZ, cellsX, cellsZ);
-            }
-            catch (Exception exception)
-            {
-                _worldgenPreviewMapLayer = null;
-                _worldgenPreviewMapLayerStatus = $"{WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)]} render failed: {exception.Message}";
-                _worldgenDiagnostics.Exception("Worldgen map layer render failed", exception);
-                DrawWorldgenPreviewUnavailable(
-                    drawList,
-                    min,
-                    max,
-                    _worldgenPreviewMapLayerStatus,
-                    "This layer needs more engine context; use another mode or continue the W1 setup.");
-                return;
-            }
-        }
+        uint[] rasterColors = colors ?? [];
 
         for (int z = 0; z < cellsZ; z++)
         {
-            float worldZ = centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ);
             for (int x = 0; x < cellsX; x++)
             {
-                float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
-                uint color = mapValues != null
-                    ? BuildWorldgenMapLayerPreviewColor(_worldgenPreviewMode, mapValues[z * cellsX + x])
-                    : climate == null
-                        ? BuildWorldgenPreviewColor(seed, worldX, worldZ, _worldgenPreviewMode)
-                        : BuildWorldgenClimatePreviewColor(climate, (int)MathF.Floor(worldX), (int)MathF.Floor(worldZ));
                 NVector2 a = new(min.X + x * cellWidth, min.Y + z * cellHeight);
                 NVector2 b = new(min.X + (x + 1) * cellWidth + 0.5f, min.Y + (z + 1) * cellHeight + 0.5f);
-                drawList.AddRectFilled(a, b, color);
+                drawList.AddRectFilled(a, b, rasterColors[z * cellsX + x]);
             }
         }
+    }
+
+    private bool TryGetWorldgenPreviewRasterColors(
+        long seed,
+        float centerX,
+        float centerZ,
+        float halfWidthBlocks,
+        float halfHeightBlocks,
+        int cellsX,
+        int cellsZ,
+        out uint[]? colors,
+        out string error)
+    {
+        int sampleStartX = (int)MathF.Floor(centerX - halfWidthBlocks);
+        int sampleStartZ = (int)MathF.Floor(centerZ - halfHeightBlocks);
+        int sampleEndX = (int)MathF.Ceiling(centerX + halfWidthBlocks);
+        int sampleEndZ = (int)MathF.Ceiling(centerZ + halfHeightBlocks);
+        int oceanLandcoverKey = (int)MathF.Round(_worldgenPreviewOceanLandcover * 1000f);
+        int oceanScaleMultiplierKey = (int)MathF.Round(_worldgenPreviewOceanScaleMultiplier * 1000f);
+        WorldgenPreviewRasterCacheKey key = new(
+            _worldgenPreviewMode,
+            seed,
+            sampleStartX,
+            sampleStartZ,
+            sampleEndX,
+            sampleEndZ,
+            cellsX,
+            cellsZ,
+            _worldgenPreviewMapLayerScale,
+            oceanLandcoverKey,
+            oceanScaleMultiplierKey,
+            (int)Math.Round(_worldgenPreviewMapSizeZ),
+            _worldgenPreviewPolarEquatorDistance,
+            _worldgenPreviewSpawnMinTemp,
+            _worldgenPreviewSpawnMaxTemp);
+
+        if (_worldgenPreviewRasterCache != null &&
+            _worldgenPreviewRasterCacheKey == key &&
+            _worldgenPreviewRasterCache.Length == cellsX * cellsZ)
+        {
+            colors = _worldgenPreviewRasterCache;
+            error = "";
+            return true;
+        }
+
+        colors = new uint[cellsX * cellsZ];
+        if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
+        {
+            if (!TryBuildWorldgenMapLayerRaster(seed, sampleStartX, sampleStartZ, cellsX, cellsZ, colors, out error))
+            {
+                colors = null;
+                return false;
+            }
+        }
+        else
+        {
+            NoiseClimate? climate = _worldgenPreviewMode == 1 ? GetWorldgenPreviewClimateNoise(seed) : null;
+            for (int z = 0; z < cellsZ; z++)
+            {
+                float worldZ = centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ);
+                for (int x = 0; x < cellsX; x++)
+                {
+                    float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
+                    colors[z * cellsX + x] = climate == null
+                        ? BuildWorldgenPreviewColor(seed, worldX, worldZ, _worldgenPreviewMode)
+                        : BuildWorldgenClimatePreviewColor(climate, (int)MathF.Floor(worldX), (int)MathF.Floor(worldZ));
+                }
+            }
+        }
+
+        _worldgenPreviewRasterCacheKey = key;
+        _worldgenPreviewRasterCache = colors;
+        _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}";
+        error = "";
+        return true;
+    }
+
+    private bool TryBuildWorldgenMapLayerRaster(long seed, int startX, int startZ, int cellsX, int cellsZ, uint[] colors, out string error)
+    {
+        MapLayerBase? mapLayer = GetWorldgenPreviewMapLayer(_worldgenPreviewMode, seed);
+        if (mapLayer == null)
+        {
+            error = string.IsNullOrWhiteSpace(_worldgenPreviewMapLayerStatus) ? "Map layer unavailable." : _worldgenPreviewMapLayerStatus;
+            return false;
+        }
+
+        try
+        {
+            int[] mapValues = mapLayer.GenLayer(startX, startZ, cellsX, cellsZ);
+            for (int i = 0; i < colors.Length; i++)
+            {
+                colors[i] = BuildWorldgenMapLayerPreviewColor(_worldgenPreviewMode, mapValues[i]);
+            }
+            error = "";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _worldgenPreviewMapLayer = null;
+            _worldgenPreviewMapLayerStatus = $"{WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)]} render failed: {exception.Message}";
+            _worldgenDiagnostics.Exception("Worldgen map layer render failed", exception);
+            error = _worldgenPreviewMapLayerStatus;
+            return false;
+        }
+    }
+
+    private void InvalidateWorldgenPreviewRasterCache()
+    {
+        _worldgenPreviewRasterCacheKey = null;
+        _worldgenPreviewRasterCache = null;
+        _worldgenPreviewRasterStatus = "Raster cache invalidated.";
     }
 
     private static uint BuildWorldgenMapLayerPreviewColor(int mode, int value)
@@ -2050,4 +2155,21 @@ public sealed partial class DebugWindowManager
     }
 
     private sealed record WorldgenDraftState(string Text, int RowIndex, bool IsValid, string ValidationStatus);
+
+    private readonly record struct WorldgenPreviewRasterCacheKey(
+        int Mode,
+        long Seed,
+        int StartX,
+        int StartZ,
+        int EndX,
+        int EndZ,
+        int CellsX,
+        int CellsZ,
+        int MapLayerScale,
+        int OceanLandcover,
+        int OceanScaleMultiplier,
+        int ClimateMapSizeZ,
+        int ClimatePolarEquatorDistance,
+        int ClimateSpawnMinTemp,
+        int ClimateSpawnMaxTemp);
 }
