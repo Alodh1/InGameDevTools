@@ -793,6 +793,10 @@ public sealed partial class DebugWindowManager
         {
             DrawWorldgenBlockPatchPreviewControls();
         }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeTerrainShape)
+        {
+            DrawWorldgenTerrainShapePreviewControls();
+        }
         else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
             DrawWorldgenMapLayerPreviewControls();
@@ -879,11 +883,15 @@ public sealed partial class DebugWindowManager
                 ? $"{modeLabel}: live server climateGen"
                 : _worldgenPreviewMode == WorldgenPreviewModeBlockPatch
                     ? $"{modeLabel}: selected draft row"
+                    : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
+                        ? $"{modeLabel}: selected draft landform"
                 : $"{modeLabel}: viewport host";
         string inputStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
             ? "RMB/MMB pans. Mouse wheel zooms. Sampling live MapLayerBase.GenLayer."
             : _worldgenPreviewMode == WorldgenPreviewModeBlockPatch
                 ? "RMB/MMB pans. Mouse wheel zooms. Evaluating draft climate/forest constraints."
+                : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
+                    ? "RMB/MMB pans. Mouse wheel zooms. Evaluating selected landform draft shape."
                 : "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.";
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, inputStatus);
@@ -934,6 +942,21 @@ public sealed partial class DebugWindowManager
         else
         {
             ImGui.TextDisabled("Select a block patch row to preview its draft suitability.");
+        }
+    }
+
+    private void DrawWorldgenTerrainShapePreviewControls()
+    {
+        if (TryGetSelectedWorldgenLandformRow(out JObject? row) && row != null)
+        {
+            string label = GetWorldgenRowLabel(WorldgenAssetKind.Landforms, row, _worldgenRowIndex);
+            ImGui.TextDisabled($"Using selected draft landform: {label}.");
+            ImGui.TextDisabled("Heightmap uses terrainOctaves, terrainOctaveThresholds, terrainYKeyPositions, and terrainYKeyThresholds.");
+            ImGui.TextDisabled("This is a Speed-1 draft shape visualization; exact ColumnNoise/GenTerra wiring remains for the next fidelity pass.");
+        }
+        else
+        {
+            ImGui.TextDisabled("Select a landform row to preview its draft terrain shape.");
         }
     }
 
@@ -990,7 +1013,7 @@ public sealed partial class DebugWindowManager
         {
             WorldgenAssetKind.Deposits => WorldgenPreviewModeOre,
             WorldgenAssetKind.BlockPatches => WorldgenPreviewModeBlockPatch,
-            WorldgenAssetKind.Landforms => WorldgenPreviewModeLandform,
+            WorldgenAssetKind.Landforms => WorldgenPreviewModeTerrainShape,
             WorldgenAssetKind.RockStrata => WorldgenPreviewModeTerrainShape,
             _ => WorldgenPreviewModeGradient
         };
@@ -1125,6 +1148,11 @@ public sealed partial class DebugWindowManager
         if (mode == WorldgenPreviewModeBlockPatch)
         {
             return BuildWorldgenBlockPatchHoverText(blockX, blockZ);
+        }
+
+        if (mode == WorldgenPreviewModeTerrainShape)
+        {
+            return BuildWorldgenTerrainShapeHoverText(seed, blockX, blockZ);
         }
 
         if (WorldgenPreviewModeUsesMapLayer(mode))
@@ -1286,6 +1314,27 @@ public sealed partial class DebugWindowManager
         {
             _worldgenDiagnostics.Exception("Worldgen block patch hover sample failed", exception);
             return $"Block patch sample failed: {exception.Message}";
+        }
+    }
+
+    private string BuildWorldgenTerrainShapeHoverText(long seed, int blockX, int blockZ)
+    {
+        if (!TryGetSelectedWorldgenLandformRow(out JObject? row) || row == null)
+        {
+            return "Terrain shape: no selected landform draft row.";
+        }
+
+        try
+        {
+            WorldgenLandformDraft draft = WorldgenLandformDraft.FromJson(row);
+            float height = draft.SampleHeight(seed, blockX, blockZ);
+            string code = draft.Code ?? GetWorldgenRowLabel(WorldgenAssetKind.Landforms, row, _worldgenRowIndex);
+            return $"Terrain shape {code}: height {height:0.000}, octaves {draft.Octaves.Length}, y keys {draft.YKeyPositions.Length}";
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen terrain shape hover sample failed", exception);
+            return $"Terrain shape sample failed: {exception.Message}";
         }
     }
 
@@ -1528,6 +1577,11 @@ public sealed partial class DebugWindowManager
     private bool TryGetSelectedWorldgenBlockPatchRow(out JObject? row)
     {
         return TryGetSelectedWorldgenRow(WorldgenAssetKind.BlockPatches, out row);
+    }
+
+    private bool TryGetSelectedWorldgenLandformRow(out JObject? row)
+    {
+        return TryGetSelectedWorldgenRow(WorldgenAssetKind.Landforms, out row);
     }
 
     private bool TryGetSelectedWorldgenRow(WorldgenAssetKind kind, out JObject? row)
@@ -1950,6 +2004,14 @@ public sealed partial class DebugWindowManager
                 return false;
             }
         }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeTerrainShape)
+        {
+            if (!TryBuildWorldgenTerrainShapeRaster(seed, centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
+            {
+                colors = null;
+                return false;
+            }
+        }
         else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
             if (!TryBuildWorldgenMapLayerRaster(centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
@@ -2074,6 +2136,61 @@ public sealed partial class DebugWindowManager
         {
             _worldgenDiagnostics.Exception("Worldgen block patch raster failed", exception);
             error = $"Block patch render failed: {exception.Message}";
+            return false;
+        }
+    }
+
+    private bool TryBuildWorldgenTerrainShapeRaster(
+        long seed,
+        float centerX,
+        float centerZ,
+        float halfWidthBlocks,
+        float halfHeightBlocks,
+        int cellsX,
+        int cellsZ,
+        uint[] colors,
+        out string error)
+    {
+        if (!TryGetSelectedWorldgenLandformRow(out JObject? row) || row == null)
+        {
+            error = "Select a landform row to preview terrain shape.";
+            return false;
+        }
+
+        try
+        {
+            WorldgenLandformDraft draft = WorldgenLandformDraft.FromJson(row);
+            if (!draft.IsUsable)
+            {
+                error = "Selected landform has no usable terrain octave/Y-key arrays.";
+                return false;
+            }
+
+            float minHeight = float.PositiveInfinity;
+            float maxHeight = float.NegativeInfinity;
+            for (int z = 0; z < cellsZ; z++)
+            {
+                float worldZ = centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ);
+                for (int x = 0; x < cellsX; x++)
+                {
+                    float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
+                    float height = draft.SampleHeight(seed, worldX, worldZ);
+                    float east = draft.SampleHeight(seed, worldX + 8f, worldZ);
+                    float south = draft.SampleHeight(seed, worldX, worldZ + 8f);
+                    minHeight = Math.Min(minHeight, height);
+                    maxHeight = Math.Max(maxHeight, height);
+                    colors[z * cellsX + x] = BuildWorldgenTerrainShapePreviewColor(height, east, south, draft);
+                }
+            }
+
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; landform height {minHeight:0.000}-{maxHeight:0.000}";
+            error = "";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen terrain shape raster failed", exception);
+            error = $"Terrain shape render failed: {exception.Message}";
             return false;
         }
     }
@@ -2252,6 +2369,64 @@ public sealed partial class DebugWindowManager
         };
 
         return ImGui.ColorConvertFloat4ToU32(color);
+    }
+
+    private static uint BuildWorldgenTerrainShapePreviewColor(float height, float east, float south, WorldgenLandformDraft draft)
+    {
+        float slopeX = east - height;
+        float slopeZ = south - height;
+        float shade = Math.Clamp(0.72f + (slopeZ - slopeX) * 2.2f, 0.42f, 1.18f);
+        float normalized = Math.Clamp(height, 0f, 1f);
+
+        NVector4 low = normalized < 0.43f
+            ? new NVector4(0.07f, 0.16f, 0.30f, 1f)
+            : new NVector4(0.18f, 0.30f, 0.16f, 1f);
+        NVector4 mid = normalized < 0.62f
+            ? new NVector4(0.30f, 0.42f, 0.18f, 1f)
+            : new NVector4(0.42f, 0.36f, 0.26f, 1f);
+        NVector4 high = normalized < 0.78f
+            ? new NVector4(0.48f, 0.43f, 0.34f, 1f)
+            : new NVector4(0.78f, 0.76f, 0.70f, 1f);
+
+        NVector4 color = normalized < 0.50f
+            ? LerpColor(low, mid, Math.Clamp((normalized - 0.32f) / 0.18f, 0f, 1f))
+            : LerpColor(mid, high, Math.Clamp((normalized - 0.50f) / 0.40f, 0f, 1f));
+
+        if (TryParseHexColor(draft.HexColor, out NVector4 tint))
+        {
+            color = LerpColor(color, tint, 0.18f);
+        }
+
+        color.X = Math.Clamp(color.X * shade, 0f, 1f);
+        color.Y = Math.Clamp(color.Y * shade, 0f, 1f);
+        color.Z = Math.Clamp(color.Z * shade, 0f, 1f);
+        return ImGui.ColorConvertFloat4ToU32(color);
+    }
+
+    private static NVector4 LerpColor(NVector4 a, NVector4 b, float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        return new NVector4(
+            a.X + (b.X - a.X) * t,
+            a.Y + (b.Y - a.Y) * t,
+            a.Z + (b.Z - a.Z) * t,
+            a.W + (b.W - a.W) * t);
+    }
+
+    private static bool TryParseHexColor(string? hex, out NVector4 color)
+    {
+        color = default;
+        if (string.IsNullOrWhiteSpace(hex)) return false;
+        string value = hex.Trim().TrimStart('#');
+        if (value.Length != 6) return false;
+        if (!int.TryParse(value, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int packed)) return false;
+
+        color = new NVector4(
+            ((packed >> 16) & 0xff) / 255f,
+            ((packed >> 8) & 0xff) / 255f,
+            (packed & 0xff) / 255f,
+            1f);
+        return true;
     }
 
     private static int FloorDiv(int value, int divisor)
@@ -2900,6 +3075,146 @@ public sealed partial class DebugWindowManager
             float? min = TryReadJsonFloat(row[minName], out float parsedMin) ? parsedMin : null;
             float? max = TryReadJsonFloat(row[maxName], out float parsedMax) ? parsedMax : null;
             return new WorldgenValueRange(min, max);
+        }
+    }
+
+    private readonly record struct WorldgenLandformDraft(
+        string? Code,
+        string? HexColor,
+        float[] Octaves,
+        float[] OctaveThresholds,
+        float[] YKeyPositions,
+        float[] YKeyThresholds)
+    {
+        public bool IsUsable => Octaves.Length > 0 && YKeyPositions.Length > 0 && YKeyThresholds.Length > 0;
+
+        public static WorldgenLandformDraft FromJson(JObject row)
+        {
+            return new WorldgenLandformDraft(
+                row["code"]?.ToString(),
+                row["hexcolor"]?.ToString(),
+                ReadFloatArray(row["terrainOctaves"] as JArray),
+                ReadFloatArray(row["terrainOctaveThresholds"] as JArray),
+                ReadFloatArray(row["terrainYKeyPositions"] as JArray),
+                ReadFloatArray(row["terrainYKeyThresholds"] as JArray));
+        }
+
+        public float SampleHeight(long seed, float worldX, float worldZ)
+        {
+            float terrainNoise = SampleTerrainNoise(seed, worldX, worldZ);
+            return Math.Clamp(ResolveYPosition(terrainNoise), 0f, 1f);
+        }
+
+        private float SampleTerrainNoise(long seed, float worldX, float worldZ)
+        {
+            float total = 0f;
+            float totalWeight = 0f;
+            for (int i = 0; i < Octaves.Length; i++)
+            {
+                float weight = Octaves[i];
+                if (Math.Abs(weight) < 0.0001f) continue;
+
+                float threshold = i < OctaveThresholds.Length ? OctaveThresholds[i] : 0f;
+                double frequency = Math.Pow(2.0, i) / 4096.0;
+                float value = ValueNoise01(seed, worldX * frequency, worldZ * frequency, i);
+                if (threshold > 0f)
+                {
+                    value = Math.Clamp((value - threshold) / Math.Max(0.0001f, 1f - threshold), 0f, 1f);
+                }
+
+                total += value * weight;
+                totalWeight += Math.Abs(weight);
+            }
+
+            if (totalWeight <= 0.0001f)
+            {
+                return YKeyThresholds.Length > 0 ? Math.Clamp(YKeyThresholds[0], 0f, 1f) : 0.5f;
+            }
+
+            return Math.Clamp(total / totalWeight, 0f, 1f);
+        }
+
+        private float ResolveYPosition(float terrainNoise)
+        {
+            int count = Math.Min(YKeyPositions.Length, YKeyThresholds.Length);
+            if (count <= 0) return terrainNoise;
+            if (count == 1) return YKeyPositions[0];
+
+            for (int i = 0; i < count - 1; i++)
+            {
+                float thresholdA = YKeyThresholds[i];
+                float thresholdB = YKeyThresholds[i + 1];
+                float min = Math.Min(thresholdA, thresholdB);
+                float max = Math.Max(thresholdA, thresholdB);
+                if (terrainNoise < min || terrainNoise > max) continue;
+
+                float denominator = thresholdB - thresholdA;
+                float t = Math.Abs(denominator) < 0.0001f
+                    ? 0f
+                    : (terrainNoise - thresholdA) / denominator;
+                return YKeyPositions[i] + (YKeyPositions[i + 1] - YKeyPositions[i]) * Math.Clamp(t, 0f, 1f);
+            }
+
+            int nearestIndex = 0;
+            float nearestDistance = Math.Abs(terrainNoise - YKeyThresholds[0]);
+            for (int i = 1; i < count; i++)
+            {
+                float distance = Math.Abs(terrainNoise - YKeyThresholds[i]);
+                if (distance >= nearestDistance) continue;
+                nearestDistance = distance;
+                nearestIndex = i;
+            }
+
+            return YKeyPositions[nearestIndex];
+        }
+
+        private static float[] ReadFloatArray(JArray? array)
+        {
+            if (array == null || array.Count == 0) return [];
+
+            List<float> values = new(array.Count);
+            foreach (JToken token in array)
+            {
+                if (TryReadJsonFloat(token, out float value))
+                {
+                    values.Add(value);
+                }
+            }
+
+            return values.ToArray();
+        }
+
+        private static float ValueNoise01(long seed, double x, double z, int octave)
+        {
+            int x0 = (int)Math.Floor(x);
+            int z0 = (int)Math.Floor(z);
+            double fx = x - x0;
+            double fz = z - z0;
+            double sx = fx * fx * (3.0 - 2.0 * fx);
+            double sz = fz * fz * (3.0 - 2.0 * fz);
+
+            double a = Lerp(Hash01(seed, x0, z0, octave), Hash01(seed, x0 + 1, z0, octave), sx);
+            double b = Lerp(Hash01(seed, x0, z0 + 1, octave), Hash01(seed, x0 + 1, z0 + 1, octave), sx);
+            return (float)Lerp(a, b, sz);
+        }
+
+        private static double Lerp(double a, double b, double t) => a + (b - a) * t;
+
+        private static double Hash01(long seed, int x, int z, int octave)
+        {
+            unchecked
+            {
+                ulong hash = (ulong)seed;
+                hash ^= (ulong)(uint)x * 0x9E3779B185EBCA87UL;
+                hash ^= (ulong)(uint)z * 0xC2B2AE3D27D4EB4FUL;
+                hash ^= (ulong)(uint)octave * 0x165667B19E3779F9UL;
+                hash ^= hash >> 33;
+                hash *= 0xff51afd7ed558ccdUL;
+                hash ^= hash >> 33;
+                hash *= 0xc4ceb9fe1a85ec53UL;
+                hash ^= hash >> 33;
+                return (hash & 0x00FFFFFFUL) / (double)0x01000000UL;
+            }
         }
     }
 
