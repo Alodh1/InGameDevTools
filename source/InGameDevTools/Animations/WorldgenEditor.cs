@@ -81,6 +81,8 @@ public sealed partial class DebugWindowManager
     private bool _worldgenPreviewInitialized;
     private ICoreServerAPI? _worldgenPreviewServerApi;
     private GenMaps? _worldgenPreviewGenMaps;
+    private Dictionary<int, string>? _worldgenPreviewLandformCodes;
+    private Dictionary<int, string>? _worldgenPreviewProvinceCodes;
     private string _worldgenPreviewServerStatus = "Singleplayer server API not checked.";
     private MapLayerBase? _worldgenPreviewMapLayer;
     private int _worldgenPreviewMapLayerMode = -1;
@@ -1017,6 +1019,39 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private static object? TryGetReflectedMember(object? instance, string memberName)
+    {
+        if (instance == null) return null;
+
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic;
+
+        Type type = instance.GetType();
+        try
+        {
+            System.Reflection.PropertyInfo? property = type.GetProperty(memberName, flags);
+            if (property != null && property.GetIndexParameters().Length == 0)
+            {
+                return property.GetValue(instance);
+            }
+        }
+        catch
+        {
+            // Field fallback below.
+        }
+
+        try
+        {
+            return type.GetField(memberName, flags)?.GetValue(instance);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static string FormatInvariant(object? value, string fallback)
     {
         if (value == null) return fallback;
@@ -1044,9 +1079,7 @@ public sealed partial class DebugWindowManager
             try
             {
                 int value = layer.GenLayer(blockX, blockZ, 1, 1)[0];
-                return mode == WorldgenPreviewModeClimate
-                    ? FormatWorldgenClimateMapValue(value)
-                    : $"{WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)]} value: {value}";
+                return FormatWorldgenMapLayerValue(mode, value, layer);
             }
             catch (Exception exception)
             {
@@ -1148,12 +1181,106 @@ public sealed partial class DebugWindowManager
         return $"Climate packed: temp {temp}, rain {rain}, aux {aux}";
     }
 
+    private string FormatWorldgenMapLayerValue(int mode, int value, MapLayerBase layer)
+    {
+        if (mode == WorldgenPreviewModeClimate)
+        {
+            return FormatWorldgenClimateMapValue(value);
+        }
+
+        Dictionary<int, string>? codes = GetWorldgenPreviewLayerCodes(mode, layer);
+        string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)];
+        if (codes != null && codes.TryGetValue(value, out string? code) && !string.IsNullOrWhiteSpace(code))
+        {
+            return $"{modeLabel}: {code} ({value})";
+        }
+
+        return $"{modeLabel} value: {value}";
+    }
+
+    private Dictionary<int, string>? GetWorldgenPreviewLayerCodes(int mode, MapLayerBase layer)
+    {
+        if (mode == WorldgenPreviewModeLandform)
+        {
+            return _worldgenPreviewLandformCodes ??= BuildWorldgenPreviewIndexCodeMap(
+                TryGetReflectedMember(TryGetReflectedMember(layer, "noiseLandforms"), "landforms"),
+                ["LandFormsByIndex", "Variants"]);
+        }
+
+        if (mode == WorldgenPreviewModeProvince)
+        {
+            return _worldgenPreviewProvinceCodes ??= BuildWorldgenPreviewIndexCodeMap(
+                TryGetReflectedMember(TryGetReflectedMember(layer, "noiseGeoProvince"), "provinces"),
+                ["Variants"]);
+        }
+
+        return null;
+    }
+
+    private static Dictionary<int, string> BuildWorldgenPreviewIndexCodeMap(object? worldProperty, IReadOnlyList<string> variantMemberNames)
+    {
+        Dictionary<int, string> codes = [];
+        if (worldProperty == null) return codes;
+
+        foreach (string memberName in variantMemberNames)
+        {
+            AddWorldgenPreviewVariantCodes(codes, TryGetReflectedMember(worldProperty, memberName));
+        }
+
+        return codes;
+    }
+
+    private static void AddWorldgenPreviewVariantCodes(Dictionary<int, string> codes, object? variants)
+    {
+        if (variants is not System.Collections.IEnumerable enumerable || variants is string) return;
+
+        int arrayIndex = 0;
+        foreach (object? variant in enumerable)
+        {
+            if (variant != null)
+            {
+                int index = TryGetWorldgenPreviewVariantIndex(variant) ?? arrayIndex;
+                string? code = TryGetWorldgenPreviewVariantCode(variant);
+                if (!string.IsNullOrWhiteSpace(code) && !codes.ContainsKey(index))
+                {
+                    codes[index] = code;
+                }
+            }
+
+            arrayIndex++;
+        }
+    }
+
+    private static int? TryGetWorldgenPreviewVariantIndex(object variant)
+    {
+        object? raw = TryGetReflectedMember(variant, "Index") ?? TryGetReflectedMember(variant, "index");
+        if (raw == null) return null;
+
+        try
+        {
+            return Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryGetWorldgenPreviewVariantCode(object variant)
+    {
+        object? raw = TryGetReflectedMember(variant, "Code") ?? TryGetReflectedMember(variant, "code");
+        string? code = raw?.ToString();
+        return string.IsNullOrWhiteSpace(code) ? null : code;
+    }
+
     private void RefreshWorldgenServerApi()
     {
         try
         {
             _worldgenPreviewGenMaps = null;
             _worldgenPreviewMapLayer = null;
+            _worldgenPreviewLandformCodes = null;
+            _worldgenPreviewProvinceCodes = null;
             InvalidateWorldgenPreviewRasterCache();
 
             if (TryFindWorldgenServerApi(out ICoreServerAPI? serverApi, out string source))
