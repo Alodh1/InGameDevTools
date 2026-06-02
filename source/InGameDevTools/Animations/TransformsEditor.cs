@@ -27,7 +27,10 @@ public sealed partial class DebugWindowManager
     private DevToolsPreview3DRenderer? _transformsPreviewRenderer;
     private DevToolsPreviewMesh? _transformPreviewMesh;
     private DevToolsPreviewMesh? _transformReferenceMesh;
+    private Matrixf _transformPreviewModelMatrix = CreateIdentityMatrix();
+    private Matrixf _transformReferenceModelMatrix = CreateIdentityMatrix();
     private string _transformPreviewCacheKey = "";
+    private string _transformPreviewPlacementStatus = "";
     private string _transformsFilter = "";
     private string _transformsDomainFilter = "";
     private int _transformsAssetIndex;
@@ -49,6 +52,7 @@ public sealed partial class DebugWindowManager
     private float _transformPreviewDistance = 4.5f;
     private Vector3 _transformPreviewTarget = new(0.5f, 0.5f, 0.5f);
     private Vector3 _transformPreviewAnchor = Vector3.Zero;
+    private bool _transformViewportGizmoAtAnchor;
     private TransformGizmoAxis _transformViewportGizmoDragAxis = TransformGizmoAxis.None;
     private TransformGizmoMode _transformViewportGizmoDragMode = TransformGizmoMode.None;
     private NVector2 _transformViewportGizmoDragMouseStart;
@@ -929,10 +933,8 @@ public sealed partial class DebugWindowManager
 
         BuildTransformPreviewMeshes(asset, slot, transform);
         List<DevToolsPreviewMeshInstance> instances = [];
-        Matrixf identity = new();
-        identity.Identity();
-        if (_transformReferenceMesh != null) instances.Add(new(_transformReferenceMesh, identity));
-        if (_transformPreviewMesh != null) instances.Add(new(_transformPreviewMesh, identity));
+        if (_transformReferenceMesh != null) instances.Add(new(_transformReferenceMesh, _transformReferenceModelMatrix));
+        if (_transformPreviewMesh != null) instances.Add(new(_transformPreviewMesh, _transformPreviewModelMatrix));
 
         DevToolsPreviewCamera camera = BuildTransformPreviewCamera(min, max);
         int textureId = EnsureTransformsPreviewRenderer().RenderToTexture(max.X - min.X, max.Y - min.Y, camera, instances, out string? skipReason);
@@ -955,6 +957,10 @@ public sealed partial class DebugWindowManager
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(min + new NVector2(12f, 10f), text, $"{asset.Label} / {slot.DisplayName}");
         drawList.AddText(min + new NVector2(12f, 30f), text, "RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms.");
+        if (!string.IsNullOrWhiteSpace(_transformPreviewPlacementStatus))
+        {
+            drawList.AddText(min + new NVector2(12f, 50f), text, _transformPreviewPlacementStatus);
+        }
     }
 
     private void DrawTransformsInspector(NVector2 size)
@@ -1125,9 +1131,12 @@ public sealed partial class DebugWindowManager
     private void DrawTransformReferenceSelector(TransformSlotSelection slot)
     {
         ImGui.SeparatorText("Reference");
-        string defaultReference = GetDefaultReferenceBlockCode(slot.AttributeCode);
-        string effectiveReference = string.IsNullOrWhiteSpace(_transformReferenceBlockCode) ? defaultReference : _transformReferenceBlockCode;
-        ImGui.TextDisabled(string.IsNullOrWhiteSpace(effectiveReference) ? "No reference block" : $"Reference: {effectiveReference}");
+        TransformReferenceResolution resolution = ResolveTransformReference(slot.Asset, slot);
+        ImGui.TextDisabled(resolution.Block == null ? "No reference block" : $"Reference: {resolution.Code}");
+        if (!string.IsNullOrWhiteSpace(resolution.Reason))
+        {
+            ImGui.TextWrapped(resolution.Reason);
+        }
         ImGui.SetNextItemWidth(-1);
         ImGui.InputTextWithHint("##transform-reference-filter", "reference block filter", ref _transformReferenceFilter, 120);
         List<string> options = BuildReferenceBlockOptions(_transformReferenceFilter).Take(250).ToList();
@@ -1258,10 +1267,8 @@ public sealed partial class DebugWindowManager
 
     private void BuildTransformPreviewMeshes(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform)
     {
-        string referenceCode = string.IsNullOrWhiteSpace(_transformReferenceBlockCode)
-            ? GetDefaultReferenceBlockCode(slot.AttributeCode)
-            : _transformReferenceBlockCode;
-        string cacheKey = $"{slot.Key}|{referenceCode}|{JsonUtil.ToString(transform)}";
+        TransformReferenceResolution referenceResolution = ResolveTransformReference(asset, slot);
+        string cacheKey = $"{slot.Key}|{referenceResolution.Code}|{referenceResolution.Reason}|{JsonUtil.ToString(transform)}";
         if (cacheKey == _transformPreviewCacheKey) return;
 
         _transformPreviewCacheKey = cacheKey;
@@ -1269,25 +1276,21 @@ public sealed partial class DebugWindowManager
         _transformReferenceMesh?.Dispose();
         _transformPreviewMesh = null;
         _transformReferenceMesh = null;
+        _transformPreviewModelMatrix = CreateIdentityMatrix();
+        _transformReferenceModelMatrix = CreateIdentityMatrix();
         _transformPreviewAnchor = Vector3.Zero;
+        _transformViewportGizmoAtAnchor = false;
+        _transformPreviewPlacementStatus = "";
 
         try
         {
             TransformGizmoContext context = GetGizmoContextForTransformCode(slot.AttributeCode);
-            Block? reference = null;
-            if (!string.IsNullOrWhiteSpace(referenceCode))
-            {
-                reference = _api.World.GetBlock(AssetLocation.Create(referenceCode, "game"));
-            }
+            Block? reference = referenceResolution.Block;
 
             if (reference != null)
             {
                 _api.Tesselator.TesselateBlock(reference, out MeshData referenceMesh);
                 _transformReferenceMesh = DevToolsPreviewMeshFactory.FromMesh(_api, $"ref:{reference.Code}", referenceMesh);
-                if (_transformReferenceMesh != null)
-                {
-                    _transformPreviewAnchor = GetTransformReferenceAnchor(context, _transformReferenceMesh.Bounds);
-                }
             }
 
             MeshData mesh;
@@ -1305,24 +1308,13 @@ public sealed partial class DebugWindowManager
             }
 
             mesh.ModelTransform(transform);
-            bool runtimePlaced = TryApplyRuntimeTransformPlacement(slot.AttributeCode, mesh, out Vector3 runtimeAnchor);
-            if (runtimePlaced)
-            {
-                _transformPreviewAnchor = runtimeAnchor;
-            }
-            else
-            {
-                DevToolsPreviewBounds transformedBounds = DevToolsPreviewMeshFactory.CalculateBounds(mesh);
-                if (_transformReferenceMesh != null && transformedBounds.IsValid)
-                {
-                    Vector3 meshAnchor = GetTransformMeshAnchor(context, transformedBounds);
-                    Vector3 offset = _transformPreviewAnchor - meshAnchor;
-                    if (offset.LengthSquared > 0.000001f)
-                    {
-                        mesh.Translate(offset.X, offset.Y, offset.Z);
-                    }
-                }
-            }
+            TransformPreviewPlacement placement = BuildTransformPreviewPlacement(slot.AttributeCode, reference, context, _transformReferenceMesh?.Bounds, mesh);
+            _transformPreviewModelMatrix = placement.ItemMatrix;
+            _transformPreviewAnchor = placement.Anchor;
+            _transformViewportGizmoAtAnchor = placement.GizmoAtAnchor;
+            _transformPreviewPlacementStatus = string.IsNullOrWhiteSpace(referenceResolution.Reason)
+                ? placement.Status
+                : $"{referenceResolution.Reason}; {placement.Status}";
 
             _transformPreviewMesh = DevToolsPreviewMeshFactory.FromMesh(_api, asset.Label, mesh);
 
@@ -1450,6 +1442,7 @@ public sealed partial class DebugWindowManager
 
     private Vector3 GetTransformViewportGizmoCenter()
     {
+        if (_transformViewportGizmoAtAnchor) return _transformPreviewAnchor;
         return _transformPreviewMesh?.Bounds.Center ?? _transformPreviewAnchor;
     }
 
@@ -1849,17 +1842,125 @@ public sealed partial class DebugWindowManager
         };
     }
 
-    private static bool TryApplyRuntimeTransformPlacement(string attributeCode, MeshData mesh, out Vector3 anchor)
+    private TransformPreviewPlacement BuildTransformPreviewPlacement(
+        string attributeCode,
+        Block? reference,
+        TransformGizmoContext context,
+        DevToolsPreviewBounds? referenceBounds,
+        MeshData mesh)
     {
-        if (attributeCode.Contains("forge", StringComparison.OrdinalIgnoreCase))
+        if (TryBuildForgeTransformPlacement(attributeCode, out TransformPreviewPlacement forgePlacement))
         {
-            mesh.Translate(0f, 0.6875f, 0f);
-            anchor = new Vector3(0.5f, 0.6875f, 0.5f);
+            return forgePlacement;
+        }
+
+        if (reference != null &&
+            ReferenceInventoryTransformMatches(reference, attributeCode, out string configuredAttribute) &&
+            TryBuildInventoryTransformPlacement(reference, configuredAttribute, out TransformPreviewPlacement inventoryPlacement))
+        {
+            return inventoryPlacement;
+        }
+
+        Matrixf identity = CreateIdentityMatrix();
+        DevToolsPreviewBounds transformedBounds = DevToolsPreviewMeshFactory.CalculateBounds(mesh);
+        if (referenceBounds is { IsValid: true } validReferenceBounds && transformedBounds.IsValid)
+        {
+            Vector3 referenceAnchor = GetTransformReferenceAnchor(context, validReferenceBounds);
+            Vector3 meshAnchor = GetTransformMeshAnchor(context, transformedBounds);
+            Vector3 offset = referenceAnchor - meshAnchor;
+            if (offset.LengthSquared > 0.000001f)
+            {
+                mesh.Translate(offset.X, offset.Y, offset.Z);
+                transformedBounds = DevToolsPreviewMeshFactory.CalculateBounds(mesh);
+            }
+
+            string status = context is TransformGizmoContext.Display or TransformGizmoContext.Ground
+                ? "placement: bounds fallback"
+                : "placement: no metadata provider; item left in transform-local space";
+            return new(identity, referenceAnchor, context is TransformGizmoContext.Display or TransformGizmoContext.Ground, status);
+        }
+
+        Vector3 anchor = transformedBounds.IsValid ? transformedBounds.Center : Vector3.Zero;
+        return new(identity, anchor, false, "placement: no reference provider");
+    }
+
+    private static bool TryBuildForgeTransformPlacement(string attributeCode, out TransformPreviewPlacement placement)
+    {
+        if (GetTransformBaseAttributeCode(attributeCode).Contains("forge", StringComparison.OrdinalIgnoreCase))
+        {
+            Matrixf matrix = CreateIdentityMatrix();
+            matrix.Translate(0f, 0.6875f, 0f);
+            placement = new(matrix, new Vector3(0.5f, 0.6875f, 0.5f), true, "placement: forge runtime anchor");
             return true;
         }
 
-        anchor = Vector3.Zero;
+        placement = TransformPreviewPlacement.Empty;
         return false;
+    }
+
+    private static bool TryBuildInventoryTransformPlacement(Block reference, string configuredAttribute, out TransformPreviewPlacement placement)
+    {
+        if (!TryGetFirstReferenceSlotCenter(reference, out Vector3 center))
+        {
+            placement = TransformPreviewPlacement.Empty;
+            return false;
+        }
+
+        Vector3 slotRotation = ReadRotationDegrees(GetFirstRotationByIndex(reference, 0));
+        Vector3 blockRotation = ReadRotationDegrees(reference.Attributes?["rotate"]);
+        Matrixf matrix = CreateIdentityMatrix();
+        matrix.Translate(center.X, center.Y, center.Z)
+            .RotateX(slotRotation.X * GameMath.DEG2RAD)
+            .RotateY(slotRotation.Y * GameMath.DEG2RAD)
+            .RotateZ(slotRotation.Z * GameMath.DEG2RAD)
+            .RotateX(blockRotation.X * GameMath.DEG2RAD)
+            .RotateY(blockRotation.Y * GameMath.DEG2RAD)
+            .RotateZ(blockRotation.Z * GameMath.DEG2RAD);
+
+        placement = new(matrix, center, true, $"placement: {configuredAttribute} slot 0");
+        return true;
+    }
+
+    private static bool TryGetFirstReferenceSlotCenter(Block reference, out Vector3 center)
+    {
+        Cuboidf[]? boxes = reference.SelectionBoxes;
+        if (boxes == null || boxes.Length == 0) boxes = reference.CollisionBoxes;
+        if (boxes == null || boxes.Length == 0)
+        {
+            center = new Vector3(0.5f, 0.5f, 0.5f);
+            return true;
+        }
+
+        Cuboidf box = boxes[0];
+        center = new Vector3(
+            box.X1 + (box.X2 - box.X1) * 0.5f,
+            box.Y1 + (box.Y2 - box.Y1) * 0.5f,
+            box.Z1 + (box.Z2 - box.Z1) * 0.5f);
+        return true;
+    }
+
+    private static JsonObject? GetFirstRotationByIndex(Block reference, int index)
+    {
+        if (reference.Attributes == null || !reference.Attributes.KeyExists("rotations")) return null;
+        JsonObject[]? rotations = reference.Attributes["rotations"].AsArray();
+        if (rotations == null) return null;
+        return rotations.Length > index ? rotations[index] : null;
+    }
+
+    private static Vector3 ReadRotationDegrees(JsonObject? json)
+    {
+        if (json == null) return Vector3.Zero;
+        return new Vector3(
+            json["x"].AsFloat(0f),
+            json["y"].AsFloat(0f),
+            json["z"].AsFloat(0f));
+    }
+
+    private static Matrixf CreateIdentityMatrix()
+    {
+        Matrixf matrix = new();
+        matrix.Identity();
+        return matrix;
     }
 
     private void ResetTransformPreviewCameraToSelection()
@@ -2209,15 +2310,113 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private static string GetDefaultReferenceBlockCode(string attributeCode)
+    private TransformReferenceResolution ResolveTransformReference(TransformAssetEntry asset, TransformSlotSelection slot)
     {
-        if (attributeCode.Contains("forge", StringComparison.OrdinalIgnoreCase)) return "game:forge";
-        if (attributeCode.Contains("firepit", StringComparison.OrdinalIgnoreCase)) return "game:firepit";
-        if (attributeCode.Contains("trap", StringComparison.OrdinalIgnoreCase)) return "game:baskettrap";
-        if (attributeCode.Contains("shelf", StringComparison.OrdinalIgnoreCase)) return "game:shelf";
-        if (attributeCode.Contains("toolrack", StringComparison.OrdinalIgnoreCase)) return "game:toolrack";
-        if (attributeCode.Contains("display", StringComparison.OrdinalIgnoreCase)) return "game:displaycase";
-        if (attributeCode.Contains("groundStorage", StringComparison.OrdinalIgnoreCase)) return "game:groundstorage";
+        if (!string.IsNullOrWhiteSpace(_transformReferenceBlockCode))
+        {
+            Block? manualBlock = ResolveReferenceBlock(_transformReferenceBlockCode);
+            return manualBlock == null
+                ? new(null, _transformReferenceBlockCode, $"Manual reference not found: {_transformReferenceBlockCode}", true)
+                : new(manualBlock, manualBlock.Code.ToString(), $"Manual reference: {manualBlock.Code}", true);
+        }
+
+        TransformReferenceCandidate? best = null;
+        foreach (Block block in _api.World.Blocks)
+        {
+            if (block?.Code == null) continue;
+            if (!ReferenceInventoryTransformMatches(block, slot.AttributeCode, out string configuredAttribute)) continue;
+
+            int score = 1000;
+            if (block.Code.Domain.Equals(asset.Domain, StringComparison.OrdinalIgnoreCase)) score += 100;
+            score += GetReferenceOrientationScore(block.Code.Path);
+            if (HasNonEmptyEnumerableProperty(block, "CreativeInventoryTabs") ||
+                HasNonEmptyEnumerableProperty(block, "CreativeInventoryStacks"))
+            {
+                score += 10;
+            }
+
+            TransformReferenceCandidate candidate = new(block, score, $"Default reference from {configuredAttribute}: {block.Code}");
+            if (best == null ||
+                candidate.Score > best.Score ||
+                (candidate.Score == best.Score && string.Compare(candidate.Block.Code.ToString(), best.Block.Code.ToString(), StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                best = candidate;
+            }
+        }
+
+        if (best != null)
+        {
+            return new(best.Block, best.Block.Code.ToString(), best.Reason, false);
+        }
+
+        string fallbackCode = GetFallbackDefaultReferenceBlockCode(slot.AttributeCode);
+        if (!string.IsNullOrWhiteSpace(fallbackCode))
+        {
+            Block? fallbackBlock = ResolveReferenceBlock(fallbackCode);
+            if (fallbackBlock != null)
+            {
+                return new(fallbackBlock, fallbackBlock.Code.ToString(), $"Default reference fallback: {fallbackBlock.Code}", false);
+            }
+        }
+
+        return new(null, "", "No metadata-backed reference block found.", false);
+    }
+
+    private Block? ResolveReferenceBlock(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return null;
+        return _api.World.GetBlock(AssetLocation.Create(code, "game"));
+    }
+
+    private static bool ReferenceInventoryTransformMatches(Block block, string attributeCode, out string configuredAttribute)
+    {
+        configuredAttribute = block.Attributes?["inventoryTransformAttribute"].AsString("") ?? "";
+        if (string.IsNullOrWhiteSpace(configuredAttribute)) return false;
+
+        string baseAttribute = GetTransformBaseAttributeCode(attributeCode);
+        return configuredAttribute.Equals(attributeCode, StringComparison.OrdinalIgnoreCase) ||
+               configuredAttribute.Equals(baseAttribute, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int GetReferenceOrientationScore(string path)
+    {
+        if (path.Contains("-east", StringComparison.OrdinalIgnoreCase)) return 8;
+        if (path.Contains("-north", StringComparison.OrdinalIgnoreCase)) return 7;
+        if (path.Contains("-south", StringComparison.OrdinalIgnoreCase)) return 6;
+        if (path.Contains("-west", StringComparison.OrdinalIgnoreCase)) return 5;
+        if (path.Contains("-up", StringComparison.OrdinalIgnoreCase)) return 4;
+        return 0;
+    }
+
+    private static bool HasNonEmptyEnumerableProperty(object instance, string propertyName)
+    {
+        try
+        {
+            object? value = instance.GetType().GetProperty(propertyName)?.GetValue(instance);
+            return value switch
+            {
+                Array array => array.Length > 0,
+                System.Collections.IEnumerable enumerable => enumerable.GetEnumerator().MoveNext(),
+                _ => value != null
+            };
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string GetFallbackDefaultReferenceBlockCode(string attributeCode)
+    {
+        string baseAttribute = GetTransformBaseAttributeCode(attributeCode);
+        if (baseAttribute.Contains("forge", StringComparison.OrdinalIgnoreCase)) return "game:forge";
+        if (baseAttribute.Contains("firepit", StringComparison.OrdinalIgnoreCase)) return "game:firepit";
+        if (baseAttribute.Contains("trap", StringComparison.OrdinalIgnoreCase)) return "game:baskettrap";
+        if (baseAttribute.Contains("shelf", StringComparison.OrdinalIgnoreCase)) return "game:shelf";
+        if (baseAttribute.Contains("toolrack", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("rack", StringComparison.OrdinalIgnoreCase)) return "game:toolrack";
+        if (baseAttribute.Contains("display", StringComparison.OrdinalIgnoreCase)) return "game:displaycase";
+        if (baseAttribute.Contains("groundStorage", StringComparison.OrdinalIgnoreCase)) return "game:groundstorage";
         return "";
     }
 
@@ -2250,6 +2449,15 @@ public sealed partial class DebugWindowManager
         public string Key => $"{Asset.Key}|{AttributeCode}|{TypedKey ?? ""}";
         public string DisplayName => TypedKey == null ? AttributeCode : $"{AttributeCode} / {TypedKey}";
         public bool CanSaveToSource => true;
+    }
+
+    private sealed record TransformReferenceResolution(Block? Block, string Code, string Reason, bool IsManual);
+
+    private sealed record TransformReferenceCandidate(Block Block, int Score, string Reason);
+
+    private readonly record struct TransformPreviewPlacement(Matrixf ItemMatrix, Vector3 Anchor, bool GizmoAtAnchor, string Status)
+    {
+        public static TransformPreviewPlacement Empty => new(CreateIdentityMatrix(), Vector3.Zero, false, "");
     }
 
     private sealed class TransformSourceSaveFile
