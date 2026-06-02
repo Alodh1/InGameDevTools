@@ -16,7 +16,7 @@ public sealed partial class DebugWindowManager
     private bool _configLibIndexed;
     private string _configLibFilter = "";
     private int _configLibSelectedIndex;
-    private bool _configLibPrimitiveOnly = true;
+    private bool _configLibShowComplexValues = true;
     private bool _configLibIncludeStrings = true;
     private bool _configLibGenerateSeparators = true;
     private bool _configLibModConfigIncludedOnly;
@@ -218,14 +218,14 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SeparatorText("Detected settings");
-        bool primitiveOnly = _configLibPrimitiveOnly;
-        if (ImGui.Checkbox("Primitive values only##configlib-primitive-only", ref primitiveOnly))
+        bool showComplexValues = _configLibShowComplexValues;
+        if (ImGui.Checkbox("Show complex values##configlib-show-complex", ref showComplexValues))
         {
-            _configLibPrimitiveOnly = primitiveOnly;
+            _configLibShowComplexValues = showComplexValues;
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("When enabled, arrays and objects are skipped instead of emitted as ConfigLib 'other' settings.");
+            ImGui.SetTooltip("Arrays and objects are listed for visibility, but are disabled until ConfigLib mapping export is implemented.");
         }
 
         ImGui.SameLine();
@@ -242,6 +242,8 @@ public sealed partial class DebugWindowManager
             for (int index = 0; index < entry.Settings.Count; index++)
             {
                 ConfigLibSettingDraft setting = entry.Settings[index];
+                if (!_configLibShowComplexValues && IsConfigLibComplexSetting(setting)) continue;
+
                 bool selectableByType = IsConfigLibSettingSelectable(setting);
                 bool include = setting.Include && selectableByType;
                 if (!selectableByType)
@@ -322,7 +324,7 @@ public sealed partial class DebugWindowManager
         ImGui.Checkbox("ModConfig included settings only##configlib-modconfig-included-only", ref _configLibModConfigIncludedOnly);
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Off copies the full selected ModConfig JSON. On emits only the enabled settings from the middle panel.");
+            ImGui.SetTooltip("Off copies the full selected ModConfig JSON. On emits only enabled settings; excluding required keys can make the target mod reject the generated config.");
         }
 
         string patchPreview = BuildConfigLibPatchJson(entry, targetDomain);
@@ -444,6 +446,7 @@ public sealed partial class DebugWindowManager
     private string BuildConfigLibPatchJson(ConfigLibSourceEntry entry, string targetDomain)
     {
         JArray settings = [];
+        JArray formatting = [];
         string lastSeparator = "";
         int order = 1;
 
@@ -452,7 +455,7 @@ public sealed partial class DebugWindowManager
             string separator = GetConfigLibSeparatorName(draft.Code);
             if (_configLibGenerateSeparators && !string.IsNullOrWhiteSpace(separator) && !string.Equals(separator, lastSeparator, StringComparison.OrdinalIgnoreCase))
             {
-                settings.Add(new JObject
+                formatting.Add(new JObject
                 {
                     ["type"] = "separator",
                     ["title"] = HumanizeConfigLibName(separator),
@@ -483,9 +486,13 @@ public sealed partial class DebugWindowManager
         {
             ["version"] = _configLibVersion,
             ["file"] = entry.RelativeFilePath,
-            ["patches"] = new JObject(),
             ["settings"] = settings
         };
+
+        if (formatting.Count > 0)
+        {
+            root["formatting"] = formatting;
+        }
 
         _ = targetDomain;
         return root.ToString(Formatting.Indented);
@@ -514,9 +521,15 @@ public sealed partial class DebugWindowManager
 
     private bool IsConfigLibSettingSelectable(ConfigLibSettingDraft setting)
     {
+        if (string.IsNullOrWhiteSpace(setting.Code)) return false;
+        if (IsConfigLibComplexSetting(setting)) return false;
         if (!_configLibIncludeStrings && string.Equals(setting.Type, "string", StringComparison.OrdinalIgnoreCase)) return false;
-        if (_configLibPrimitiveOnly && string.Equals(setting.Type, "other", StringComparison.OrdinalIgnoreCase)) return false;
         return true;
+    }
+
+    private static bool IsConfigLibComplexSetting(ConfigLibSettingDraft setting)
+    {
+        return string.Equals(setting.Type, "other", StringComparison.OrdinalIgnoreCase);
     }
 
     private string GetConfigLibTargetDomain(ConfigLibSourceEntry entry)
@@ -644,7 +657,7 @@ public sealed partial class DebugWindowManager
                 {
                     foreach (JProperty property in obj.Properties())
                     {
-                        VisitConfigLibToken(property.Value, $"{path}/{property.Name}", settings);
+                        VisitConfigLibToken(property.Value, JoinConfigLibPath(path, property.Name), settings);
                     }
                 }
                 else
@@ -652,22 +665,19 @@ public sealed partial class DebugWindowManager
                     settings.Add(ConfigLibSettingDraft.From(path, "other", MakeJsonCompatibleDefault(token)));
                     foreach (JProperty property in obj.Properties())
                     {
-                        VisitConfigLibToken(property.Value, $"{path}/{property.Name}", settings);
+                        VisitConfigLibToken(property.Value, JoinConfigLibPath(path, property.Name), settings);
                     }
                 }
                 break;
             case JArray array:
-                if (array.Count > 0 && array.All(IsConfigLibPrimitiveToken))
+                if (!string.IsNullOrWhiteSpace(path))
                 {
                     settings.Add(ConfigLibSettingDraft.From(path, "other", MakeJsonCompatibleDefault(token)));
                 }
-                else
+
+                for (int index = 0; index < array.Count; index++)
                 {
-                    settings.Add(ConfigLibSettingDraft.From(path, "other", MakeJsonCompatibleDefault(token)));
-                    for (int index = 0; index < array.Count; index++)
-                    {
-                        VisitConfigLibToken(array[index], $"{path}/{index}", settings);
-                    }
+                    VisitConfigLibToken(array[index], JoinConfigLibPath(path, index.ToString()), settings);
                 }
                 break;
             default:
@@ -677,6 +687,11 @@ public sealed partial class DebugWindowManager
                 }
                 break;
         }
+    }
+
+    private static string JoinConfigLibPath(string path, string child)
+    {
+        return string.IsNullOrWhiteSpace(path) ? child : $"{path}/{child}";
     }
 
     private static bool IsConfigLibPrimitiveToken(JToken token)
@@ -810,16 +825,19 @@ public sealed partial class DebugWindowManager
             Code = code;
             Type = type;
             Default = defaultValue;
+            Include = !string.Equals(type, "other", StringComparison.OrdinalIgnoreCase);
             Name = SanitizeConfigLibName(code);
             DefaultPreview = BuildDefaultPreview(defaultValue);
-            Tooltip = $"{code}\nType: {type}\nDefault: {DefaultPreview}";
+            Tooltip = string.Equals(type, "other", StringComparison.OrdinalIgnoreCase)
+                ? $"{code}\nType: {type}\nArrays and objects need ConfigLib mapping support and are not exported yet.\nDefault: {DefaultPreview}"
+                : $"{code}\nType: {type}\nDefault: {DefaultPreview}";
         }
 
         public string Code { get; }
         public string Name { get; }
         public string Type { get; }
         public JToken Default { get; }
-        public bool Include { get; set; } = true;
+        public bool Include { get; set; }
         public string DefaultPreview { get; }
         public string Tooltip { get; }
 
