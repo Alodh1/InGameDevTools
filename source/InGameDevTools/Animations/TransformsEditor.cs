@@ -2579,11 +2579,7 @@ public sealed partial class DebugWindowManager
         foreach (Block candidate in _api.World.Blocks)
         {
             if (candidate?.Code == null) continue;
-            string path = candidate.Code.Path;
-            string full = candidate.Code.ToString();
-            string? matchedToken = tokens.FirstOrDefault(token =>
-                path.Contains(token, StringComparison.OrdinalIgnoreCase) ||
-                full.Contains(token, StringComparison.OrdinalIgnoreCase));
+            string? matchedToken = tokens.FirstOrDefault(token => ReferenceCodeMatchesToken(candidate.Code, token));
             if (matchedToken == null) continue;
 
             int score = 100;
@@ -2621,17 +2617,49 @@ public sealed partial class DebugWindowManager
         string baseAttribute = GetTransformBaseAttributeCode(attributeCode);
         List<string> tokens = [];
         tokens.AddRange(rule.DisplayableKeys);
-        tokens.AddRange(rule.CapabilityKeys);
         tokens.Add(rule.DisplayName.Replace(" ", "", StringComparison.OrdinalIgnoreCase));
         tokens.Add(baseAttribute
             .Replace("Transform", "", StringComparison.OrdinalIgnoreCase)
             .Replace("on", "", StringComparison.OrdinalIgnoreCase)
             .Replace("in", "", StringComparison.OrdinalIgnoreCase));
         return tokens
-            .Select(token => token.Trim().ToLowerInvariant())
+            .Select(NormalizeReferenceCodeToken)
             .Where(token => token.Length >= 4)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static bool ReferenceCodeMatchesToken(AssetLocation code, string token)
+    {
+        string normalizedToken = NormalizeReferenceCodeToken(token);
+        if (normalizedToken.Length < 4) return false;
+
+        foreach (string segment in SplitReferenceCodeSegments(code.Path))
+        {
+            string normalizedSegment = NormalizeReferenceCodeToken(segment);
+            if (normalizedSegment.Length == 0) continue;
+            if (normalizedSegment.Equals(normalizedToken, StringComparison.OrdinalIgnoreCase)) return true;
+            if (normalizedToken.EndsWith('s') &&
+                normalizedSegment.Equals(normalizedToken[..^1], StringComparison.OrdinalIgnoreCase)) return true;
+            if (!normalizedToken.EndsWith('s') &&
+                normalizedSegment.Equals(normalizedToken + "s", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<string> SplitReferenceCodeSegments(string codePath)
+    {
+        foreach (string segment in Regex.Split(codePath, @"[^A-Za-z0-9]+"))
+        {
+            if (!string.IsNullOrWhiteSpace(segment)) yield return segment;
+        }
+    }
+
+    private static string NormalizeReferenceCodeToken(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return "";
+        return Regex.Replace(token, @"[^A-Za-z0-9]+", "").ToLowerInvariant();
     }
 
     private static TransformPreviewGuideKind GetTransformPreviewGuideKind(string attributeCode)
