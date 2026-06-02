@@ -257,11 +257,9 @@ public sealed partial class DebugWindowManager
                 }
 
                 ImGui.SameLine();
-                ImGui.TextUnformatted($"{setting.Code}  [{setting.Type}]");
-                ImGui.SameLine();
-                ImGui.TextDisabled(setting.DefaultPreview);
+                bool open = ImGui.TreeNodeEx($"##configlib-setting-node-{index}", ImGuiTreeNodeFlags.SpanAvailWidth, $"{setting.Code}  [{setting.Type}]  {setting.DefaultPreview}");
 
-                if (ImGui.IsItemHovered())
+                if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                 {
                     ImGui.SetTooltip(setting.Tooltip);
                 }
@@ -270,12 +268,103 @@ public sealed partial class DebugWindowManager
                 {
                     ImGui.EndDisabled();
                 }
+
+                if (open)
+                {
+                    DrawConfigLibSettingAuthoringControls(setting, index, selectableByType);
+                    ImGui.TreePop();
+                }
             }
 
             ImGui.EndChild();
         }
 
         ImGui.EndChild();
+    }
+
+    private void DrawConfigLibSettingAuthoringControls(ConfigLibSettingDraft setting, int index, bool selectableByType)
+    {
+        if (!selectableByType)
+        {
+            ImGui.TextDisabled("Complex values are visible only until ConfigLib mapping export is implemented.");
+            return;
+        }
+
+        string title = setting.Title;
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        if (ImGui.InputText($"GUI title##configlib-title-{index}", ref title, 200))
+        {
+            setting.Title = title;
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Emitted as title. The schema name remains the normalized kebab-case name.");
+        }
+
+        ImGui.TextDisabled($"Schema name: {setting.Name}");
+
+        if (setting.IsNumeric)
+        {
+            bool useRange = setting.UseNumericRange;
+            if (ImGui.Checkbox($"Range##configlib-range-{index}", ref useRange))
+            {
+                setting.UseNumericRange = useRange;
+            }
+
+            ImGui.SameLine();
+            bool logarithmic = setting.Logarithmic;
+            if (ImGui.Checkbox($"Logarithmic##configlib-log-{index}", ref logarithmic))
+            {
+                setting.Logarithmic = logarithmic;
+            }
+
+            if (!setting.UseNumericRange) ImGui.BeginDisabled();
+            if (string.Equals(setting.Type, "integer", StringComparison.OrdinalIgnoreCase))
+            {
+                int min = (int)Math.Round(setting.Min);
+                int max = (int)Math.Round(setting.Max);
+                int step = Math.Max(1, (int)Math.Round(setting.Step));
+
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.InputInt($"Min##configlib-min-{index}", ref min)) setting.Min = min;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.InputInt($"Max##configlib-max-{index}", ref max)) setting.Max = max;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.InputInt($"Step##configlib-step-{index}", ref step)) setting.Step = Math.Max(1, step);
+            }
+            else
+            {
+                float min = (float)setting.Min;
+                float max = (float)setting.Max;
+                float step = (float)setting.Step;
+
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.DragFloat($"Min##configlib-min-{index}", ref min, 0.05f)) setting.Min = min;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.DragFloat($"Max##configlib-max-{index}", ref max, 0.05f)) setting.Max = max;
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.DragFloat($"Step##configlib-step-{index}", ref step, 0.01f)) setting.Step = Math.Max(0.0001, step);
+            }
+            if (!setting.UseNumericRange) ImGui.EndDisabled();
+        }
+
+        if (string.Equals(setting.Type, "string", StringComparison.OrdinalIgnoreCase))
+        {
+            string values = setting.ValuesText;
+            ImGui.SetNextItemWidth(-float.Epsilon);
+            if (ImGui.InputText($"Dropdown values##configlib-values-{index}", ref values, 1024))
+            {
+                setting.ValuesText = values;
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Comma or semicolon separated. The current default is included automatically when values are emitted.");
+            }
+        }
     }
 
     private void DrawConfigLibOutputPanel(NVector2 size, bool showDiagnostics)
@@ -307,6 +396,16 @@ public sealed partial class DebugWindowManager
         ImGui.SetNextItemWidth(90f);
         ImGui.InputInt("Version##configlib-version", ref _configLibVersion);
         _configLibVersion = Math.Max(0, _configLibVersion);
+
+        bool clientSide = entry.ClientSide;
+        if (ImGui.Checkbox("Client side settings##configlib-client-side", ref clientSide))
+        {
+            entry.ClientSide = clientSide;
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("When enabled, generated settings emit clientSide: true. This is inferred from client-style config filenames and can be changed per file.");
+        }
 
         ImGui.Checkbox("Separators##configlib-separators", ref _configLibGenerateSeparators);
         if (ImGui.IsItemHovered())
@@ -477,6 +576,41 @@ public sealed partial class DebugWindowManager
             {
                 setting["name"] = draft.Name;
             }
+            if (!string.IsNullOrWhiteSpace(draft.Title))
+            {
+                setting["title"] = draft.Title.Trim();
+            }
+            if (entry.ClientSide)
+            {
+                setting["clientSide"] = true;
+            }
+            if (draft.IsNumeric)
+            {
+                if (draft.UseNumericRange)
+                {
+                    double min = Math.Min(draft.Min, draft.Max);
+                    double max = Math.Max(draft.Min, draft.Max);
+                    setting["min"] = BuildConfigLibNumericToken(draft, min);
+                    setting["max"] = BuildConfigLibNumericToken(draft, max);
+                    if (draft.Step > 0)
+                    {
+                        setting["step"] = BuildConfigLibNumericToken(draft, draft.Step);
+                    }
+                }
+
+                if (draft.Logarithmic)
+                {
+                    setting["logarithmic"] = true;
+                }
+            }
+            if (string.Equals(draft.Type, "string", StringComparison.OrdinalIgnoreCase))
+            {
+                JArray values = BuildConfigLibStringValues(draft);
+                if (values.Count > 0)
+                {
+                    setting["values"] = values;
+                }
+            }
 
             settings.Add(setting);
             order++;
@@ -530,6 +664,42 @@ public sealed partial class DebugWindowManager
     private static bool IsConfigLibComplexSetting(ConfigLibSettingDraft setting)
     {
         return string.Equals(setting.Type, "other", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static JValue BuildConfigLibNumericToken(ConfigLibSettingDraft draft, double value)
+    {
+        return string.Equals(draft.Type, "integer", StringComparison.OrdinalIgnoreCase)
+            ? new JValue((int)Math.Round(value))
+            : new JValue(value);
+    }
+
+    private static JArray BuildConfigLibStringValues(ConfigLibSettingDraft draft)
+    {
+        JArray values = [];
+        HashSet<string> seen = new(StringComparer.Ordinal);
+
+        void AddValue(string value)
+        {
+            string trimmed = value.Trim();
+            if (trimmed.Length == 0 || !seen.Add(trimmed)) return;
+            values.Add(trimmed);
+        }
+
+        foreach (string value in draft.ValuesText.Split([',', ';', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            AddValue(value);
+        }
+
+        if (values.Count == 0) return values;
+
+        string defaultValue = draft.Default.Type == JTokenType.String ? draft.Default.ToString() : "";
+        if (!string.IsNullOrWhiteSpace(defaultValue) && !seen.Contains(defaultValue))
+        {
+            values.Insert(0, new JValue(defaultValue));
+            seen.Add(defaultValue);
+        }
+
+        return values;
     }
 
     private string GetConfigLibTargetDomain(ConfigLibSourceEntry entry)
@@ -744,6 +914,19 @@ public sealed partial class DebugWindowManager
         return SanitizeConfigLibDomain(string.IsNullOrWhiteSpace(lowered) ? stem : lowered);
     }
 
+    private static bool IsConfigLibClientSideConfig(string relativeFilePath)
+    {
+        string normalized = relativeFilePath.Replace('\\', '/').ToLowerInvariant();
+        string stem = Path.GetFileNameWithoutExtension(normalized);
+        if (stem.Contains("server", StringComparison.OrdinalIgnoreCase) && !stem.Contains("client", StringComparison.OrdinalIgnoreCase)) return false;
+        if (normalized.Contains("/client/", StringComparison.OrdinalIgnoreCase)) return true;
+        if (stem.Contains("clientconfig", StringComparison.OrdinalIgnoreCase) || stem.Contains("configclient", StringComparison.OrdinalIgnoreCase)) return true;
+
+        return stem
+            .Split(['-', '_', '.', ' '], StringSplitOptions.RemoveEmptyEntries)
+            .Any(part => string.Equals(part, "client", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static string StripConfigAffix(string value, string affix)
     {
         if (value.EndsWith(affix, StringComparison.OrdinalIgnoreCase) && value.Length > affix.Length)
@@ -804,6 +987,7 @@ public sealed partial class DebugWindowManager
             SuggestedDomain = suggestedDomain;
             Root = root.DeepClone();
             Settings = settings;
+            ClientSide = IsConfigLibClientSideConfig(relativeFilePath);
             Key = filePath;
             SearchText = $"{displayName} {relativeFilePath} {suggestedDomain} {string.Join(' ', settings.Select(setting => setting.Code))}";
         }
@@ -816,6 +1000,7 @@ public sealed partial class DebugWindowManager
         public JToken Root { get; }
         public string SearchText { get; }
         public List<ConfigLibSettingDraft> Settings { get; }
+        public bool ClientSide { get; set; }
     }
 
     private sealed class ConfigLibSettingDraft
@@ -827,6 +1012,9 @@ public sealed partial class DebugWindowManager
             Default = defaultValue;
             Include = !string.Equals(type, "other", StringComparison.OrdinalIgnoreCase);
             Name = SanitizeConfigLibName(code);
+            Title = HumanizeConfigLibName(code);
+            IsNumeric = string.Equals(type, "integer", StringComparison.OrdinalIgnoreCase) || string.Equals(type, "float", StringComparison.OrdinalIgnoreCase);
+            InitializeNumericDefaults(defaultValue);
             DefaultPreview = BuildDefaultPreview(defaultValue);
             Tooltip = string.Equals(type, "other", StringComparison.OrdinalIgnoreCase)
                 ? $"{code}\nType: {type}\nArrays and objects need ConfigLib mapping support and are not exported yet.\nDefault: {DefaultPreview}"
@@ -838,12 +1026,42 @@ public sealed partial class DebugWindowManager
         public string Type { get; }
         public JToken Default { get; }
         public bool Include { get; set; }
+        public string Title { get; set; }
+        public bool IsNumeric { get; }
+        public bool UseNumericRange { get; set; }
+        public double Min { get; set; }
+        public double Max { get; set; }
+        public double Step { get; set; }
+        public bool Logarithmic { get; set; }
+        public string ValuesText { get; set; } = "";
         public string DefaultPreview { get; }
         public string Tooltip { get; }
 
         public static ConfigLibSettingDraft From(string code, string type, JToken defaultValue)
         {
             return new(code, type, defaultValue);
+        }
+
+        private void InitializeNumericDefaults(JToken defaultValue)
+        {
+            if (!IsNumeric)
+            {
+                Min = 0;
+                Max = 0;
+                Step = 1;
+                return;
+            }
+
+            double value = defaultValue.Value<double?>() ?? 0;
+            double spread = Math.Max(1, Math.Abs(value));
+            Min = Math.Floor(value - spread);
+            Max = Math.Ceiling(value + spread);
+            if (Math.Abs(Max - Min) < 0.0001)
+            {
+                Max = Min + 1;
+            }
+
+            Step = string.Equals(Type, "integer", StringComparison.OrdinalIgnoreCase) ? 1 : 0.1;
         }
 
         private static string BuildDefaultPreview(JToken token)
