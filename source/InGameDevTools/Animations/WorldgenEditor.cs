@@ -6,6 +6,7 @@ using System.Globalization;
 using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
 using Vintagestory.API.Common;
+using Vintagestory.API.Config;
 using Vintagestory.API.Datastructures;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
@@ -96,6 +97,9 @@ public sealed partial class DebugWindowManager
     private WorldgenPreviewRasterCacheKey? _worldgenPreviewRasterCacheKey;
     private uint[]? _worldgenPreviewRasterCache;
     private string _worldgenPreviewRasterStatus = "Raster cache empty.";
+    private bool _worldgenPreviewPeekPending;
+    private string _worldgenPreviewPeekStatus = "No real chunk peek requested yet.";
+    private WorldgenPeekColumnProfile? _worldgenPreviewPeekProfile;
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -928,6 +932,10 @@ public sealed partial class DebugWindowManager
             drawList.AddText(new NVector2(min.X + 12f, min.Y + 110f), muted, hoverDetails);
         }
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 130f), muted, _worldgenPreviewRasterStatus);
+        if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
+        {
+            drawList.AddText(new NVector2(min.X + 12f, min.Y + 150f), muted, _worldgenPreviewPeekStatus);
+        }
 
         ImGui.EndChild();
     }
@@ -991,11 +999,34 @@ public sealed partial class DebugWindowManager
         {
             string label = GetWorldgenRowLabel(WorldgenAssetKind.Landforms, row, _worldgenRowIndex);
             ImGui.TextDisabled($"3D draft surface: {label}.");
-            ImGui.TextDisabled("Uses the selected landform height field; exact PeekChunkColumn terrain is still a later pass.");
+            ImGui.TextDisabled("Uses the selected landform height field. Real terrain peek is an explicit W4 probe.");
         }
         else
         {
             ImGui.TextDisabled("Select a landform row, then choose 3D region to view its draft surface.");
+        }
+
+        bool canPeek = _worldgenPreviewServerApi != null && !_worldgenPreviewPeekPending;
+        if (!canPeek) ImGui.BeginDisabled();
+        if (ImGui.Button("Peek terrain column##worldgen-peek-column"))
+        {
+            RequestWorldgenPeekColumn();
+        }
+        if (!canPeek) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Clear peek##worldgen-clear-peek"))
+        {
+            _worldgenPreviewPeekPending = false;
+            _worldgenPreviewPeekProfile = null;
+            _worldgenPreviewPeekStatus = "No real chunk peek requested yet.";
+        }
+
+        ImGui.TextDisabled(_worldgenPreviewPeekStatus);
+        if (_worldgenPreviewPeekProfile is { } profile)
+        {
+            ImGui.TextDisabled($"Last real column: chunk {profile.ChunkX},{profile.ChunkZ}; height {profile.MinHeight}-{profile.MaxHeight}; avg {profile.AverageHeight:0.0}.");
+            ImGui.TextDisabled($"Sample row: {profile.SampleSummary}");
         }
     }
 
@@ -1745,6 +1776,176 @@ public sealed partial class DebugWindowManager
             _worldgenPreviewServerStatus = $"Singleplayer server API probe failed: {exception.Message}";
             _worldgenDiagnostics.Exception("Worldgen singleplayer server probe failed", exception);
         }
+    }
+
+    private void RequestWorldgenPeekColumn()
+    {
+        ICoreServerAPI? serverApi = _worldgenPreviewServerApi;
+        if (serverApi == null)
+        {
+            RefreshWorldgenServerApi();
+            serverApi = _worldgenPreviewServerApi;
+        }
+
+        if (serverApi == null)
+        {
+            _worldgenPreviewPeekStatus = "Real terrain peek requires an integrated singleplayer server.";
+            return;
+        }
+
+        IWorldManagerAPI? worldManager = serverApi.WorldManager;
+        if (worldManager == null)
+        {
+            _worldgenPreviewPeekStatus = "Real terrain peek failed: server WorldManager is unavailable.";
+            return;
+        }
+
+        int chunkSize = worldManager.ChunkSize;
+        if (chunkSize <= 0)
+        {
+            chunkSize = GlobalConstants.ChunkSize;
+        }
+
+        int chunkX = FloorDiv(_worldgenPreviewOriginX, chunkSize);
+        int chunkZ = FloorDiv(_worldgenPreviewOriginZ, chunkSize);
+        _worldgenPreviewPeekPending = true;
+        _worldgenPreviewPeekProfile = null;
+        _worldgenPreviewPeekStatus = $"Requesting real Terrain peek for chunk {chunkX},{chunkZ}...";
+
+        try
+        {
+            ChunkPeekOptions options = new()
+            {
+                UntilPass = EnumWorldGenPass.Terrain,
+                OnGenerated = columns =>
+                {
+                    WorldgenPeekColumnProfile? profile = null;
+                    Exception? failure = null;
+                    try
+                    {
+                        profile = BuildWorldgenPeekColumnProfile(columns, chunkX, chunkZ, chunkSize);
+                    }
+                    catch (Exception exception)
+                    {
+                        failure = exception;
+                    }
+
+                    _api.Event.EnqueueMainThreadTask(() =>
+                    {
+                        _worldgenPreviewPeekPending = false;
+                        if (failure != null)
+                        {
+                            _worldgenPreviewPeekStatus = $"Real terrain peek failed: {failure.Message}";
+                            _worldgenDiagnostics.Exception("Worldgen terrain peek failed", failure);
+                            return;
+                        }
+
+                        _worldgenPreviewPeekProfile = profile;
+                        _worldgenPreviewPeekStatus = profile == null
+                            ? $"Real terrain peek returned no chunks for {chunkX},{chunkZ}."
+                            : $"Real terrain peek: chunk {profile.ChunkX},{profile.ChunkZ}; {profile.ColumnsReturned} column(s), {profile.ChunksReturned} vertical chunk(s).";
+                    }, "ingamedevtools-worldgen-peek-column");
+                }
+            };
+
+            worldManager.PeekChunkColumn(chunkX, chunkZ, options);
+        }
+        catch (Exception exception)
+        {
+            _worldgenPreviewPeekPending = false;
+            _worldgenPreviewPeekStatus = $"Real terrain peek request failed: {exception.Message}";
+            _worldgenDiagnostics.Exception("Worldgen terrain peek request failed", exception);
+        }
+    }
+
+    private static WorldgenPeekColumnProfile? BuildWorldgenPeekColumnProfile(Dictionary<Vec2i, IServerChunk[]> columns, int requestedChunkX, int requestedChunkZ, int chunkSize)
+    {
+        if (columns.Count == 0) return null;
+
+        IServerChunk[]? chunks = null;
+        Vec2i selectedKey = new(requestedChunkX, requestedChunkZ);
+        if (!columns.TryGetValue(selectedKey, out chunks))
+        {
+            KeyValuePair<Vec2i, IServerChunk[]> first = columns.First();
+            selectedKey = first.Key;
+            chunks = first.Value;
+        }
+
+        if (chunks == null || chunks.Length == 0) return null;
+
+        int[] heights = new int[chunkSize * chunkSize];
+        int minHeight = int.MaxValue;
+        int maxHeight = int.MinValue;
+        long totalHeight = 0;
+        int solidColumns = 0;
+
+        for (int z = 0; z < chunkSize; z++)
+        {
+            for (int x = 0; x < chunkSize; x++)
+            {
+                int height = FindWorldgenPeekColumnHeight(chunks, x, z, chunkSize);
+                heights[z * chunkSize + x] = height;
+                if (height < 0) continue;
+
+                minHeight = Math.Min(minHeight, height);
+                maxHeight = Math.Max(maxHeight, height);
+                totalHeight += height;
+                solidColumns++;
+            }
+        }
+
+        if (solidColumns == 0)
+        {
+            minHeight = -1;
+            maxHeight = -1;
+        }
+
+        float averageHeight = solidColumns == 0 ? -1f : totalHeight / (float)solidColumns;
+        return new WorldgenPeekColumnProfile(
+            selectedKey.X,
+            selectedKey.Y,
+            columns.Count,
+            chunks.Length,
+            minHeight,
+            maxHeight,
+            averageHeight,
+            BuildWorldgenPeekSampleSummary(heights, chunkSize));
+    }
+
+    private static int FindWorldgenPeekColumnHeight(IServerChunk[] chunks, int localX, int localZ, int chunkSize)
+    {
+        for (int chunkY = chunks.Length - 1; chunkY >= 0; chunkY--)
+        {
+            IServerChunk? chunk = chunks[chunkY];
+            IChunkBlocks? data = chunk?.Data;
+            if (data == null) continue;
+
+            for (int localY = chunkSize - 1; localY >= 0; localY--)
+            {
+                int index = MapUtil.Index3d(localX, localY, localZ, chunkSize, chunkSize);
+                if (data[index] != 0)
+                {
+                    return chunkY * chunkSize + localY;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    private static string BuildWorldgenPeekSampleSummary(int[] heights, int chunkSize)
+    {
+        if (heights.Length == 0 || chunkSize <= 0) return "empty";
+
+        int z = Math.Clamp(chunkSize / 2, 0, chunkSize - 1);
+        int step = Math.Max(1, chunkSize / 8);
+        List<string> samples = new();
+        for (int x = 0; x < chunkSize; x += step)
+        {
+            samples.Add(heights[z * chunkSize + x].ToString(CultureInfo.InvariantCulture));
+        }
+
+        return string.Join(", ", samples);
     }
 
     private bool TryFindWorldgenServerApi(out ICoreServerAPI? serverApi, out string source)
@@ -3188,6 +3389,16 @@ public sealed partial class DebugWindowManager
     private sealed record WorldgenDraftState(string Text, int RowIndex, bool IsValid, string ValidationStatus);
 
     private readonly record struct WorldgenSurfaceCell(int X, int Z, float Depth);
+
+    private sealed record WorldgenPeekColumnProfile(
+        int ChunkX,
+        int ChunkZ,
+        int ColumnsReturned,
+        int ChunksReturned,
+        int MinHeight,
+        int MaxHeight,
+        float AverageHeight,
+        string SampleSummary);
 
     private readonly record struct WorldgenClimateSample(float TemperatureCelsius, float Rain, float Forest, float Fertility, bool HasFertility = false);
 
