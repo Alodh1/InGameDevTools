@@ -15,6 +15,16 @@ namespace InGameDevTools.Animations;
 public sealed partial class DebugWindowManager
 {
     private const int WorldgenIndexBatchSize = 80;
+    private const int WorldgenPreviewModeGradient = 0;
+    private const int WorldgenPreviewModeClimate = 1;
+    private const int WorldgenPreviewModeForest = 2;
+    private const int WorldgenPreviewModeUpheaval = 3;
+    private const int WorldgenPreviewModeOcean = 4;
+    private const int WorldgenPreviewModeLandform = 5;
+    private const int WorldgenPreviewModeProvince = 6;
+    private const int WorldgenPreviewModeOre = 7;
+    private const int WorldgenPreviewModeTerrainShape = 8;
+    private const int WorldgenPreviewModeRegion3D = 9;
     private static readonly string[] WorldgenKindFilterLabels =
     [
         "All",
@@ -58,7 +68,8 @@ public sealed partial class DebugWindowManager
     private string _worldgenStatus = "Worldgen editor ready.";
     private bool _worldgenTextValid;
     private string _worldgenValidationStatus = "No worldgen asset loaded.";
-    private int _worldgenPreviewMode;
+    private int _worldgenPreviewMode = WorldgenPreviewModeGradient;
+    private bool _worldgenPreviewAutoMode = true;
     private string _worldgenPreviewSeedText = "";
     private string _worldgenPreviewConfigStatus = "World config not read yet.";
     private int _worldgenPreviewOriginX;
@@ -748,8 +759,22 @@ public sealed partial class DebugWindowManager
         EnsureWorldgenPreviewDefaults();
 
         ImGui.TextUnformatted("Worldgen preview");
+        if (ImGui.Checkbox("Auto mode by asset##worldgen-preview-auto-mode", ref _worldgenPreviewAutoMode) && _worldgenPreviewAutoMode)
+        {
+            ApplyWorldgenPreviewModeForSelectedEntry();
+        }
+        ImGui.TextDisabled(GetWorldgenPreviewAutoModeStatus());
         ImGui.SetNextItemWidth(-float.Epsilon);
-        ImGui.Combo("##worldgen-preview-mode", ref _worldgenPreviewMode, WorldgenPreviewModeLabels, WorldgenPreviewModeLabels.Length);
+        int previewModeBefore = _worldgenPreviewMode;
+        if (ImGui.Combo("##worldgen-preview-mode", ref _worldgenPreviewMode, WorldgenPreviewModeLabels, WorldgenPreviewModeLabels.Length))
+        {
+            _worldgenPreviewAutoMode = false;
+            if (_worldgenPreviewMode != previewModeBefore)
+            {
+                _worldgenPreviewMapLayer = null;
+                InvalidateWorldgenPreviewRasterCache();
+            }
+        }
 
         ImGui.SetNextItemWidth(-float.Epsilon);
         ImGui.InputText("Seed##worldgen-preview-seed", ref _worldgenPreviewSeedText, 64);
@@ -766,7 +791,7 @@ public sealed partial class DebugWindowManager
         }
         ImGui.PopItemWidth();
 
-        if (_worldgenPreviewMode == 1)
+        if (_worldgenPreviewMode == WorldgenPreviewModeClimate)
         {
             DrawWorldgenClimatePreviewControls();
         }
@@ -850,12 +875,12 @@ public sealed partial class DebugWindowManager
         int hoverZ = (int)MathF.Floor(centerZ + (mouse.Y - (min.Y + actual.Y * 0.5f)) / pixelsPerBlock);
         string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
         string hoverDetails = BuildWorldgenPreviewHoverText(_worldgenPreviewMode, seed, hoverX, hoverZ);
-        string modeStatus = _worldgenPreviewMode == 1
+        string modeStatus = _worldgenPreviewMode == WorldgenPreviewModeClimate
             ? $"{modeLabel}: engine NoiseClimateRealistic"
             : WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
                 ? $"{modeLabel}: engine GenMaps layer"
                 : $"{modeLabel}: viewport host";
-        string inputStatus = _worldgenPreviewMode == 1
+        string inputStatus = _worldgenPreviewMode == WorldgenPreviewModeClimate
             ? "RMB/MMB pans. Mouse wheel zooms. Sampling GetClimateAt."
             : WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
                 ? "RMB/MMB pans. Mouse wheel zooms. Sampling MapLayerBase.GenLayer."
@@ -917,7 +942,7 @@ public sealed partial class DebugWindowManager
             InvalidateWorldgenPreviewRasterCache();
         }
 
-        if (_worldgenPreviewMode == 4)
+        if (_worldgenPreviewMode == WorldgenPreviewModeOcean)
         {
             float halfWidth = Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.48f);
             ImGui.PushItemWidth(halfWidth);
@@ -944,6 +969,57 @@ public sealed partial class DebugWindowManager
 
         _worldgenPreviewInitialized = true;
         UseCurrentWorldgenPreviewState();
+    }
+
+    private void ApplyWorldgenPreviewModeForSelectedEntry()
+    {
+        WorldgenAssetEntry? entry = SelectedWorldgenEntry;
+        if (entry != null)
+        {
+            ApplyWorldgenPreviewModeForEntry(entry);
+        }
+    }
+
+    private void ApplyWorldgenPreviewModeForEntry(WorldgenAssetEntry entry)
+    {
+        if (!_worldgenPreviewAutoMode) return;
+
+        int nextMode = GetWorldgenPreviewModeForKind(entry.Kind);
+        if (_worldgenPreviewMode == nextMode) return;
+
+        _worldgenPreviewMode = nextMode;
+        _worldgenPreviewMapLayer = null;
+        InvalidateWorldgenPreviewRasterCache();
+    }
+
+    private string GetWorldgenPreviewAutoModeStatus()
+    {
+        if (!_worldgenPreviewAutoMode)
+        {
+            return "Auto mode by asset: off";
+        }
+
+        WorldgenAssetEntry? entry = SelectedWorldgenEntry;
+        if (entry == null)
+        {
+            return "Auto mode by asset: on; no asset selected.";
+        }
+
+        int mode = GetWorldgenPreviewModeForKind(entry.Kind);
+        string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(mode, 0, WorldgenPreviewModeLabels.Length - 1)];
+        return $"Auto mode by asset: {entry.KindLabel} -> {modeLabel}";
+    }
+
+    private static int GetWorldgenPreviewModeForKind(WorldgenAssetKind kind)
+    {
+        return kind switch
+        {
+            WorldgenAssetKind.Deposits => WorldgenPreviewModeOre,
+            WorldgenAssetKind.BlockPatches => WorldgenPreviewModeClimate,
+            WorldgenAssetKind.Landforms => WorldgenPreviewModeLandform,
+            WorldgenAssetKind.RockStrata => WorldgenPreviewModeTerrainShape,
+            _ => WorldgenPreviewModeGradient
+        };
     }
 
     private void UseCurrentWorldgenPreviewState()
@@ -1124,9 +1200,9 @@ public sealed partial class DebugWindowManager
         {
             _worldgenPreviewMapLayer = mode switch
             {
-                2 => GenMaps.GetForestMapGen(seed, _worldgenPreviewMapLayerScale),
-                3 => GenMaps.GetGeoUpheavelMapGen(seed, _worldgenPreviewMapLayerScale),
-                4 => GenMaps.GetOceanMapGen(
+                WorldgenPreviewModeForest => GenMaps.GetForestMapGen(seed, _worldgenPreviewMapLayerScale),
+                WorldgenPreviewModeUpheaval => GenMaps.GetGeoUpheavelMapGen(seed, _worldgenPreviewMapLayerScale),
+                WorldgenPreviewModeOcean => GenMaps.GetOceanMapGen(
                     seed,
                     _worldgenPreviewOceanLandcover,
                     _worldgenPreviewMapLayerScale,
@@ -1349,12 +1425,12 @@ public sealed partial class DebugWindowManager
 
     private static bool WorldgenPreviewModeUsesMapLayer(int mode)
     {
-        return mode is 2 or 3 or 4;
+        return mode is WorldgenPreviewModeForest or WorldgenPreviewModeUpheaval or WorldgenPreviewModeOcean;
     }
 
     private static bool WorldgenPreviewModeRequiresServer(int mode)
     {
-        return mode is 5 or 6 or 7 or 9;
+        return mode is WorldgenPreviewModeLandform or WorldgenPreviewModeProvince or WorldgenPreviewModeOre or WorldgenPreviewModeRegion3D;
     }
 
     private static void DrawWorldgenPreviewUnavailable(
@@ -1471,7 +1547,7 @@ public sealed partial class DebugWindowManager
         }
         else
         {
-            NoiseClimate? climate = _worldgenPreviewMode == 1 ? GetWorldgenPreviewClimateNoise(seed) : null;
+            NoiseClimate? climate = _worldgenPreviewMode == WorldgenPreviewModeClimate ? GetWorldgenPreviewClimateNoise(seed) : null;
             for (int z = 0; z < cellsZ; z++)
             {
                 float worldZ = centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ);
@@ -1533,9 +1609,9 @@ public sealed partial class DebugWindowManager
         float normalized = Math.Clamp(value / 255f, 0f, 1f);
         NVector4 color = mode switch
         {
-            2 => new NVector4(0.04f + normalized * 0.14f, 0.16f + normalized * 0.66f, 0.07f + normalized * 0.18f, 1f),
-            3 => new NVector4(0.10f + normalized * 0.52f, 0.11f + normalized * 0.36f, 0.12f + normalized * 0.22f, 1f),
-            4 => new NVector4(0.08f + (1f - normalized) * 0.24f, 0.16f + (1f - normalized) * 0.26f, 0.28f + normalized * 0.64f, 1f),
+            WorldgenPreviewModeForest => new NVector4(0.04f + normalized * 0.14f, 0.16f + normalized * 0.66f, 0.07f + normalized * 0.18f, 1f),
+            WorldgenPreviewModeUpheaval => new NVector4(0.10f + normalized * 0.52f, 0.11f + normalized * 0.36f, 0.12f + normalized * 0.22f, 1f),
+            WorldgenPreviewModeOcean => new NVector4(0.08f + (1f - normalized) * 0.24f, 0.16f + (1f - normalized) * 0.26f, 0.28f + normalized * 0.64f, 1f),
             _ => new NVector4(0.12f + normalized * 0.45f, 0.14f + normalized * 0.45f, 0.16f + normalized * 0.45f, 1f)
         };
         return ImGui.ColorConvertFloat4ToU32(color);
@@ -1565,13 +1641,13 @@ public sealed partial class DebugWindowManager
 
         NVector4 color = mode switch
         {
-            1 => new NVector4(0.10f + mix * 0.55f, 0.22f + bands * 0.35f, 0.78f - mix * 0.34f, 1f),
-            2 => new NVector4(0.05f + detail * 0.18f, 0.22f + mix * 0.55f, 0.10f + bands * 0.22f, 1f),
-            3 => new NVector4(0.18f + mix * 0.42f, 0.16f + detail * 0.32f, 0.12f + bands * 0.22f, 1f),
-            4 => new NVector4(0.10f + bands * 0.32f, 0.20f + mix * 0.35f, 0.32f + detail * 0.48f, 1f),
-            5 => new NVector4(0.18f + detail * 0.62f, 0.16f + mix * 0.28f, 0.09f + bands * 0.14f, 1f),
-            6 => new NVector4(0.12f + mix * 0.54f, 0.12f + mix * 0.50f, 0.10f + detail * 0.26f, 1f),
-            7 => new NVector4(0.12f + bands * 0.35f, 0.14f + detail * 0.31f, 0.12f + mix * 0.34f, 1f),
+            WorldgenPreviewModeClimate => new NVector4(0.10f + mix * 0.55f, 0.22f + bands * 0.35f, 0.78f - mix * 0.34f, 1f),
+            WorldgenPreviewModeForest => new NVector4(0.05f + detail * 0.18f, 0.22f + mix * 0.55f, 0.10f + bands * 0.22f, 1f),
+            WorldgenPreviewModeUpheaval => new NVector4(0.18f + mix * 0.42f, 0.16f + detail * 0.32f, 0.12f + bands * 0.22f, 1f),
+            WorldgenPreviewModeOcean => new NVector4(0.10f + bands * 0.32f, 0.20f + mix * 0.35f, 0.32f + detail * 0.48f, 1f),
+            WorldgenPreviewModeLandform => new NVector4(0.18f + detail * 0.62f, 0.16f + mix * 0.28f, 0.09f + bands * 0.14f, 1f),
+            WorldgenPreviewModeProvince => new NVector4(0.12f + mix * 0.54f, 0.12f + mix * 0.50f, 0.10f + detail * 0.26f, 1f),
+            WorldgenPreviewModeOre => new NVector4(0.12f + bands * 0.35f, 0.14f + detail * 0.31f, 0.12f + mix * 0.34f, 1f),
             _ => new NVector4(0.10f + mix * 0.48f, 0.18f + bands * 0.36f, 0.14f + detail * 0.30f, 1f)
         };
 
@@ -1630,6 +1706,7 @@ public sealed partial class DebugWindowManager
         }
 
         ValidateWorldgenCurrentText();
+        ApplyWorldgenPreviewModeForEntry(entry);
     }
 
     private void EnsureWorldgenEntryLoaded(WorldgenAssetEntry entry)
