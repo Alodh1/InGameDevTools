@@ -81,6 +81,8 @@ public sealed partial class DebugWindowManager
     private float _worldgenPreviewPanX;
     private float _worldgenPreviewPanZ;
     private float _worldgenPreviewZoom = 1f;
+    private float _worldgenPreview3DYaw = MathF.PI * 0.25f;
+    private float _worldgenPreview3DPitch = 0.70f;
     private bool _worldgenPreviewInitialized;
     private ICoreServerAPI? _worldgenPreviewServerApi;
     private GenMaps? _worldgenPreviewGenMaps;
@@ -797,6 +799,10 @@ public sealed partial class DebugWindowManager
         {
             DrawWorldgenTerrainShapePreviewControls();
         }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
+        {
+            DrawWorldgenRegion3DPreviewControls();
+        }
         else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
             DrawWorldgenMapLayerPreviewControls();
@@ -817,6 +823,8 @@ public sealed partial class DebugWindowManager
             _worldgenPreviewPanX = 0f;
             _worldgenPreviewPanZ = 0f;
             _worldgenPreviewZoom = 1f;
+            _worldgenPreview3DYaw = MathF.PI * 0.25f;
+            _worldgenPreview3DPitch = 0.70f;
         }
 
         float availableHeight = ImGui.GetContentRegionAvail().Y;
@@ -852,14 +860,27 @@ public sealed partial class DebugWindowManager
                 _worldgenPreviewZoom = Math.Clamp(_worldgenPreviewZoom * (1f + wheel * 0.12f), 0.15f, 12f);
                 pixelsPerBlock = Math.Clamp(2.5f * _worldgenPreviewZoom, 0.35f, 32f);
             }
+
+            if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+            {
+                _worldgenPreview3DYaw += delta.X * 0.012f;
+                _worldgenPreview3DPitch = Math.Clamp(_worldgenPreview3DPitch + delta.Y * 0.006f, 0.24f, 1.12f);
+            }
         }
 
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         drawList.PushClipRect(min, max, true);
         if (!serverRequired || serverAvailable)
         {
-            DrawWorldgenPreviewRaster(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
-            DrawWorldgenPreviewGrid(drawList, min, max, centerX, centerZ, pixelsPerBlock);
+            if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
+            {
+                DrawWorldgenLandformSurfacePreview(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
+            }
+            else
+            {
+                DrawWorldgenPreviewRaster(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
+                DrawWorldgenPreviewGrid(drawList, min, max, centerX, centerZ, pixelsPerBlock);
+            }
         }
         else
         {
@@ -885,6 +906,8 @@ public sealed partial class DebugWindowManager
                     ? $"{modeLabel}: selected draft row"
                     : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
                         ? $"{modeLabel}: selected draft landform"
+                        : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
+                            ? $"{modeLabel}: draft landform surface"
                 : $"{modeLabel}: viewport host";
         string inputStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
             ? "RMB/MMB pans. Mouse wheel zooms. Sampling live MapLayerBase.GenLayer."
@@ -892,6 +915,8 @@ public sealed partial class DebugWindowManager
                 ? "RMB/MMB pans. Mouse wheel zooms. Evaluating draft climate/forest constraints."
                 : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
                     ? "RMB/MMB pans. Mouse wheel zooms. Evaluating selected landform draft shape."
+                    : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
+                        ? "LMB orbits. RMB/MMB pans. Mouse wheel zooms. Draft surface only."
                 : "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.";
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, inputStatus);
@@ -957,6 +982,20 @@ public sealed partial class DebugWindowManager
         else
         {
             ImGui.TextDisabled("Select a landform row to preview its draft terrain shape.");
+        }
+    }
+
+    private void DrawWorldgenRegion3DPreviewControls()
+    {
+        if (TryGetSelectedWorldgenLandformRow(out JObject? row) && row != null)
+        {
+            string label = GetWorldgenRowLabel(WorldgenAssetKind.Landforms, row, _worldgenRowIndex);
+            ImGui.TextDisabled($"3D draft surface: {label}.");
+            ImGui.TextDisabled("Uses the selected landform height field; exact PeekChunkColumn terrain is still a later pass.");
+        }
+        else
+        {
+            ImGui.TextDisabled("Select a landform row, then choose 3D region to view its draft surface.");
         }
     }
 
@@ -1952,6 +1991,121 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void DrawWorldgenLandformSurfacePreview(ImDrawListPtr drawList, NVector2 min, NVector2 max, long seed, float centerX, float centerZ, float pixelsPerBlock)
+    {
+        uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.018f, 0.017f, 0.015f, 1f));
+        drawList.AddRectFilled(min, max, background, 4f);
+
+        if (!TryGetSelectedWorldgenLandformRow(out JObject? row) || row == null)
+        {
+            DrawWorldgenPreviewUnavailable(
+                drawList,
+                min,
+                max,
+                "Select a landform row to render a draft 3D surface.",
+                "The 3D region preview uses the selected landform's terrain arrays.");
+            return;
+        }
+
+        WorldgenLandformDraft draft;
+        try
+        {
+            draft = WorldgenLandformDraft.FromJson(row);
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen 3D landform draft parse failed", exception);
+            DrawWorldgenPreviewUnavailable(drawList, min, max, $"Landform draft parse failed: {exception.Message}", "Fix the selected row JSON and try again.");
+            return;
+        }
+
+        if (!draft.IsUsable)
+        {
+            DrawWorldgenPreviewUnavailable(drawList, min, max, "Selected landform has no usable terrain arrays.", "Add terrainOctaves and terrainYKey arrays to preview it.");
+            return;
+        }
+
+        float width = max.X - min.X;
+        float height = max.Y - min.Y;
+        float viewportMinDimension = Math.Max(1f, Math.Min(width, height));
+        int grid = Math.Clamp(_worldgenPreviewResolution / 4, 18, 48);
+        float spanBlocks = Math.Clamp(viewportMinDimension / Math.Max(0.1f, pixelsPerBlock) * 1.85f, 80f, 4096f);
+        float screenScale = viewportMinDimension * 0.74f / spanBlocks;
+        float heightScale = viewportMinDimension * 0.38f;
+        float cosYaw = MathF.Cos(_worldgenPreview3DYaw);
+        float sinYaw = MathF.Sin(_worldgenPreview3DYaw);
+        float pitch = MathF.Sin(_worldgenPreview3DPitch);
+        NVector2 center = new(min.X + width * 0.5f, min.Y + height * 0.58f);
+
+        float[,] heights = new float[grid, grid];
+        NVector2[,] projected = new NVector2[grid, grid];
+        float[,] depths = new float[grid, grid];
+        float minHeight = float.PositiveInfinity;
+        float maxHeight = float.NegativeInfinity;
+        for (int z = 0; z < grid; z++)
+        {
+            float localZ = ((z / (float)(grid - 1)) - 0.5f) * spanBlocks;
+            for (int x = 0; x < grid; x++)
+            {
+                float localX = ((x / (float)(grid - 1)) - 0.5f) * spanBlocks;
+                float worldX = centerX + localX;
+                float worldZ = centerZ + localZ;
+                float h = draft.SampleHeight(seed, worldX, worldZ);
+                float rx = localX * cosYaw - localZ * sinYaw;
+                float rz = localX * sinYaw + localZ * cosYaw;
+                projected[x, z] = new NVector2(
+                    center.X + rx * screenScale,
+                    center.Y + rz * screenScale * pitch - (h - 0.45f) * heightScale);
+                depths[x, z] = rz;
+                heights[x, z] = h;
+                minHeight = Math.Min(minHeight, h);
+                maxHeight = Math.Max(maxHeight, h);
+            }
+        }
+
+        List<WorldgenSurfaceCell> cells = new((grid - 1) * (grid - 1));
+        for (int z = 0; z < grid - 1; z++)
+        {
+            for (int x = 0; x < grid - 1; x++)
+            {
+                float depth = (depths[x, z] + depths[x + 1, z] + depths[x, z + 1] + depths[x + 1, z + 1]) * 0.25f;
+                cells.Add(new WorldgenSurfaceCell(x, z, depth));
+            }
+        }
+        cells.Sort(static (left, right) => left.Depth.CompareTo(right.Depth));
+
+        uint contour = ImGui.ColorConvertFloat4ToU32(new NVector4(0.04f, 0.035f, 0.028f, 0.34f));
+        foreach (WorldgenSurfaceCell cell in cells)
+        {
+            int x = cell.X;
+            int z = cell.Z;
+            NVector2 p00 = projected[x, z];
+            NVector2 p10 = projected[x + 1, z];
+            NVector2 p11 = projected[x + 1, z + 1];
+            NVector2 p01 = projected[x, z + 1];
+            float h = (heights[x, z] + heights[x + 1, z] + heights[x, z + 1] + heights[x + 1, z + 1]) * 0.25f;
+            float east = (heights[x + 1, z] + heights[x + 1, z + 1]) * 0.5f;
+            float south = (heights[x, z + 1] + heights[x + 1, z + 1]) * 0.5f;
+            uint fill = BuildWorldgenTerrainShapePreviewColor(h, east, south, draft);
+            drawList.AddQuadFilled(p00, p10, p11, p01, fill);
+            if (grid <= 32)
+            {
+                drawList.AddLine(p00, p10, contour);
+                drawList.AddLine(p10, p11, contour);
+            }
+        }
+
+        uint axisX = ImGui.ColorConvertFloat4ToU32(new NVector4(0.78f, 0.22f, 0.15f, 0.90f));
+        uint axisZ = ImGui.ColorConvertFloat4ToU32(new NVector4(0.22f, 0.38f, 0.92f, 0.90f));
+        NVector2 origin = ProjectWorldgenSurfacePoint(0f, 0f, draft.SampleHeight(seed, centerX, centerZ), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 xAxis = ProjectWorldgenSurfacePoint(spanBlocks * 0.16f, 0f, draft.SampleHeight(seed, centerX + spanBlocks * 0.16f, centerZ), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 zAxis = ProjectWorldgenSurfacePoint(0f, spanBlocks * 0.16f, draft.SampleHeight(seed, centerX, centerZ + spanBlocks * 0.16f), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        drawList.AddLine(origin, xAxis, axisX, 2f);
+        drawList.AddLine(origin, zAxis, axisZ, 2f);
+
+        _worldgenPreviewRasterStatus = $"3D draft surface: {grid}x{grid}; height {minHeight:0.000}-{maxHeight:0.000}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
+    }
+
     private bool TryGetWorldgenPreviewRasterColors(
         long seed,
         float centerX,
@@ -2427,6 +2581,24 @@ public sealed partial class DebugWindowManager
             (packed & 0xff) / 255f,
             1f);
         return true;
+    }
+
+    private static NVector2 ProjectWorldgenSurfacePoint(
+        float localX,
+        float localZ,
+        float height,
+        NVector2 center,
+        float screenScale,
+        float heightScale,
+        float cosYaw,
+        float sinYaw,
+        float pitch)
+    {
+        float rx = localX * cosYaw - localZ * sinYaw;
+        float rz = localX * sinYaw + localZ * cosYaw;
+        return new NVector2(
+            center.X + rx * screenScale,
+            center.Y + rz * screenScale * pitch - (height - 0.45f) * heightScale);
     }
 
     private static int FloorDiv(int value, int divisor)
@@ -3014,6 +3186,8 @@ public sealed partial class DebugWindowManager
     }
 
     private sealed record WorldgenDraftState(string Text, int RowIndex, bool IsValid, string ValidationStatus);
+
+    private readonly record struct WorldgenSurfaceCell(int X, int Z, float Depth);
 
     private readonly record struct WorldgenClimateSample(float TemperatureCelsius, float Rain, float Forest, float Fertility, bool HasFertility = false);
 
