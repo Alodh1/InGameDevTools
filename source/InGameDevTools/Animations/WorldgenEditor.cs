@@ -8,6 +8,7 @@ using NVector4 = System.Numerics.Vector4;
 using Vintagestory.API.Common;
 using Vintagestory.API.Datastructures;
 using Vintagestory.API.Server;
+using Vintagestory.ServerMods;
 
 namespace InGameDevTools.Animations;
 
@@ -66,6 +67,16 @@ public sealed partial class DebugWindowManager
     private bool _worldgenPreviewInitialized;
     private ICoreServerAPI? _worldgenPreviewServerApi;
     private string _worldgenPreviewServerStatus = "Singleplayer server API not checked.";
+    private double _worldgenPreviewMapSizeZ = 1024000d;
+    private int _worldgenPreviewPolarEquatorDistance = 50000;
+    private int _worldgenPreviewSpawnMinTemp = -20;
+    private int _worldgenPreviewSpawnMaxTemp = 30;
+    private NoiseClimate? _worldgenPreviewClimateNoise;
+    private long _worldgenPreviewClimateSeed = long.MinValue;
+    private double _worldgenPreviewClimateMapSizeZ;
+    private int _worldgenPreviewClimatePolarEquatorDistance;
+    private int _worldgenPreviewClimateSpawnMinTemp;
+    private int _worldgenPreviewClimateSpawnMaxTemp;
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -732,6 +743,11 @@ public sealed partial class DebugWindowManager
         ImGui.InputInt("Z##worldgen-preview-origin-z", ref _worldgenPreviewOriginZ);
         ImGui.PopItemWidth();
 
+        if (_worldgenPreviewMode == 1)
+        {
+            DrawWorldgenClimatePreviewControls();
+        }
+
         if (ImGui.Button("Use current world##worldgen-preview-current"))
         {
             UseCurrentWorldgenPreviewState();
@@ -806,13 +822,53 @@ public sealed partial class DebugWindowManager
         int hoverX = (int)MathF.Floor(centerX + (mouse.X - (min.X + actual.X * 0.5f)) / pixelsPerBlock);
         int hoverZ = (int)MathF.Floor(centerZ + (mouse.Y - (min.Y + actual.Y * 0.5f)) / pixelsPerBlock);
         string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"{modeLabel}: viewport host");
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.");
+        string hoverDetails = BuildWorldgenPreviewHoverText(_worldgenPreviewMode, seed, hoverX, hoverZ);
+        string modeStatus = _worldgenPreviewMode == 1
+            ? $"{modeLabel}: engine NoiseClimateRealistic"
+            : $"{modeLabel}: viewport host";
+        string inputStatus = _worldgenPreviewMode == 1
+            ? "RMB/MMB pans. Mouse wheel zooms. Sampling GetClimateAt."
+            : "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.";
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, inputStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), muted, $"Cursor block: X {hoverX}, Z {hoverZ}");
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 70f), muted, _worldgenPreviewConfigStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 90f), muted, serverRequired ? _worldgenPreviewServerStatus : "Singleplayer server API: not required for this mode.");
+        if (!string.IsNullOrWhiteSpace(hoverDetails))
+        {
+            drawList.AddText(new NVector2(min.X + 12f, min.Y + 110f), muted, hoverDetails);
+        }
 
         ImGui.EndChild();
+    }
+
+    private void DrawWorldgenClimatePreviewControls()
+    {
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        float mapSizeZ = (float)_worldgenPreviewMapSizeZ;
+        if (ImGui.InputFloat("Map size Z##worldgen-preview-map-size-z", ref mapSizeZ, 1000f, 10000f, "%.0f"))
+        {
+            _worldgenPreviewMapSizeZ = Math.Max(1d, mapSizeZ);
+            _worldgenPreviewClimateNoise = null;
+        }
+
+        float halfWidth = Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.48f);
+        ImGui.PushItemWidth(halfWidth);
+        if (ImGui.InputInt("Polar eq dist##worldgen-preview-polar-dist", ref _worldgenPreviewPolarEquatorDistance))
+        {
+            _worldgenPreviewPolarEquatorDistance = Math.Max(1, _worldgenPreviewPolarEquatorDistance);
+            _worldgenPreviewClimateNoise = null;
+        }
+        ImGui.SameLine();
+        if (ImGui.InputInt("Spawn min C##worldgen-preview-spawn-min-temp", ref _worldgenPreviewSpawnMinTemp))
+        {
+            _worldgenPreviewClimateNoise = null;
+        }
+        if (ImGui.InputInt("Spawn max C##worldgen-preview-spawn-max-temp", ref _worldgenPreviewSpawnMaxTemp))
+        {
+            _worldgenPreviewClimateNoise = null;
+        }
+        ImGui.PopItemWidth();
     }
 
     private void EnsureWorldgenPreviewDefaults()
@@ -905,6 +961,63 @@ public sealed partial class DebugWindowManager
         return long.TryParse(_worldgenPreviewSeedText, NumberStyles.Integer, CultureInfo.InvariantCulture, out long seed)
             ? seed
             : 0L;
+    }
+
+    private NoiseClimate? GetWorldgenPreviewClimateNoise(long seed)
+    {
+        if (_worldgenPreviewClimateNoise != null &&
+            _worldgenPreviewClimateSeed == seed &&
+            Math.Abs(_worldgenPreviewClimateMapSizeZ - _worldgenPreviewMapSizeZ) < 0.001d &&
+            _worldgenPreviewClimatePolarEquatorDistance == _worldgenPreviewPolarEquatorDistance &&
+            _worldgenPreviewClimateSpawnMinTemp == _worldgenPreviewSpawnMinTemp &&
+            _worldgenPreviewClimateSpawnMaxTemp == _worldgenPreviewSpawnMaxTemp)
+        {
+            return _worldgenPreviewClimateNoise;
+        }
+
+        try
+        {
+            _worldgenPreviewClimateNoise = new NoiseClimateRealistic(
+                seed,
+                _worldgenPreviewMapSizeZ,
+                _worldgenPreviewPolarEquatorDistance,
+                _worldgenPreviewSpawnMinTemp,
+                _worldgenPreviewSpawnMaxTemp);
+            _worldgenPreviewClimateSeed = seed;
+            _worldgenPreviewClimateMapSizeZ = _worldgenPreviewMapSizeZ;
+            _worldgenPreviewClimatePolarEquatorDistance = _worldgenPreviewPolarEquatorDistance;
+            _worldgenPreviewClimateSpawnMinTemp = _worldgenPreviewSpawnMinTemp;
+            _worldgenPreviewClimateSpawnMaxTemp = _worldgenPreviewSpawnMaxTemp;
+            return _worldgenPreviewClimateNoise;
+        }
+        catch (Exception exception)
+        {
+            _worldgenPreviewClimateNoise = null;
+            _worldgenDiagnostics.Exception("Worldgen climate preview failed to construct NoiseClimateRealistic", exception);
+            return null;
+        }
+    }
+
+    private string BuildWorldgenPreviewHoverText(int mode, long seed, int blockX, int blockZ)
+    {
+        if (mode != 1) return "";
+
+        NoiseClimate? climate = GetWorldgenPreviewClimateNoise(seed);
+        if (climate == null) return "Climate: unavailable";
+
+        try
+        {
+            int packed = climate.GetClimateAt(blockX, blockZ);
+            int temp = (packed >> 16) & 0xff;
+            int rain = (packed >> 8) & 0xff;
+            int aux = packed & 0xff;
+            return $"Climate packed: temp {temp}, rain {rain}, aux {aux}";
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen climate hover sample failed", exception);
+            return "Climate: sample failed";
+        }
     }
 
     private void RefreshWorldgenServerApi()
@@ -1118,6 +1231,7 @@ public sealed partial class DebugWindowManager
     {
         uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.02f, 0.02f, 0.018f, 1f));
         drawList.AddRectFilled(min, max, background, 4f);
+        NoiseClimate? climate = _worldgenPreviewMode == 1 ? GetWorldgenPreviewClimateNoise(seed) : null;
 
         int cellsX = Math.Clamp((int)((max.X - min.X) / 7f), 32, 112);
         int cellsZ = Math.Clamp((int)((max.Y - min.Y) / 7f), 32, 112);
@@ -1132,12 +1246,28 @@ public sealed partial class DebugWindowManager
             for (int x = 0; x < cellsX; x++)
             {
                 float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
-                uint color = BuildWorldgenPreviewColor(seed, worldX, worldZ, _worldgenPreviewMode);
+                uint color = climate == null
+                    ? BuildWorldgenPreviewColor(seed, worldX, worldZ, _worldgenPreviewMode)
+                    : BuildWorldgenClimatePreviewColor(climate, (int)MathF.Floor(worldX), (int)MathF.Floor(worldZ));
                 NVector2 a = new(min.X + x * cellWidth, min.Y + z * cellHeight);
                 NVector2 b = new(min.X + (x + 1) * cellWidth + 0.5f, min.Y + (z + 1) * cellHeight + 0.5f);
                 drawList.AddRectFilled(a, b, color);
             }
         }
+    }
+
+    private static uint BuildWorldgenClimatePreviewColor(NoiseClimate climate, int blockX, int blockZ)
+    {
+        int packed = climate.GetClimateAt(blockX, blockZ);
+        float temp = ((packed >> 16) & 0xff) / 255f;
+        float rain = ((packed >> 8) & 0xff) / 255f;
+        float aux = (packed & 0xff) / 255f;
+
+        float dry = 1f - rain;
+        float r = Math.Clamp(0.14f + temp * 0.58f + dry * 0.18f, 0f, 1f);
+        float g = Math.Clamp(0.16f + rain * 0.42f + temp * 0.18f + aux * 0.08f, 0f, 1f);
+        float b = Math.Clamp(0.18f + rain * 0.45f + (1f - temp) * 0.22f, 0f, 1f);
+        return ImGui.ColorConvertFloat4ToU32(new NVector4(r, g, b, 1f));
     }
 
     private static uint BuildWorldgenPreviewColor(long seed, float worldX, float worldZ, int mode)
