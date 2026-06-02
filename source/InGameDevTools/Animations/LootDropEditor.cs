@@ -591,6 +591,10 @@ public sealed partial class DebugWindowManager
         if (ImGui.TreeNode($"Attributes JSON##loot-drop-attrs-{index}"))
         {
             changed |= ImGui.InputTextMultiline($"##loot-drop-attrs-text-{index}", ref draft.AttributesJson, 64 * 1024, new NVector2(-float.Epsilon, 100f), ImGuiInputTextFlags.AllowTabInput);
+            if (!string.IsNullOrWhiteSpace(draft.AttributesJson) && TryParseJsonToken(draft.AttributesJson) == null)
+            {
+                ImGui.TextColored(new NVector4(1f, 0.38f, 0.32f, 1f), "Attributes JSON is malformed.");
+            }
             ImGui.TreePop();
         }
 
@@ -728,7 +732,7 @@ public sealed partial class DebugWindowManager
         ImGui.TextWrapped(entry.SourceAsset?.Location.ToString() ?? "Source asset: unresolved; save will create an authored override.");
         if (entry.Kind != LootDropKind.TradeTable && HasWeightedLootDrops(_lootDropDrafts))
         {
-            ImGui.TextColored(new NVector4(1f, 0.78f, 0.32f, 1f), "Weighted drops detected. Weight is editable and preserved; simulation still treats rows as independent rolls.");
+            ImGui.TextColored(new NVector4(1f, 0.78f, 0.32f, 1f), "Weighted drops detected. Consecutive non-default weighted rows simulate as weighted groups.");
         }
 
         if (entry.Kind != LootDropKind.TradeTable)
@@ -852,7 +856,7 @@ public sealed partial class DebugWindowManager
                     ? $"Restored unsaved editor state for {entry.Label}."
                     : $"Restored editor state for {entry.Label}."
                 : HasWeightedLootDrops(_lootDropDrafts)
-                ? $"Loaded {entry.Label}. Weighted drops are editable and preserved; simulation remains approximate."
+                ? $"Loaded {entry.Label}. Weighted drops are editable and consecutive non-default weighted rows simulate as weighted groups."
                 : $"Loaded {entry.Label}.";
         }
         catch (Exception exception)
@@ -964,7 +968,7 @@ public sealed partial class DebugWindowManager
     private string BuildCurrentLootDropJson(LootDropEntry? entry)
     {
         if (entry?.Kind == LootDropKind.TradeTable) return NormalizeJsonForHash(_lootDropTradeJson);
-        return BuildDropDraftArray().ToString(Formatting.None);
+        return BuildDropDraftArray(includeInvalidAttributesMarker: true).ToString(Formatting.None);
     }
 
     private void RefreshLootDropCachedState(LootDropEntry? entry = null)
@@ -1102,6 +1106,11 @@ public sealed partial class DebugWindowManager
                 continue;
             }
 
+            if (!string.IsNullOrWhiteSpace(draft.AttributesJson) && TryParseJsonToken(draft.AttributesJson) == null)
+            {
+                issues.Add($"Row {index}: malformed attributes JSON.");
+            }
+
             if (HasRuntimeResolvedLootDropCode(code)) continue;
 
             if (itemClass == EnumItemClass.Block && ResolveLootDropBlock(code) == null)
@@ -1216,6 +1225,12 @@ public sealed partial class DebugWindowManager
     {
         try
         {
+            RefreshLootDropCachedState(entry);
+            if (!_lootDropDataValid)
+            {
+                return SourceSaveResult.Fail($"Save failed: {_lootDropValidationStatus}");
+            }
+
             string sourceText = ReadAssetText(entry.SourceAsset);
             JObject json = entry.SourceJson?.DeepClone() as JObject ?? TryParseJsonObject(sourceText) ?? CreateLootDropAuthoringDocument(entry);
             if (entry.Kind == LootDropKind.TradeTable)
@@ -1291,12 +1306,20 @@ public sealed partial class DebugWindowManager
         return $"{root}/{EnsureJsonFilePath(code.Replace(':', '_'))}";
     }
 
-    private JArray BuildDropDraftArray()
+    private JArray BuildDropDraftArray(bool includeInvalidAttributesMarker = false)
     {
         JArray array = new();
         foreach (LootDropDraft draft in _lootDropDrafts)
         {
-            array.Add(draft.ToToken());
+            JObject token = draft.ToToken();
+            if (includeInvalidAttributesMarker &&
+                !string.IsNullOrWhiteSpace(draft.AttributesJson) &&
+                TryParseJsonToken(draft.AttributesJson) == null)
+            {
+                token["__invalidAttributesJson"] = draft.AttributesJson;
+            }
+
+            array.Add(token);
         }
 
         return array;
@@ -1306,33 +1329,85 @@ public sealed partial class DebugWindowManager
     {
         if (drafts.Count == 0) return "No drops configured.";
 
-        bool hasWeightedDrops = HasWeightedLootDrops(drafts);
+        int weightedGroupCount = CountWeightedLootDropGroups(drafts);
         Random random = new(8675309);
         Dictionary<string, double> totals = new(StringComparer.OrdinalIgnoreCase);
         for (int run = 0; run < runs; run++)
         {
-            foreach (LootDropDraft draft in drafts)
+            for (int index = 0; index < drafts.Count;)
             {
-                double quantity = Math.Max(0, Math.Round(CreateNatFloat(draft).nextFloat(1f, random), MidpointRounding.AwayFromZero));
-                if (quantity > 0)
+                LootDropDraft draft = drafts[index];
+                if (IsWeightedLootDrop(draft))
                 {
-                    string key = $"{draft.Type}:{draft.Code}";
-                    totals[key] = totals.TryGetValue(key, out double existing) ? existing + quantity : quantity;
+                    int groupStart = index;
+                    while (index < drafts.Count && IsWeightedLootDrop(drafts[index]))
+                    {
+                        index++;
+                    }
+
+                    LootDropDraft? selected = PickWeightedLootDrop(drafts, groupStart, index, random);
+                    if (selected == null) continue;
+
+                    double selectedQuantity = SimulateLootDropQuantity(selected, random);
+                    AddSimulatedLoot(totals, selected, selectedQuantity);
+                    if (selected.LastDrop && selectedQuantity > 0) break;
+                    continue;
                 }
 
-                if (draft.LastDrop && quantity > 0) break;
+                index++;
+                double unweightedQuantity = SimulateLootDropQuantity(draft, random);
+                AddSimulatedLoot(totals, draft, unweightedQuantity);
+                if (draft.LastDrop && unweightedQuantity > 0) break;
             }
         }
 
-        string prefix = hasWeightedDrops
-            ? "Weighted drops are preserved, but this simulation still treats rows as independent rolls until weighted-group simulation is implemented." + Environment.NewLine
-            : "";
+        List<string> notes = [];
+        if (weightedGroupCount > 0)
+        {
+            notes.Add($"Weighted groups: simulated {weightedGroupCount} consecutive non-default weighted row group(s) as one weighted pick per run.");
+            notes.Add("Rows with omitted/default weight are simulated as ordinary rows because the editor cannot distinguish omitted weight from unweighted rows.");
+        }
+        notes.Add("Simulation limitations: ignores tool filters, player stats/drop stat modifiers, and custom drop behavior code.");
+        string prefix = string.Join(Environment.NewLine, notes) + Environment.NewLine;
 
         if (totals.Count == 0) return $"{prefix}Simulated {runs} run(s): no drops.";
 
         return prefix + string.Join(Environment.NewLine, totals
             .OrderByDescending(entry => entry.Value)
             .Select(entry => $"{entry.Key}: total {entry.Value:0.##}, avg/run {entry.Value / runs:0.###}"));
+    }
+
+    private static double SimulateLootDropQuantity(LootDropDraft draft, Random random)
+    {
+        return Math.Max(0, Math.Round(CreateNatFloat(draft).nextFloat(1f, random), MidpointRounding.AwayFromZero));
+    }
+
+    private static void AddSimulatedLoot(IDictionary<string, double> totals, LootDropDraft draft, double quantity)
+    {
+        if (quantity <= 0) return;
+
+        string key = $"{draft.Type}:{draft.Code}";
+        totals[key] = totals.TryGetValue(key, out double existing) ? existing + quantity : quantity;
+    }
+
+    private static LootDropDraft? PickWeightedLootDrop(IReadOnlyList<LootDropDraft> drafts, int startInclusive, int endExclusive, Random random)
+    {
+        double totalWeight = 0;
+        for (int index = startInclusive; index < endExclusive; index++)
+        {
+            totalWeight += Math.Max(0, drafts[index].Weight);
+        }
+
+        if (totalWeight <= 0) return null;
+
+        double pick = random.NextDouble() * totalWeight;
+        for (int index = startInclusive; index < endExclusive; index++)
+        {
+            pick -= Math.Max(0, drafts[index].Weight);
+            if (pick <= 0) return drafts[index];
+        }
+
+        return drafts[endExclusive - 1];
     }
 
     private static NatFloat CreateNatFloat(LootDropDraft draft)
@@ -1348,6 +1423,26 @@ public sealed partial class DebugWindowManager
     private static bool HasWeightedLootDrops(IEnumerable<LootDropDraft> drafts)
     {
         return drafts.Any(IsWeightedLootDrop);
+    }
+
+    private static int CountWeightedLootDropGroups(IReadOnlyList<LootDropDraft> drafts)
+    {
+        int groups = 0;
+        bool inGroup = false;
+        foreach (LootDropDraft draft in drafts)
+        {
+            if (IsWeightedLootDrop(draft))
+            {
+                if (!inGroup) groups++;
+                inGroup = true;
+            }
+            else
+            {
+                inGroup = false;
+            }
+        }
+
+        return groups;
     }
 
     private static bool IsWeightedLootDrop(LootDropDraft draft)
