@@ -24,8 +24,9 @@ public sealed partial class DebugWindowManager
     private const int WorldgenPreviewModeLandform = 5;
     private const int WorldgenPreviewModeProvince = 6;
     private const int WorldgenPreviewModeOre = 7;
-    private const int WorldgenPreviewModeTerrainShape = 8;
-    private const int WorldgenPreviewModeRegion3D = 9;
+    private const int WorldgenPreviewModeBlockPatch = 8;
+    private const int WorldgenPreviewModeTerrainShape = 9;
+    private const int WorldgenPreviewModeRegion3D = 10;
     private static readonly string[] WorldgenKindFilterLabels =
     [
         "All",
@@ -45,6 +46,7 @@ public sealed partial class DebugWindowManager
         "Landform",
         "Province",
         "Ore",
+        "Block patch suitability",
         "Terrain shape",
         "3D region"
     ];
@@ -787,6 +789,10 @@ public sealed partial class DebugWindowManager
         {
             DrawWorldgenOrePreviewControls();
         }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeBlockPatch)
+        {
+            DrawWorldgenBlockPatchPreviewControls();
+        }
         else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
             DrawWorldgenMapLayerPreviewControls();
@@ -871,9 +877,13 @@ public sealed partial class DebugWindowManager
             ? $"{modeLabel}: live server {GetWorldgenPreviewMapLayerFieldName(_worldgenPreviewMode)}"
             : _worldgenPreviewMode == WorldgenPreviewModeClimate
                 ? $"{modeLabel}: live server climateGen"
+                : _worldgenPreviewMode == WorldgenPreviewModeBlockPatch
+                    ? $"{modeLabel}: selected draft row"
                 : $"{modeLabel}: viewport host";
         string inputStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
             ? "RMB/MMB pans. Mouse wheel zooms. Sampling live MapLayerBase.GenLayer."
+            : _worldgenPreviewMode == WorldgenPreviewModeBlockPatch
+                ? "RMB/MMB pans. Mouse wheel zooms. Evaluating draft climate/forest constraints."
                 : "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.";
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, inputStatus);
@@ -909,6 +919,21 @@ public sealed partial class DebugWindowManager
         else
         {
             ImGui.TextDisabled(status);
+        }
+    }
+
+    private void DrawWorldgenBlockPatchPreviewControls()
+    {
+        if (TryGetSelectedWorldgenBlockPatchRow(out JObject? row) && row != null)
+        {
+            string label = GetWorldgenRowLabel(WorldgenAssetKind.BlockPatches, row, _worldgenRowIndex);
+            ImGui.TextDisabled($"Using selected draft block patch: {label}.");
+            ImGui.TextDisabled("Suitability uses live climate/forest maps plus draft temp/rain/forest/chance constraints.");
+            ImGui.TextDisabled("Fertility and Y constraints are shown in JSON but deferred until the terrain/surface pass.");
+        }
+        else
+        {
+            ImGui.TextDisabled("Select a block patch row to preview its draft suitability.");
         }
     }
 
@@ -964,7 +989,7 @@ public sealed partial class DebugWindowManager
         return kind switch
         {
             WorldgenAssetKind.Deposits => WorldgenPreviewModeOre,
-            WorldgenAssetKind.BlockPatches => WorldgenPreviewModeClimate,
+            WorldgenAssetKind.BlockPatches => WorldgenPreviewModeBlockPatch,
             WorldgenAssetKind.Landforms => WorldgenPreviewModeLandform,
             WorldgenAssetKind.RockStrata => WorldgenPreviewModeTerrainShape,
             _ => WorldgenPreviewModeGradient
@@ -1097,6 +1122,11 @@ public sealed partial class DebugWindowManager
             return BuildWorldgenOreHoverText(blockX, blockZ);
         }
 
+        if (mode == WorldgenPreviewModeBlockPatch)
+        {
+            return BuildWorldgenBlockPatchHoverText(blockX, blockZ);
+        }
+
         if (WorldgenPreviewModeUsesMapLayer(mode))
         {
             MapLayerBase? layer = GetWorldgenPreviewMapLayer(mode);
@@ -1226,6 +1256,36 @@ public sealed partial class DebugWindowManager
         {
             _worldgenDiagnostics.Exception("Worldgen ore hover sample failed", exception);
             return $"Ore sample failed: {exception.Message}";
+        }
+    }
+
+    private string BuildWorldgenBlockPatchHoverText(int blockX, int blockZ)
+    {
+        if (!TryGetSelectedWorldgenBlockPatchRow(out JObject? row) || row == null)
+        {
+            return "Block patch: no selected draft row.";
+        }
+
+        GenMaps? genMaps = GetWorldgenPreviewGenMaps();
+        if (genMaps?.climateGen == null)
+        {
+            return "Block patch: live climateGen unavailable.";
+        }
+
+        try
+        {
+            int climateValue = genMaps.climateGen.GenLayer(blockX, blockZ, 1, 1)[0];
+            int forestValue = genMaps.forestGen?.GenLayer(blockX, blockZ, 1, 1)[0] ?? 0;
+            WorldgenClimateSample sample = DecodeWorldgenClimateSample(climateValue, forestValue);
+            WorldgenBlockPatchDraft draft = WorldgenBlockPatchDraft.FromJson(row);
+            bool suitable = draft.IsSuitable(sample);
+            string label = GetWorldgenRowLabel(WorldgenAssetKind.BlockPatches, row, _worldgenRowIndex);
+            return $"Block patch {label}: {(suitable ? "suitable" : "rejected")}; temp {sample.TemperatureCelsius:0.#}C, rain {sample.Rain:0.###}, forest {sample.Forest:0.###}, chance {draft.Chance:0.###}";
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen block patch hover sample failed", exception);
+            return $"Block patch sample failed: {exception.Message}";
         }
     }
 
@@ -1462,11 +1522,21 @@ public sealed partial class DebugWindowManager
 
     private bool TryGetSelectedWorldgenDepositRow(out JObject? row)
     {
+        return TryGetSelectedWorldgenRow(WorldgenAssetKind.Deposits, out row);
+    }
+
+    private bool TryGetSelectedWorldgenBlockPatchRow(out JObject? row)
+    {
+        return TryGetSelectedWorldgenRow(WorldgenAssetKind.BlockPatches, out row);
+    }
+
+    private bool TryGetSelectedWorldgenRow(WorldgenAssetKind kind, out JObject? row)
+    {
         row = null;
         WorldgenAssetEntry? entry = SelectedWorldgenEntry;
-        if (entry?.Kind != WorldgenAssetKind.Deposits) return false;
+        if (entry?.Kind != kind) return false;
         if (!TryParseJsonToken(_worldgenCurrentText, out JToken? root, out _) || root == null) return false;
-        if (!TryGetWorldgenRows(root, WorldgenAssetKind.Deposits, out JArray? rows, out _) || rows == null || rows.Count == 0) return false;
+        if (!TryGetWorldgenRows(root, kind, out JArray? rows, out _) || rows == null || rows.Count == 0) return false;
 
         int index = Math.Clamp(_worldgenRowIndex, 0, rows.Count - 1);
         row = rows[index] as JObject;
@@ -1478,6 +1548,13 @@ public sealed partial class DebugWindowManager
         return TryGetSelectedWorldgenDepositRow(out JObject? row) && row != null
             ? row["code"]?.ToString()
             : null;
+    }
+
+    private string GetSelectedWorldgenRowContext(WorldgenAssetKind kind)
+    {
+        return TryGetSelectedWorldgenRow(kind, out JObject? row) && row != null
+            ? row.ToString(Formatting.None)
+            : "";
     }
 
     private static IEnumerable<DepositVariant> EnumerateWorldgenPreviewDeposits(IEnumerable<DepositVariant> deposits)
@@ -1865,6 +1942,14 @@ public sealed partial class DebugWindowManager
                 return false;
             }
         }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeBlockPatch)
+        {
+            if (!TryBuildWorldgenBlockPatchRaster(centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
+            {
+                colors = null;
+                return false;
+            }
+        }
         else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
             if (!TryBuildWorldgenMapLayerRaster(centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
@@ -1936,6 +2021,63 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private bool TryBuildWorldgenBlockPatchRaster(
+        float centerX,
+        float centerZ,
+        float halfWidthBlocks,
+        float halfHeightBlocks,
+        int cellsX,
+        int cellsZ,
+        uint[] colors,
+        out string error)
+    {
+        if (!TryGetSelectedWorldgenBlockPatchRow(out JObject? row) || row == null)
+        {
+            error = "Select a block patch row to preview suitability.";
+            return false;
+        }
+
+        GenMaps? genMaps = GetWorldgenPreviewGenMaps();
+        if (genMaps?.climateGen == null)
+        {
+            error = "Live climateGen unavailable; open a singleplayer world and press Refresh SP.";
+            return false;
+        }
+
+        MapLayerBase climate = genMaps.climateGen;
+        MapLayerBase? forest = genMaps.forestGen;
+        WorldgenBlockPatchDraft draft = WorldgenBlockPatchDraft.FromJson(row);
+
+        try
+        {
+            int suitable = 0;
+            for (int z = 0; z < cellsZ; z++)
+            {
+                int worldZ = (int)MathF.Floor(centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ));
+                for (int x = 0; x < cellsX; x++)
+                {
+                    int worldX = (int)MathF.Floor(centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX));
+                    int climateValue = climate.GenLayer(worldX, worldZ, 1, 1)[0];
+                    int forestValue = forest?.GenLayer(worldX, worldZ, 1, 1)[0] ?? 0;
+                    WorldgenClimateSample sample = DecodeWorldgenClimateSample(climateValue, forestValue);
+                    bool matches = draft.IsSuitable(sample);
+                    if (matches) suitable++;
+                    colors[z * cellsX + x] = BuildWorldgenBlockPatchPreviewColor(sample, draft, matches);
+                }
+            }
+
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; block-patch suitable {suitable}/{cellsX * cellsZ}";
+            error = "";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen block patch raster failed", exception);
+            error = $"Block patch render failed: {exception.Message}";
+            return false;
+        }
+    }
+
     private bool TryBuildWorldgenMapLayerRaster(
         float centerX,
         float centerZ,
@@ -1987,9 +2129,14 @@ public sealed partial class DebugWindowManager
 
     private string GetWorldgenPreviewRasterContextKey()
     {
-        return _worldgenPreviewMode == WorldgenPreviewModeOre
-            ? GetSelectedWorldgenDepositCode() ?? ""
-            : "";
+        return _worldgenPreviewMode switch
+        {
+            WorldgenPreviewModeOre => GetSelectedWorldgenRowContext(WorldgenAssetKind.Deposits),
+            WorldgenPreviewModeBlockPatch => GetSelectedWorldgenRowContext(WorldgenAssetKind.BlockPatches),
+            WorldgenPreviewModeLandform => GetSelectedWorldgenRowContext(WorldgenAssetKind.Landforms),
+            WorldgenPreviewModeTerrainShape => GetSelectedWorldgenRowContext(WorldgenAssetKind.RockStrata),
+            _ => ""
+        };
     }
 
     private static uint BuildWorldgenMapLayerPreviewColor(int mode, int value)
@@ -2041,6 +2188,48 @@ public sealed partial class DebugWindowManager
         return ImGui.ColorConvertFloat4ToU32(color);
     }
 
+    private static uint BuildWorldgenBlockPatchPreviewColor(WorldgenClimateSample sample, WorldgenBlockPatchDraft draft, bool suitable)
+    {
+        if (!suitable)
+        {
+            float miss = draft.RejectionStrength(sample);
+            return ImGui.ColorConvertFloat4ToU32(new NVector4(
+                Math.Clamp(0.10f + miss * 0.28f, 0f, 1f),
+                Math.Clamp(0.055f + sample.Forest * 0.06f, 0f, 1f),
+                Math.Clamp(0.045f + sample.Rain * 0.10f, 0f, 1f),
+                1f));
+        }
+
+        float chance = Math.Clamp(draft.Chance, 0f, 1f);
+        float tempWarmth = Math.Clamp((sample.TemperatureCelsius + 20f) / 60f, 0f, 1f);
+        return ImGui.ColorConvertFloat4ToU32(new NVector4(
+            Math.Clamp(0.10f + chance * 0.32f + tempWarmth * 0.12f, 0f, 1f),
+            Math.Clamp(0.28f + chance * 0.48f + sample.Forest * 0.18f, 0f, 1f),
+            Math.Clamp(0.08f + sample.Rain * 0.26f, 0f, 1f),
+            1f));
+    }
+
+    private static WorldgenClimateSample DecodeWorldgenClimateSample(int climateValue, int forestValue)
+    {
+        int rawTemp;
+        int rawRain;
+        if ((climateValue & ~0xff) == 0)
+        {
+            rawTemp = climateValue;
+            rawRain = climateValue;
+        }
+        else
+        {
+            rawTemp = (climateValue >> 16) & 0xff;
+            rawRain = (climateValue >> 8) & 0xff;
+        }
+
+        float tempCelsius = rawTemp / 4f - 20f;
+        float rain = Math.Clamp(rawRain / 255f, 0f, 1f);
+        float forest = Math.Clamp(forestValue / 255f, 0f, 1f);
+        return new WorldgenClimateSample(tempCelsius, rain, forest, 0f);
+    }
+
     private static uint BuildWorldgenPreviewColor(long seed, float worldX, float worldZ, int mode)
     {
         float seedOffset = (seed % 100000) * 0.000017f;
@@ -2058,6 +2247,7 @@ public sealed partial class DebugWindowManager
             WorldgenPreviewModeLandform => new NVector4(0.18f + detail * 0.62f, 0.16f + mix * 0.28f, 0.09f + bands * 0.14f, 1f),
             WorldgenPreviewModeProvince => new NVector4(0.12f + mix * 0.54f, 0.12f + mix * 0.50f, 0.10f + detail * 0.26f, 1f),
             WorldgenPreviewModeOre => new NVector4(0.12f + bands * 0.35f, 0.14f + detail * 0.31f, 0.12f + mix * 0.34f, 1f),
+            WorldgenPreviewModeBlockPatch => new NVector4(0.10f + detail * 0.24f, 0.20f + mix * 0.44f, 0.10f + bands * 0.18f, 1f),
             _ => new NVector4(0.10f + mix * 0.48f, 0.18f + bands * 0.36f, 0.14f + detail * 0.30f, 1f)
         };
 
@@ -2649,6 +2839,69 @@ public sealed partial class DebugWindowManager
     }
 
     private sealed record WorldgenDraftState(string Text, int RowIndex, bool IsValid, string ValidationStatus);
+
+    private readonly record struct WorldgenClimateSample(float TemperatureCelsius, float Rain, float Forest, float Fertility, bool HasFertility = false);
+
+    private readonly record struct WorldgenValueRange(float? Min, float? Max)
+    {
+        public bool IsSet => Min.HasValue || Max.HasValue;
+
+        public bool Contains(float value)
+        {
+            return (!Min.HasValue || value >= Min.Value) &&
+                (!Max.HasValue || value <= Max.Value);
+        }
+
+        public float RejectionDistance(float value)
+        {
+            if (Min.HasValue && value < Min.Value) return Min.Value - value;
+            if (Max.HasValue && value > Max.Value) return value - Max.Value;
+            return 0f;
+        }
+    }
+
+    private readonly record struct WorldgenBlockPatchDraft(
+        WorldgenValueRange Temperature,
+        WorldgenValueRange Rain,
+        WorldgenValueRange Forest,
+        WorldgenValueRange Fertility,
+        float Chance)
+    {
+        public static WorldgenBlockPatchDraft FromJson(JObject row)
+        {
+            return new WorldgenBlockPatchDraft(
+                ReadRange(row, "minTemp", "maxTemp"),
+                ReadRange(row, "minRain", "maxRain"),
+                ReadRange(row, "minForest", "maxForest"),
+                ReadRange(row, "minFertility", "maxFertility"),
+                TryReadJsonFloat(row["chance"], out float chance) ? chance : 1f);
+        }
+
+        public bool IsSuitable(WorldgenClimateSample sample)
+        {
+            if (!Temperature.Contains(sample.TemperatureCelsius)) return false;
+            if (!Rain.Contains(sample.Rain)) return false;
+            if (!Forest.Contains(sample.Forest)) return false;
+            if (sample.HasFertility && !Fertility.Contains(sample.Fertility)) return false;
+            return true;
+        }
+
+        public float RejectionStrength(WorldgenClimateSample sample)
+        {
+            float temp = Temperature.RejectionDistance(sample.TemperatureCelsius) / 60f;
+            float rain = Rain.RejectionDistance(sample.Rain);
+            float forest = Forest.RejectionDistance(sample.Forest);
+            float fertility = sample.HasFertility ? Fertility.RejectionDistance(sample.Fertility) : 0f;
+            return Math.Clamp(temp + rain + forest + fertility, 0f, 1f);
+        }
+
+        private static WorldgenValueRange ReadRange(JObject row, string minName, string maxName)
+        {
+            float? min = TryReadJsonFloat(row[minName], out float parsedMin) ? parsedMin : null;
+            float? max = TryReadJsonFloat(row[maxName], out float parsedMax) ? parsedMax : null;
+            return new WorldgenValueRange(min, max);
+        }
+    }
 
     private readonly record struct WorldgenPreviewRasterCacheKey(
         int Mode,
