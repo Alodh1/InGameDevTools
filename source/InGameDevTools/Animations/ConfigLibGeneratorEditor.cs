@@ -19,6 +19,8 @@ public sealed partial class DebugWindowManager
     private bool _configLibPrimitiveOnly = true;
     private bool _configLibIncludeStrings = true;
     private bool _configLibGenerateSeparators = true;
+    private bool _configLibModConfigIncludedOnly;
+    private int _configLibPreviewMode;
     private string _configLibTargetDomain = "";
     private int _configLibVersion;
     private string _configLibStatus = "";
@@ -108,6 +110,7 @@ public sealed partial class DebugWindowManager
                     relativePath,
                     fileName,
                     SuggestConfigLibDomain(relativePath),
+                    root,
                     settings));
             }
             catch (Exception exception)
@@ -310,20 +313,43 @@ public sealed partial class DebugWindowManager
         }
 
         string targetDomain = GetConfigLibTargetDomain(entry);
-        string outputPath = GetConfigLibOutputPath(targetDomain);
+        string patchOutputPath = GetConfigLibPatchOutputPath(targetDomain);
+        string modConfigOutputPath = GetConfigLibModConfigOutputPath(entry);
         ImGui.TextWrapped($"File: {entry.RelativeFilePath}");
-        ImGui.TextWrapped($"Output: {outputPath}");
+        ImGui.TextWrapped($"ConfigLib: {patchOutputPath}");
+        ImGui.TextWrapped($"ModConfig: {modConfigOutputPath}");
 
-        string preview = BuildConfigLibPatchJson(entry, targetDomain);
-        if (ImGui.Button("Copy JSON##configlib-copy"))
+        ImGui.Checkbox("ModConfig included settings only##configlib-modconfig-included-only", ref _configLibModConfigIncludedOnly);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Off copies the full selected ModConfig JSON. On emits only the enabled settings from the middle panel.");
+        }
+
+        string patchPreview = BuildConfigLibPatchJson(entry, targetDomain);
+        string modConfigPreview = BuildConfigLibModConfigJson(entry);
+        string[] previewModes = ["ConfigLib patches", "ModConfig JSON"];
+        ImGui.Combo("Preview##configlib-preview-mode", ref _configLibPreviewMode, previewModes, previewModes.Length);
+        _configLibPreviewMode = Math.Clamp(_configLibPreviewMode, 0, previewModes.Length - 1);
+        string preview = _configLibPreviewMode == 0 ? patchPreview : modConfigPreview;
+
+        if (ImGui.Button("Copy preview##configlib-copy"))
         {
             ImGui.SetClipboardText(preview);
-            _configLibStatus = "Copied ConfigLib JSON to clipboard.";
+            _configLibStatus = $"Copied {previewModes[_configLibPreviewMode]} to clipboard.";
         }
         ImGui.SameLine();
-        if (ImGui.Button("Save authored file##configlib-save"))
+        if (ImGui.Button("Save ConfigLib##configlib-save-patch"))
         {
-            QueueSourceSave(TrySaveConfigLibPatch(entry, targetDomain, preview), status => _configLibStatus = status);
+            QueueSourceSave(TrySaveConfigLibPatch(entry, targetDomain, patchPreview), status => _configLibStatus = status);
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Save ModConfig##configlib-save-modconfig"))
+        {
+            QueueSourceSave(TrySaveConfigLibModConfig(entry, modConfigPreview), status => _configLibStatus = status);
+        }
+        if (ImGui.Button("Save both authored files##configlib-save-both", new NVector2(-1, 0)))
+        {
+            QueueSourceSave(TrySaveConfigLibBundle(entry, targetDomain, patchPreview, modConfigPreview), status => _configLibStatus = status);
         }
 
         ImGui.TextWrapped(_configLibStatus);
@@ -349,7 +375,7 @@ public sealed partial class DebugWindowManager
     {
         try
         {
-            string outputPath = GetConfigLibOutputPath(targetDomain);
+            string outputPath = GetConfigLibPatchOutputPath(targetDomain);
             string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : "";
             SourceSaveRequest request = new(
                 outputPath,
@@ -362,6 +388,55 @@ public sealed partial class DebugWindowManager
         catch (Exception exception)
         {
             _configLibDiagnostics.Exception($"ConfigLib save failed for {entry.RelativeFilePath}", exception);
+            return SourceSaveResult.Fail($"Save failed for {entry.RelativeFilePath}: {exception.Message}");
+        }
+    }
+
+    private SourceSaveResult TrySaveConfigLibModConfig(ConfigLibSourceEntry entry, string newText)
+    {
+        try
+        {
+            string outputPath = GetConfigLibModConfigOutputPath(entry);
+            string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : "";
+            SourceSaveRequest request = new(
+                outputPath,
+                oldText,
+                newText,
+                $"Saved ModConfig default for {entry.RelativeFilePath} to {outputPath}.",
+                () => WriteAuthoredFile(outputPath, newText));
+            return SourceSaveResult.Preview(request);
+        }
+        catch (Exception exception)
+        {
+            _configLibDiagnostics.Exception($"ModConfig save failed for {entry.RelativeFilePath}", exception);
+            return SourceSaveResult.Fail($"ModConfig save failed for {entry.RelativeFilePath}: {exception.Message}");
+        }
+    }
+
+    private SourceSaveResult TrySaveConfigLibBundle(ConfigLibSourceEntry entry, string targetDomain, string patchText, string modConfigText)
+    {
+        try
+        {
+            string patchPath = GetConfigLibPatchOutputPath(targetDomain);
+            string modConfigPath = GetConfigLibModConfigOutputPath(entry);
+            string oldText = BuildConfigLibBundlePreview(patchPath, File.Exists(patchPath) ? File.ReadAllText(patchPath) : "", modConfigPath, File.Exists(modConfigPath) ? File.ReadAllText(modConfigPath) : "");
+            string newText = BuildConfigLibBundlePreview(patchPath, patchText, modConfigPath, modConfigText);
+            SourceSaveRequest request = new(
+                patchPath,
+                oldText,
+                newText,
+                $"Saved ConfigLib definition and ModConfig default for {entry.RelativeFilePath}.",
+                () =>
+                {
+                    WriteAuthoredFile(patchPath, patchText);
+                    WriteAuthoredFile(modConfigPath, modConfigText);
+                    return "";
+                });
+            return SourceSaveResult.Preview(request);
+        }
+        catch (Exception exception)
+        {
+            _configLibDiagnostics.Exception($"ConfigLib bundle save failed for {entry.RelativeFilePath}", exception);
             return SourceSaveResult.Fail($"Save failed for {entry.RelativeFilePath}: {exception.Message}");
         }
     }
@@ -416,6 +491,22 @@ public sealed partial class DebugWindowManager
         return root.ToString(Formatting.Indented);
     }
 
+    private string BuildConfigLibModConfigJson(ConfigLibSourceEntry entry)
+    {
+        if (!_configLibModConfigIncludedOnly)
+        {
+            return entry.Root.ToString(Formatting.Indented);
+        }
+
+        JToken root = entry.Root is JArray ? new JArray() : new JObject();
+        foreach (ConfigLibSettingDraft draft in GetIncludedConfigLibSettings(entry))
+        {
+            SetConfigLibTokenAtPath(ref root, draft.Code.Split('/', StringSplitOptions.RemoveEmptyEntries), draft.Default.DeepClone());
+        }
+
+        return root.ToString(Formatting.Indented);
+    }
+
     private IEnumerable<ConfigLibSettingDraft> GetIncludedConfigLibSettings(ConfigLibSourceEntry entry)
     {
         return entry.Settings.Where(setting => setting.Include && IsConfigLibSettingSelectable(setting));
@@ -435,9 +526,99 @@ public sealed partial class DebugWindowManager
         return SanitizeConfigLibDomain(domain);
     }
 
-    private static string GetConfigLibOutputPath(string targetDomain)
+    private static string GetConfigLibPatchOutputPath(string targetDomain)
     {
         return GetToolAuthoredAssetPath("configlib", Path.Combine("assets", targetDomain, "config", "configlib-patches.json"));
+    }
+
+    private static string GetConfigLibModConfigOutputPath(ConfigLibSourceEntry entry)
+    {
+        return GetToolAuthoredAssetPath("configlib", Path.Combine("ModConfig", entry.RelativeFilePath.Replace('/', Path.DirectorySeparatorChar)));
+    }
+
+    private static string BuildConfigLibBundlePreview(string patchPath, string patchText, string modConfigPath, string modConfigText)
+    {
+        return
+            $"// {patchPath}" + Environment.NewLine +
+            patchText + Environment.NewLine + Environment.NewLine +
+            $"// {modConfigPath}" + Environment.NewLine +
+            modConfigText;
+    }
+
+    private static void SetConfigLibTokenAtPath(ref JToken root, IReadOnlyList<string> parts, JToken value)
+    {
+        if (parts.Count == 0)
+        {
+            root = value;
+            return;
+        }
+
+        if (root is not JObject && root is not JArray)
+        {
+            root = IsConfigLibArrayIndex(parts[0]) ? new JArray() : new JObject();
+        }
+
+        JToken current = root;
+        for (int index = 0; index < parts.Count; index++)
+        {
+            string part = parts[index];
+            bool last = index == parts.Count - 1;
+            bool nextArray = !last && IsConfigLibArrayIndex(parts[index + 1]);
+
+            if (current is JObject obj)
+            {
+                if (last)
+                {
+                    obj[part] = value;
+                    return;
+                }
+
+                JToken? next = obj[part];
+                if (next == null || next.Type == JTokenType.Null)
+                {
+                    next = nextArray ? new JArray() : new JObject();
+                    obj[part] = next;
+                }
+
+                current = next;
+                continue;
+            }
+
+            if (current is JArray array && int.TryParse(part, out int arrayIndex) && arrayIndex >= 0)
+            {
+                EnsureConfigLibArraySize(array, arrayIndex + 1);
+                if (last)
+                {
+                    array[arrayIndex] = value;
+                    return;
+                }
+
+                JToken? next = array[arrayIndex];
+                if (next == null || next.Type == JTokenType.Null)
+                {
+                    next = nextArray ? new JArray() : new JObject();
+                    array[arrayIndex] = next;
+                }
+
+                current = next;
+                continue;
+            }
+
+            return;
+        }
+    }
+
+    private static bool IsConfigLibArrayIndex(string value)
+    {
+        return int.TryParse(value, out int index) && index >= 0;
+    }
+
+    private static void EnsureConfigLibArraySize(JArray array, int size)
+    {
+        while (array.Count < size)
+        {
+            array.Add(JValue.CreateNull());
+        }
     }
 
     private static List<ConfigLibSettingDraft> BuildConfigLibSettingDrafts(JToken root)
@@ -600,12 +781,13 @@ public sealed partial class DebugWindowManager
 
     private sealed class ConfigLibSourceEntry
     {
-        public ConfigLibSourceEntry(string filePath, string relativeFilePath, string displayName, string suggestedDomain, List<ConfigLibSettingDraft> settings)
+        public ConfigLibSourceEntry(string filePath, string relativeFilePath, string displayName, string suggestedDomain, JToken root, List<ConfigLibSettingDraft> settings)
         {
             FilePath = filePath;
             RelativeFilePath = relativeFilePath;
             DisplayName = displayName;
             SuggestedDomain = suggestedDomain;
+            Root = root.DeepClone();
             Settings = settings;
             Key = filePath;
             SearchText = $"{displayName} {relativeFilePath} {suggestedDomain} {string.Join(' ', settings.Select(setting => setting.Code))}";
@@ -616,6 +798,7 @@ public sealed partial class DebugWindowManager
         public string RelativeFilePath { get; }
         public string DisplayName { get; }
         public string SuggestedDomain { get; }
+        public JToken Root { get; }
         public string SearchText { get; }
         public List<ConfigLibSettingDraft> Settings { get; }
     }
