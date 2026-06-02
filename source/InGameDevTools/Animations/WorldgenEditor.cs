@@ -2,6 +2,7 @@ using ImGuiNET;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using System.Globalization;
 using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
 using Vintagestory.API.Common;
@@ -20,6 +21,17 @@ public sealed partial class DebugWindowManager
         "Landforms",
         "Rock strata",
         "Other"
+    ];
+    private static readonly string[] WorldgenPreviewModeLabels =
+    [
+        "Gradient test",
+        "Climate",
+        "Forest",
+        "Landform",
+        "Province",
+        "Ore",
+        "Terrain shape",
+        "3D region"
     ];
 
     private readonly List<WorldgenAssetEntry> _worldgenEntries = [];
@@ -42,6 +54,15 @@ public sealed partial class DebugWindowManager
     private string _worldgenStatus = "Worldgen editor ready.";
     private bool _worldgenTextValid;
     private string _worldgenValidationStatus = "No worldgen asset loaded.";
+    private int _worldgenPreviewMode;
+    private string _worldgenPreviewSeedText = "";
+    private string _worldgenPreviewConfigStatus = "World config not read yet.";
+    private int _worldgenPreviewOriginX;
+    private int _worldgenPreviewOriginZ;
+    private float _worldgenPreviewPanX;
+    private float _worldgenPreviewPanZ;
+    private float _worldgenPreviewZoom = 1f;
+    private bool _worldgenPreviewInitialized;
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -636,7 +657,7 @@ public sealed partial class DebugWindowManager
     private void DrawWorldgenInspector(NVector2 size, bool showDiagnostics)
     {
         ImGui.BeginChild("##worldgen-inspector", size, true);
-        DrawWorldgenReservedViewport();
+        DrawWorldgenPreviewViewport();
         ImGui.Separator();
 
         WorldgenAssetEntry? entry = SelectedWorldgenEntry;
@@ -690,21 +711,264 @@ public sealed partial class DebugWindowManager
         ImGui.EndChild();
     }
 
-    private void DrawWorldgenReservedViewport()
+    private void DrawWorldgenPreviewViewport()
     {
-        float height = Math.Clamp(ImGui.GetContentRegionAvail().Y * 0.34f, 150f, 300f);
-        NVector2 size = new(-float.Epsilon, height);
-        ImGui.BeginChild("##worldgen-blank-viewport", size, true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        EnsureWorldgenPreviewDefaults();
+
+        ImGui.TextUnformatted("Worldgen preview");
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        ImGui.Combo("##worldgen-preview-mode", ref _worldgenPreviewMode, WorldgenPreviewModeLabels, WorldgenPreviewModeLabels.Length);
+
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        ImGui.InputText("Seed##worldgen-preview-seed", ref _worldgenPreviewSeedText, 64);
+
+        float halfWidth = Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.48f);
+        ImGui.PushItemWidth(halfWidth);
+        ImGui.InputInt("Origin X##worldgen-preview-origin-x", ref _worldgenPreviewOriginX);
+        ImGui.SameLine();
+        ImGui.InputInt("Z##worldgen-preview-origin-z", ref _worldgenPreviewOriginZ);
+        ImGui.PopItemWidth();
+
+        if (ImGui.Button("Use current world##worldgen-preview-current"))
+        {
+            UseCurrentWorldgenPreviewState();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Reset view##worldgen-preview-reset"))
+        {
+            _worldgenPreviewPanX = 0f;
+            _worldgenPreviewPanZ = 0f;
+            _worldgenPreviewZoom = 1f;
+        }
+
+        float availableHeight = ImGui.GetContentRegionAvail().Y;
+        float height = Math.Clamp(availableHeight * 0.46f, 220f, Math.Max(220f, availableHeight - 260f));
+        ImGui.BeginChild("##worldgen-preview-viewport", new NVector2(-float.Epsilon, height), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+
         NVector2 min = ImGui.GetWindowPos();
         NVector2 actual = ImGui.GetWindowSize();
-        uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.02f, 0.02f, 0.018f, 1f));
-        uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.35f, 0.30f, 0.22f, 1f));
-        ImGui.GetWindowDrawList().AddRectFilled(min, new NVector2(min.X + actual.X, min.Y + actual.Y), background);
-        ImGui.GetWindowDrawList().AddRect(min, new NVector2(min.X + actual.X, min.Y + actual.Y), border);
-        ImGui.SetCursorPos(new NVector2(12f, 14f));
-        ImGui.TextWrapped("Worldgen preview reserved for later.");
-        ImGui.TextWrapped("V1 edits source JSON only; it does not simulate terrain or mutate generated chunks.");
+        NVector2 max = new(min.X + actual.X, min.Y + actual.Y);
+        bool hovered = ImGui.IsWindowHovered();
+        long seed = ParseWorldgenPreviewSeed();
+        float pixelsPerBlock = Math.Clamp(2.5f * _worldgenPreviewZoom, 0.35f, 32f);
+        float centerX = _worldgenPreviewOriginX + _worldgenPreviewPanX;
+        float centerZ = _worldgenPreviewOriginZ + _worldgenPreviewPanZ;
+
+        if (hovered)
+        {
+            NVector2 delta = ImGui.GetIO().MouseDelta;
+            bool pan = ImGui.IsMouseDragging(ImGuiMouseButton.Middle) || ImGui.IsMouseDragging(ImGuiMouseButton.Right);
+            if (pan)
+            {
+                _worldgenPreviewPanX = Math.Clamp(_worldgenPreviewPanX - delta.X / pixelsPerBlock, -200000f, 200000f);
+                _worldgenPreviewPanZ = Math.Clamp(_worldgenPreviewPanZ - delta.Y / pixelsPerBlock, -200000f, 200000f);
+                centerX = _worldgenPreviewOriginX + _worldgenPreviewPanX;
+                centerZ = _worldgenPreviewOriginZ + _worldgenPreviewPanZ;
+            }
+
+            float wheel = ImGui.GetIO().MouseWheel;
+            if (Math.Abs(wheel) > 0.001f)
+            {
+                _worldgenPreviewZoom = Math.Clamp(_worldgenPreviewZoom * (1f + wheel * 0.12f), 0.15f, 12f);
+                pixelsPerBlock = Math.Clamp(2.5f * _worldgenPreviewZoom, 0.35f, 32f);
+            }
+        }
+
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        drawList.PushClipRect(min, max, true);
+        DrawWorldgenPreviewRaster(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
+        DrawWorldgenPreviewGrid(drawList, min, max, centerX, centerZ, pixelsPerBlock);
+        drawList.PopClipRect();
+
+        uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 1f));
+        uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.88f, 0.84f, 0.74f, 1f));
+        uint muted = ImGui.ColorConvertFloat4ToU32(new NVector4(0.72f, 0.68f, 0.58f, 1f));
+        drawList.AddRect(min, max, border, 4f);
+
+        NVector2 mouse = ImGui.GetIO().MousePos;
+        int hoverX = (int)MathF.Floor(centerX + (mouse.X - (min.X + actual.X * 0.5f)) / pixelsPerBlock);
+        int hoverZ = (int)MathF.Floor(centerZ + (mouse.Y - (min.Y + actual.Y * 0.5f)) / pixelsPerBlock);
+        string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"{modeLabel}: viewport host");
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.");
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), muted, $"Cursor block: X {hoverX}, Z {hoverZ}");
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 70f), muted, _worldgenPreviewConfigStatus);
+
         ImGui.EndChild();
+    }
+
+    private void EnsureWorldgenPreviewDefaults()
+    {
+        if (_worldgenPreviewInitialized) return;
+
+        _worldgenPreviewInitialized = true;
+        UseCurrentWorldgenPreviewState();
+    }
+
+    private void UseCurrentWorldgenPreviewState()
+    {
+        _worldgenPreviewSeedText = GetCurrentWorldgenSeedText();
+        _worldgenPreviewConfigStatus = GetCurrentWorldgenConfigSummary();
+
+        try
+        {
+            EntityPlayer? player = _api.World.Player?.Entity;
+            if (player != null)
+            {
+                _worldgenPreviewOriginX = (int)Math.Floor(player.Pos.X);
+                _worldgenPreviewOriginZ = (int)Math.Floor(player.Pos.Z);
+            }
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen preview could not read player position", exception);
+        }
+    }
+
+    private string GetCurrentWorldgenSeedText()
+    {
+        object? seed = TryGetReflectedProperty(_api.World, "Seed");
+        return FormatInvariant(seed, "0");
+    }
+
+    private string GetCurrentWorldgenConfigSummary()
+    {
+        List<string> parts = [];
+        object? seaLevel = TryGetReflectedProperty(_api.World, "SeaLevel");
+        if (seaLevel != null)
+        {
+            parts.Add($"sea {FormatInvariant(seaLevel, "?")}");
+        }
+
+        object? mapSizeY = TryGetReflectedProperty(_api.World, "MapSizeY");
+        if (mapSizeY != null)
+        {
+            parts.Add($"height {FormatInvariant(mapSizeY, "?")}");
+        }
+
+        object? config = TryGetReflectedProperty(_api.World, "Config");
+        if (config != null)
+        {
+            parts.Add($"config {config.GetType().Name}");
+        }
+
+        return parts.Count == 0
+            ? "World config: not exposed by client API yet."
+            : $"World config: {string.Join(", ", parts)}";
+    }
+
+    private static object? TryGetReflectedProperty(object? instance, string propertyName)
+    {
+        if (instance == null) return null;
+
+        try
+        {
+            return instance.GetType()
+                .GetProperty(propertyName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
+                ?.GetValue(instance);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string FormatInvariant(object? value, string fallback)
+    {
+        if (value == null) return fallback;
+        return value is IFormattable formattable
+            ? formattable.ToString(null, CultureInfo.InvariantCulture)
+            : value.ToString() ?? fallback;
+    }
+
+    private long ParseWorldgenPreviewSeed()
+    {
+        return long.TryParse(_worldgenPreviewSeedText, NumberStyles.Integer, CultureInfo.InvariantCulture, out long seed)
+            ? seed
+            : 0L;
+    }
+
+    private void DrawWorldgenPreviewRaster(ImDrawListPtr drawList, NVector2 min, NVector2 max, long seed, float centerX, float centerZ, float pixelsPerBlock)
+    {
+        uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.02f, 0.02f, 0.018f, 1f));
+        drawList.AddRectFilled(min, max, background, 4f);
+
+        int cellsX = Math.Clamp((int)((max.X - min.X) / 7f), 32, 112);
+        int cellsZ = Math.Clamp((int)((max.Y - min.Y) / 7f), 32, 112);
+        float cellWidth = (max.X - min.X) / cellsX;
+        float cellHeight = (max.Y - min.Y) / cellsZ;
+        float halfWidthBlocks = (max.X - min.X) / (2f * pixelsPerBlock);
+        float halfHeightBlocks = (max.Y - min.Y) / (2f * pixelsPerBlock);
+
+        for (int z = 0; z < cellsZ; z++)
+        {
+            float worldZ = centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ);
+            for (int x = 0; x < cellsX; x++)
+            {
+                float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
+                uint color = BuildWorldgenPreviewColor(seed, worldX, worldZ, _worldgenPreviewMode);
+                NVector2 a = new(min.X + x * cellWidth, min.Y + z * cellHeight);
+                NVector2 b = new(min.X + (x + 1) * cellWidth + 0.5f, min.Y + (z + 1) * cellHeight + 0.5f);
+                drawList.AddRectFilled(a, b, color);
+            }
+        }
+    }
+
+    private static uint BuildWorldgenPreviewColor(long seed, float worldX, float worldZ, int mode)
+    {
+        float seedOffset = (seed % 100000) * 0.000017f;
+        float broad = 0.5f + 0.5f * MathF.Sin(worldX * 0.022f + seedOffset * 19f);
+        float bands = 0.5f + 0.5f * MathF.Cos(worldZ * 0.031f - seedOffset * 31f);
+        float detail = 0.5f + 0.5f * MathF.Sin((worldX + worldZ) * 0.071f + seedOffset * 47f);
+        float mix = Math.Clamp(broad * 0.48f + bands * 0.38f + detail * 0.14f, 0f, 1f);
+
+        NVector4 color = mode switch
+        {
+            1 => new NVector4(0.10f + mix * 0.55f, 0.22f + bands * 0.35f, 0.78f - mix * 0.34f, 1f),
+            2 => new NVector4(0.05f + detail * 0.18f, 0.22f + mix * 0.55f, 0.10f + bands * 0.22f, 1f),
+            3 => new NVector4(0.18f + mix * 0.42f, 0.16f + detail * 0.32f, 0.12f + bands * 0.22f, 1f),
+            4 => new NVector4(0.10f + bands * 0.32f, 0.20f + mix * 0.35f, 0.32f + detail * 0.48f, 1f),
+            5 => new NVector4(0.18f + detail * 0.62f, 0.16f + mix * 0.28f, 0.09f + bands * 0.14f, 1f),
+            6 => new NVector4(0.12f + mix * 0.54f, 0.12f + mix * 0.50f, 0.10f + detail * 0.26f, 1f),
+            7 => new NVector4(0.12f + bands * 0.35f, 0.14f + detail * 0.31f, 0.12f + mix * 0.34f, 1f),
+            _ => new NVector4(0.10f + mix * 0.48f, 0.18f + bands * 0.36f, 0.14f + detail * 0.30f, 1f)
+        };
+
+        return ImGui.ColorConvertFloat4ToU32(color);
+    }
+
+    private static void DrawWorldgenPreviewGrid(ImDrawListPtr drawList, NVector2 min, NVector2 max, float centerX, float centerZ, float pixelsPerBlock)
+    {
+        uint grid = ImGui.ColorConvertFloat4ToU32(new NVector4(0.18f, 0.17f, 0.14f, 0.50f));
+        uint originX = ImGui.ColorConvertFloat4ToU32(new NVector4(0.78f, 0.22f, 0.15f, 0.85f));
+        uint originZ = ImGui.ColorConvertFloat4ToU32(new NVector4(0.22f, 0.38f, 0.92f, 0.85f));
+        float width = max.X - min.X;
+        float height = max.Y - min.Y;
+        float worldLeft = centerX - width / (2f * pixelsPerBlock);
+        float worldRight = centerX + width / (2f * pixelsPerBlock);
+        float worldTop = centerZ - height / (2f * pixelsPerBlock);
+        float worldBottom = centerZ + height / (2f * pixelsPerBlock);
+        int step = pixelsPerBlock switch
+        {
+            >= 12f => 8,
+            >= 6f => 16,
+            >= 2f => 32,
+            _ => 64
+        };
+
+        int firstX = (int)MathF.Floor(worldLeft / step) * step;
+        for (int x = firstX; x <= worldRight; x += step)
+        {
+            float screenX = min.X + width * 0.5f + (x - centerX) * pixelsPerBlock;
+            drawList.AddLine(new NVector2(screenX, min.Y), new NVector2(screenX, max.Y), x == 0 ? originX : grid, x == 0 ? 2f : 1f);
+        }
+
+        int firstZ = (int)MathF.Floor(worldTop / step) * step;
+        for (int z = firstZ; z <= worldBottom; z += step)
+        {
+            float screenY = min.Y + height * 0.5f + (z - centerZ) * pixelsPerBlock;
+            drawList.AddLine(new NVector2(min.X, screenY), new NVector2(max.X, screenY), z == 0 ? originZ : grid, z == 0 ? 2f : 1f);
+        }
     }
 
     private void LoadWorldgenEntry(WorldgenAssetEntry entry)
