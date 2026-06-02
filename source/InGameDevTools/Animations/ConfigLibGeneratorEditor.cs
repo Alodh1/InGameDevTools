@@ -597,7 +597,8 @@ public sealed partial class DebugWindowManager
             {
                 setting["name"] = draft.Name;
             }
-            if (!string.IsNullOrWhiteSpace(draft.Title))
+            if (!string.IsNullOrWhiteSpace(draft.Title) &&
+                !string.Equals(draft.Title.Trim(), HumanizeConfigLibName(draft.Code), StringComparison.Ordinal))
             {
                 setting["title"] = draft.Title.Trim();
             }
@@ -611,12 +612,17 @@ public sealed partial class DebugWindowManager
                 {
                     double min = Math.Min(draft.Min, draft.Max);
                     double max = Math.Max(draft.Min, draft.Max);
-                    setting["min"] = BuildConfigLibNumericToken(draft, min);
-                    setting["max"] = BuildConfigLibNumericToken(draft, max);
+                    JObject range = new()
+                    {
+                        ["min"] = BuildConfigLibNumericToken(draft, min),
+                        ["max"] = BuildConfigLibNumericToken(draft, max)
+                    };
                     if (draft.Step > 0)
                     {
-                        setting["step"] = BuildConfigLibNumericToken(draft, draft.Step);
+                        range["step"] = BuildConfigLibNumericToken(draft, draft.Step);
                     }
+
+                    setting["range"] = range;
                 }
 
                 if (draft.Logarithmic)
@@ -640,7 +646,6 @@ public sealed partial class DebugWindowManager
         JObject root = new()
         {
             ["version"] = _configLibVersion,
-            ["file"] = entry.RelativeFilePath,
             ["settings"] = settings
         };
 
