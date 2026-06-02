@@ -81,6 +81,7 @@ public sealed partial class DebugWindowManager
     private bool _worldgenPreviewInitialized;
     private ICoreServerAPI? _worldgenPreviewServerApi;
     private GenMaps? _worldgenPreviewGenMaps;
+    private GenDeposits? _worldgenPreviewGenDeposits;
     private Dictionary<int, string>? _worldgenPreviewLandformCodes;
     private Dictionary<int, string>? _worldgenPreviewProvinceCodes;
     private string _worldgenPreviewServerStatus = "Singleplayer server API not checked.";
@@ -410,6 +411,7 @@ public sealed partial class DebugWindowManager
                 {
                     _worldgenRowIndex = i;
                     RememberWorldgenDraft();
+                    InvalidateWorldgenPreviewRasterCache();
                 }
                 if (ImGui.IsItemHovered())
                 {
@@ -678,6 +680,7 @@ public sealed partial class DebugWindowManager
         {
             ValidateWorldgenCurrentText();
             RememberWorldgenDraft();
+            InvalidateWorldgenPreviewRasterCache();
         }
     }
 
@@ -778,6 +781,10 @@ public sealed partial class DebugWindowManager
         if (_worldgenPreviewMode == WorldgenPreviewModeClimate)
         {
             DrawWorldgenClimatePreviewControls();
+        }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeOre)
+        {
+            DrawWorldgenOrePreviewControls();
         }
         else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
@@ -889,6 +896,19 @@ public sealed partial class DebugWindowManager
     private void DrawWorldgenMapLayerPreviewControls()
     {
         ImGui.TextDisabled("Using the running server's initialized GenMaps layer; map scale comes from the active world config.");
+    }
+
+    private void DrawWorldgenOrePreviewControls()
+    {
+        if (TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string status))
+        {
+            string generator = TryGetWorldgenPreviewDepositGenerator(variant!) ?? "unknown generator";
+            ImGui.TextDisabled($"Using live deposit: {code ?? "unnamed"} ({generator}).");
+        }
+        else
+        {
+            ImGui.TextDisabled(status);
+        }
     }
 
     private void EnsureWorldgenPreviewDefaults()
@@ -1071,6 +1091,11 @@ public sealed partial class DebugWindowManager
     {
         _ = seed;
 
+        if (mode == WorldgenPreviewModeOre)
+        {
+            return BuildWorldgenOreHoverText(blockX, blockZ);
+        }
+
         if (WorldgenPreviewModeUsesMapLayer(mode))
         {
             MapLayerBase? layer = GetWorldgenPreviewMapLayer(mode);
@@ -1181,6 +1206,28 @@ public sealed partial class DebugWindowManager
         return $"Climate packed: temp {temp}, rain {rain}, aux {aux}";
     }
 
+    private string BuildWorldgenOreHoverText(int blockX, int blockZ)
+    {
+        if (!TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string status))
+        {
+            return status;
+        }
+
+        try
+        {
+            int chunkSize = GetWorldgenPreviewDepositChunkSize(variant!);
+            int chunkX = FloorDiv(blockX, chunkSize);
+            int chunkZ = FloorDiv(blockZ, chunkSize);
+            float factor = variant!.GetOreMapFactor(chunkX, chunkZ);
+            return $"Ore: {code ?? "unnamed"} factor {factor.ToString("0.###", CultureInfo.InvariantCulture)} at chunk {chunkX}, {chunkZ}";
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen ore hover sample failed", exception);
+            return $"Ore sample failed: {exception.Message}";
+        }
+    }
+
     private string FormatWorldgenMapLayerValue(int mode, int value, MapLayerBase layer)
     {
         if (mode == WorldgenPreviewModeClimate)
@@ -1273,11 +1320,150 @@ public sealed partial class DebugWindowManager
         return string.IsNullOrWhiteSpace(code) ? null : code;
     }
 
+    private bool TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out string? code, out string status)
+    {
+        variant = null;
+        code = GetSelectedWorldgenDepositCode();
+
+        GenDeposits? genDeposits = GetWorldgenPreviewGenDeposits();
+        if (genDeposits?.Deposits == null || genDeposits.Deposits.Length == 0)
+        {
+            status = "Live GenDeposits unavailable; open a singleplayer world and press Refresh SP.";
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(code))
+        {
+            string selectedCode = code;
+            variant = EnumerateWorldgenPreviewDeposits(genDeposits.Deposits)
+                .FirstOrDefault(candidate => string.Equals(GetWorldgenPreviewDepositCode(candidate), selectedCode, StringComparison.OrdinalIgnoreCase));
+
+            if (variant == null)
+            {
+                status = $"Selected deposit '{code}' was not found in live GenDeposits.";
+                return false;
+            }
+        }
+        else
+        {
+            variant = EnumerateWorldgenPreviewDeposits(genDeposits.Deposits).FirstOrDefault();
+            code = variant == null ? null : GetWorldgenPreviewDepositCode(variant);
+        }
+
+        if (variant == null)
+        {
+            status = "No live deposit variants are available.";
+            return false;
+        }
+
+        status = $"Live deposit: {code ?? "unnamed"}.";
+        return true;
+    }
+
+    private GenDeposits? GetWorldgenPreviewGenDeposits()
+    {
+        if (_worldgenPreviewGenDeposits != null) return _worldgenPreviewGenDeposits;
+        if (_worldgenPreviewServerApi == null) return null;
+
+        try
+        {
+            _worldgenPreviewGenDeposits = _worldgenPreviewServerApi.ModLoader.GetModSystem<GenDeposits>();
+            return _worldgenPreviewGenDeposits;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen GenDeposits lookup failed", exception);
+            return null;
+        }
+    }
+
+    private string? GetSelectedWorldgenDepositCode()
+    {
+        WorldgenAssetEntry? entry = SelectedWorldgenEntry;
+        if (entry?.Kind != WorldgenAssetKind.Deposits) return null;
+        if (!TryParseJsonToken(_worldgenCurrentText, out JToken? root, out _) || root == null) return null;
+        if (!TryGetWorldgenRows(root, WorldgenAssetKind.Deposits, out JArray? rows, out _) || rows == null || rows.Count == 0) return null;
+
+        int index = Math.Clamp(_worldgenRowIndex, 0, rows.Count - 1);
+        return rows[index] is JObject row
+            ? row["code"]?.ToString()
+            : null;
+    }
+
+    private static IEnumerable<DepositVariant> EnumerateWorldgenPreviewDeposits(IEnumerable<DepositVariant> deposits)
+    {
+        foreach (DepositVariant deposit in deposits)
+        {
+            yield return deposit;
+
+            DepositVariant[]? children = deposit.ChildDeposits;
+            if (children == null) continue;
+
+            foreach (DepositVariant child in EnumerateWorldgenPreviewDeposits(children))
+            {
+                yield return child;
+            }
+        }
+    }
+
+    private static string? GetWorldgenPreviewDepositCode(DepositVariant variant)
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic;
+
+        foreach (System.Reflection.FieldInfo field in variant.GetType().GetFields(flags).Where(field => field.Name.Equals("Code", StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                object? value = field.GetValue(variant);
+                if (value is string code && !string.IsNullOrWhiteSpace(code))
+                {
+                    return code;
+                }
+            }
+            catch
+            {
+                // Try the next reflected member.
+            }
+        }
+
+        string? fallback = variant.Code?.ToString();
+        return string.IsNullOrWhiteSpace(fallback) ? null : fallback;
+    }
+
+    private static string? TryGetWorldgenPreviewDepositGenerator(DepositVariant variant)
+    {
+        string? generator = variant.Generator;
+        return string.IsNullOrWhiteSpace(generator) ? null : generator;
+    }
+
+    private static int GetWorldgenPreviewDepositChunkSize(DepositVariant variant)
+    {
+        object? raw = TryGetReflectedMember(variant, "chunksize");
+        if (raw != null)
+        {
+            try
+            {
+                int chunkSize = Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+                if (chunkSize > 0) return chunkSize;
+            }
+            catch
+            {
+                // Default below.
+            }
+        }
+
+        return 32;
+    }
+
     private void RefreshWorldgenServerApi()
     {
         try
         {
             _worldgenPreviewGenMaps = null;
+            _worldgenPreviewGenDeposits = null;
             _worldgenPreviewMapLayer = null;
             _worldgenPreviewLandformCodes = null;
             _worldgenPreviewProvinceCodes = null;
@@ -1562,6 +1748,7 @@ public sealed partial class DebugWindowManager
         int sampleEndZ = (int)MathF.Ceiling(centerZ + halfHeightBlocks);
         WorldgenPreviewRasterCacheKey key = new(
             _worldgenPreviewMode,
+            GetWorldgenPreviewRasterContextKey(),
             seed,
             sampleStartX,
             sampleStartZ,
@@ -1580,7 +1767,15 @@ public sealed partial class DebugWindowManager
         }
 
         colors = new uint[cellsX * cellsZ];
-        if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
+        if (_worldgenPreviewMode == WorldgenPreviewModeOre)
+        {
+            if (!TryBuildWorldgenOreRaster(centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
+            {
+                colors = null;
+                return false;
+            }
+        }
+        else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
             if (!TryBuildWorldgenMapLayerRaster(centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
             {
@@ -1606,6 +1801,49 @@ public sealed partial class DebugWindowManager
         _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}";
         error = "";
         return true;
+    }
+
+    private bool TryBuildWorldgenOreRaster(
+        float centerX,
+        float centerZ,
+        float halfWidthBlocks,
+        float halfHeightBlocks,
+        int cellsX,
+        int cellsZ,
+        uint[] colors,
+        out string error)
+    {
+        if (!TryGetWorldgenPreviewDepositVariant(out DepositVariant? variant, out _, out string status))
+        {
+            error = status;
+            return false;
+        }
+
+        try
+        {
+            int chunkSize = GetWorldgenPreviewDepositChunkSize(variant!);
+            for (int z = 0; z < cellsZ; z++)
+            {
+                int worldZ = (int)MathF.Floor(centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ));
+                int chunkZ = FloorDiv(worldZ, chunkSize);
+                for (int x = 0; x < cellsX; x++)
+                {
+                    int worldX = (int)MathF.Floor(centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX));
+                    int chunkX = FloorDiv(worldX, chunkSize);
+                    float factor = variant!.GetOreMapFactor(chunkX, chunkZ);
+                    colors[z * cellsX + x] = BuildWorldgenOrePreviewColor(factor);
+                }
+            }
+
+            error = "";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen ore raster failed", exception);
+            error = $"Ore render failed: {exception.Message}";
+            return false;
+        }
     }
 
     private bool TryBuildWorldgenMapLayerRaster(
@@ -1657,6 +1895,13 @@ public sealed partial class DebugWindowManager
         _worldgenPreviewRasterStatus = "Raster cache invalidated.";
     }
 
+    private string GetWorldgenPreviewRasterContextKey()
+    {
+        return _worldgenPreviewMode == WorldgenPreviewModeOre
+            ? GetSelectedWorldgenDepositCode() ?? ""
+            : "";
+    }
+
     private static uint BuildWorldgenMapLayerPreviewColor(int mode, int value)
     {
         float normalized = Math.Clamp(value / 255f, 0f, 1f);
@@ -1690,6 +1935,22 @@ public sealed partial class DebugWindowManager
             1f);
     }
 
+    private static uint BuildWorldgenOrePreviewColor(float factor)
+    {
+        if (float.IsNaN(factor) || float.IsInfinity(factor)) factor = 0f;
+
+        float normalized = Math.Clamp(MathF.Sqrt(Math.Max(0f, factor)), 0f, 1f);
+        NVector4 color = normalized <= 0.001f
+            ? new NVector4(0.035f, 0.030f, 0.026f, 1f)
+            : new NVector4(
+                Math.Clamp(0.12f + normalized * 0.78f, 0f, 1f),
+                Math.Clamp(0.08f + normalized * 0.42f, 0f, 1f),
+                Math.Clamp(0.06f + normalized * 0.10f, 0f, 1f),
+                1f);
+
+        return ImGui.ColorConvertFloat4ToU32(color);
+    }
+
     private static uint BuildWorldgenPreviewColor(long seed, float worldX, float worldZ, int mode)
     {
         float seedOffset = (seed % 100000) * 0.000017f;
@@ -1711,6 +1972,12 @@ public sealed partial class DebugWindowManager
         };
 
         return ImGui.ColorConvertFloat4ToU32(color);
+    }
+
+    private static int FloorDiv(int value, int divisor)
+    {
+        if (divisor <= 0) return 0;
+        return (int)Math.Floor(value / (double)divisor);
     }
 
     private static void DrawWorldgenPreviewGrid(ImDrawListPtr drawList, NVector2 min, NVector2 max, float centerX, float centerZ, float pixelsPerBlock)
@@ -1816,6 +2083,7 @@ public sealed partial class DebugWindowManager
         _worldgenCurrentText = root.ToString(Formatting.Indented);
         ValidateWorldgenCurrentText();
         RememberWorldgenDraft();
+        InvalidateWorldgenPreviewRasterCache();
     }
 
     private void ValidateWorldgenCurrentText()
@@ -2294,6 +2562,7 @@ public sealed partial class DebugWindowManager
 
     private readonly record struct WorldgenPreviewRasterCacheKey(
         int Mode,
+        string Context,
         long Seed,
         int StartX,
         int StartZ,
