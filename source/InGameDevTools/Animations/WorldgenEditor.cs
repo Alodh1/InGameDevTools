@@ -7,6 +7,7 @@ using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
 using Vintagestory.API.Common;
 using Vintagestory.API.Datastructures;
+using Vintagestory.API.Server;
 
 namespace InGameDevTools.Animations;
 
@@ -63,6 +64,8 @@ public sealed partial class DebugWindowManager
     private float _worldgenPreviewPanZ;
     private float _worldgenPreviewZoom = 1f;
     private bool _worldgenPreviewInitialized;
+    private ICoreServerAPI? _worldgenPreviewServerApi;
+    private string _worldgenPreviewServerStatus = "Singleplayer server API not checked.";
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -734,6 +737,11 @@ public sealed partial class DebugWindowManager
             UseCurrentWorldgenPreviewState();
         }
         ImGui.SameLine();
+        if (ImGui.Button("Refresh SP##worldgen-preview-server-refresh"))
+        {
+            RefreshWorldgenServerApi();
+        }
+        ImGui.SameLine();
         if (ImGui.Button("Reset view##worldgen-preview-reset"))
         {
             _worldgenPreviewPanX = 0f;
@@ -753,6 +761,8 @@ public sealed partial class DebugWindowManager
         float pixelsPerBlock = Math.Clamp(2.5f * _worldgenPreviewZoom, 0.35f, 32f);
         float centerX = _worldgenPreviewOriginX + _worldgenPreviewPanX;
         float centerZ = _worldgenPreviewOriginZ + _worldgenPreviewPanZ;
+        bool serverRequired = WorldgenPreviewModeRequiresServer(_worldgenPreviewMode);
+        bool serverAvailable = _worldgenPreviewServerApi != null;
 
         if (hovered)
         {
@@ -776,8 +786,15 @@ public sealed partial class DebugWindowManager
 
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         drawList.PushClipRect(min, max, true);
-        DrawWorldgenPreviewRaster(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
-        DrawWorldgenPreviewGrid(drawList, min, max, centerX, centerZ, pixelsPerBlock);
+        if (!serverRequired || serverAvailable)
+        {
+            DrawWorldgenPreviewRaster(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
+            DrawWorldgenPreviewGrid(drawList, min, max, centerX, centerZ, pixelsPerBlock);
+        }
+        else
+        {
+            DrawWorldgenPreviewUnavailable(drawList, min, max);
+        }
         drawList.PopClipRect();
 
         uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 1f));
@@ -793,6 +810,7 @@ public sealed partial class DebugWindowManager
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.");
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), muted, $"Cursor block: X {hoverX}, Z {hoverZ}");
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 70f), muted, _worldgenPreviewConfigStatus);
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 90f), muted, serverRequired ? _worldgenPreviewServerStatus : "Singleplayer server API: not required for this mode.");
 
         ImGui.EndChild();
     }
@@ -809,6 +827,7 @@ public sealed partial class DebugWindowManager
     {
         _worldgenPreviewSeedText = GetCurrentWorldgenSeedText();
         _worldgenPreviewConfigStatus = GetCurrentWorldgenConfigSummary();
+        RefreshWorldgenServerApi();
 
         try
         {
@@ -886,6 +905,213 @@ public sealed partial class DebugWindowManager
         return long.TryParse(_worldgenPreviewSeedText, NumberStyles.Integer, CultureInfo.InvariantCulture, out long seed)
             ? seed
             : 0L;
+    }
+
+    private void RefreshWorldgenServerApi()
+    {
+        try
+        {
+            if (TryFindWorldgenServerApi(out ICoreServerAPI? serverApi, out string source))
+            {
+                _worldgenPreviewServerApi = serverApi;
+                _worldgenPreviewServerStatus = $"Singleplayer server API: available ({source}).";
+                return;
+            }
+
+            _worldgenPreviewServerApi = null;
+            _worldgenPreviewServerStatus = "Singleplayer server API: unavailable; SP-only previews disabled.";
+        }
+        catch (Exception exception)
+        {
+            _worldgenPreviewServerApi = null;
+            _worldgenPreviewServerStatus = $"Singleplayer server API probe failed: {exception.Message}";
+            _worldgenDiagnostics.Exception("Worldgen singleplayer server probe failed", exception);
+        }
+    }
+
+    private bool TryFindWorldgenServerApi(out ICoreServerAPI? serverApi, out string source)
+    {
+        HashSet<object> visited = new(ReferenceEqualityComparer.Instance);
+        if (TryExtractWorldgenServerApi(_api, "client api", 2, visited, out serverApi, out source))
+        {
+            return true;
+        }
+
+        foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (!ShouldProbeWorldgenAssembly(assembly)) continue;
+
+            foreach (Type type in GetWorldgenLoadableTypes(assembly))
+            {
+                const System.Reflection.BindingFlags staticFlags =
+                    System.Reflection.BindingFlags.Static |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic;
+
+                foreach (System.Reflection.FieldInfo field in type.GetFields(staticFlags))
+                {
+                    if (!ShouldProbeWorldgenMember(field.FieldType, field.Name)) continue;
+
+                    object? value;
+                    try
+                    {
+                        value = field.GetValue(null);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (TryExtractWorldgenServerApi(value, $"{type.FullName}.{field.Name}", 2, visited, out serverApi, out source))
+                    {
+                        return true;
+                    }
+                }
+
+                foreach (System.Reflection.PropertyInfo property in type.GetProperties(staticFlags))
+                {
+                    if (property.GetIndexParameters().Length != 0 || !ShouldProbeWorldgenMember(property.PropertyType, property.Name)) continue;
+
+                    object? value;
+                    try
+                    {
+                        value = property.GetValue(null);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (TryExtractWorldgenServerApi(value, $"{type.FullName}.{property.Name}", 2, visited, out serverApi, out source))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        serverApi = null;
+        source = "";
+        return false;
+    }
+
+    private static bool TryExtractWorldgenServerApi(object? value, string source, int depth, HashSet<object> visited, out ICoreServerAPI? serverApi, out string foundSource)
+    {
+        if (value is ICoreServerAPI typedServerApi)
+        {
+            serverApi = typedServerApi;
+            foundSource = source;
+            return true;
+        }
+
+        if (value == null || depth <= 0 || value is string || value.GetType().IsValueType || !visited.Add(value))
+        {
+            serverApi = null;
+            foundSource = "";
+            return false;
+        }
+
+        Type type = value.GetType();
+        const System.Reflection.BindingFlags instanceFlags =
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic;
+
+        foreach (System.Reflection.FieldInfo field in type.GetFields(instanceFlags))
+        {
+            if (!ShouldProbeWorldgenMember(field.FieldType, field.Name)) continue;
+
+            object? child;
+            try
+            {
+                child = field.GetValue(value);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (TryExtractWorldgenServerApi(child, $"{source}.{field.Name}", depth - 1, visited, out serverApi, out foundSource))
+            {
+                return true;
+            }
+        }
+
+        foreach (System.Reflection.PropertyInfo property in type.GetProperties(instanceFlags))
+        {
+            if (property.GetIndexParameters().Length != 0 || !ShouldProbeWorldgenMember(property.PropertyType, property.Name)) continue;
+
+            object? child;
+            try
+            {
+                child = property.GetValue(value);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (TryExtractWorldgenServerApi(child, $"{source}.{property.Name}", depth - 1, visited, out serverApi, out foundSource))
+            {
+                return true;
+            }
+        }
+
+        serverApi = null;
+        foundSource = "";
+        return false;
+    }
+
+    private static bool ShouldProbeWorldgenAssembly(System.Reflection.Assembly assembly)
+    {
+        string name = assembly.GetName().Name ?? "";
+        return name.StartsWith("Vintagestory", StringComparison.OrdinalIgnoreCase) ||
+            name.StartsWith("VS", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<Type> GetWorldgenLoadableTypes(System.Reflection.Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (System.Reflection.ReflectionTypeLoadException exception)
+        {
+            return exception.Types.Where(type => type != null)!;
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static bool ShouldProbeWorldgenMember(Type memberType, string memberName)
+    {
+        if (typeof(ICoreServerAPI).IsAssignableFrom(memberType)) return true;
+        if (memberType.IsPrimitive || memberType.IsEnum || memberType == typeof(string)) return false;
+
+        string name = memberName.ToLowerInvariant();
+        string typeName = memberType.FullName?.ToLowerInvariant() ?? "";
+        return name.Contains("server", StringComparison.Ordinal) ||
+            name.Contains("sapi", StringComparison.Ordinal) ||
+            name.Contains("api", StringComparison.Ordinal) ||
+            typeName.Contains("server", StringComparison.Ordinal);
+    }
+
+    private static bool WorldgenPreviewModeRequiresServer(int mode)
+    {
+        return mode is 3 or 4 or 5 or 7;
+    }
+
+    private static void DrawWorldgenPreviewUnavailable(ImDrawListPtr drawList, NVector2 min, NVector2 max)
+    {
+        uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.02f, 0.02f, 0.018f, 1f));
+        uint fill = ImGui.ColorConvertFloat4ToU32(new NVector4(0.14f, 0.08f, 0.06f, 0.82f));
+        uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.95f, 0.78f, 0.62f, 1f));
+        drawList.AddRectFilled(min, max, background, 4f);
+        drawList.AddRectFilled(new NVector2(min.X + 10f, min.Y + 110f), new NVector2(max.X - 10f, min.Y + 178f), fill, 4f);
+        drawList.AddText(new NVector2(min.X + 18f, min.Y + 122f), text, "This preview mode requires an integrated singleplayer server.");
+        drawList.AddText(new NVector2(min.X + 18f, min.Y + 146f), text, "Use Climate/Forest modes or open a singleplayer world, then press Refresh SP.");
     }
 
     private void DrawWorldgenPreviewRaster(ImDrawListPtr drawList, NVector2 min, NVector2 max, long seed, float centerX, float centerZ, float pixelsPerBlock)
