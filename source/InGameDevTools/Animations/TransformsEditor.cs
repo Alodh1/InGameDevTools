@@ -31,6 +31,7 @@ public sealed partial class DebugWindowManager
     private Matrixf _transformReferenceModelMatrix = CreateIdentityMatrix();
     private string _transformPreviewCacheKey = "";
     private string _transformPreviewPlacementStatus = "";
+    private TransformPreviewGuideKind _transformPreviewGuideKind = TransformPreviewGuideKind.None;
     private string _transformsFilter = "";
     private string _transformsDomainFilter = "";
     private int _transformsAssetIndex;
@@ -897,20 +898,21 @@ public sealed partial class DebugWindowManager
         NVector2 min = ImGui.GetItemRectMin();
         NVector2 max = ImGui.GetItemRectMax();
         bool hovered = ImGui.IsItemHovered();
+        bool guiPreview = IsGuiTransform(slot.AttributeCode);
 
         if (hovered)
         {
             NVector2 delta = ImGui.GetIO().MouseDelta;
             bool pan = ImGui.IsMouseDragging(ImGuiMouseButton.Middle) ||
                 (ImGui.IsMouseDragging(ImGuiMouseButton.Right) && (ImGui.IsKeyDown(ImGuiKey.LeftShift) || ImGui.IsKeyDown(ImGuiKey.RightShift)));
-            if (pan)
+            if (pan || (guiPreview && ImGui.IsMouseDragging(ImGuiMouseButton.Right)))
             {
                 DevToolsPreviewCamera panCamera = BuildTransformPreviewCamera(min, max);
                 float panScale = _transformPreviewDistance / Math.Max(120f, size.Y);
                 _transformPreviewTarget -= panCamera.Right * delta.X * panScale;
                 _transformPreviewTarget += panCamera.Up * delta.Y * panScale;
             }
-            else if (ImGui.IsMouseDragging(ImGuiMouseButton.Right))
+            else if (!guiPreview && ImGui.IsMouseDragging(ImGuiMouseButton.Right))
             {
                 _transformPreviewYaw += delta.X * 0.01f;
                 _transformPreviewPitch = Math.Clamp(_transformPreviewPitch + delta.Y * 0.01f, -1.45f, 1.45f);
@@ -948,15 +950,26 @@ public sealed partial class DebugWindowManager
         }
 
         drawList.PushClipRect(min, max, true);
-        DrawTransformPreviewGrid(drawList, camera, GetTransformPreviewGridExtent(), grid, gridMajor);
-        if (!DrawTransformViewportGizmo(asset, slot, transform, drawList, camera, min, max, hovered))
+        if (guiPreview)
+        {
+            DrawTransformGui2DReference(drawList, min, max, grid, gridMajor, text);
+        }
+        else
+        {
+            DrawTransformPreviewGrid(drawList, camera, GetTransformPreviewGridExtent(), grid, gridMajor);
+            DrawTransformPreviewGuide(drawList, camera, _transformPreviewGuideKind, gridMajor);
+        }
+
+        if (!guiPreview && !DrawTransformViewportGizmo(asset, slot, transform, drawList, camera, min, max, hovered))
         {
             DrawTransformPreviewAxes(drawList, camera);
         }
         drawList.PopClipRect();
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(min + new NVector2(12f, 10f), text, $"{asset.Label} / {slot.DisplayName}");
-        drawList.AddText(min + new NVector2(12f, 30f), text, "RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms.");
+        drawList.AddText(min + new NVector2(12f, 30f), text, guiPreview
+            ? "2D GUI preview. RMB or MMB pans. Mouse wheel zooms."
+            : "RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms.");
         if (!string.IsNullOrWhiteSpace(_transformPreviewPlacementStatus))
         {
             drawList.AddText(min + new NVector2(12f, 50f), text, _transformPreviewPlacementStatus);
@@ -1132,7 +1145,7 @@ public sealed partial class DebugWindowManager
     {
         ImGui.SeparatorText("Reference");
         TransformReferenceResolution resolution = ResolveTransformReference(slot.Asset, slot);
-        ImGui.TextDisabled(resolution.Block == null ? "No reference block" : $"Reference: {resolution.Code}");
+        ImGui.TextDisabled($"Reference: {resolution.Code}");
         if (!string.IsNullOrWhiteSpace(resolution.Reason))
         {
             ImGui.TextWrapped(resolution.Reason);
@@ -1281,6 +1294,7 @@ public sealed partial class DebugWindowManager
         _transformPreviewAnchor = Vector3.Zero;
         _transformViewportGizmoAtAnchor = false;
         _transformPreviewPlacementStatus = "";
+        _transformPreviewGuideKind = referenceResolution.GuideKind;
 
         try
         {
@@ -1308,7 +1322,7 @@ public sealed partial class DebugWindowManager
             }
 
             mesh.ModelTransform(transform);
-            TransformPreviewPlacement placement = BuildTransformPreviewPlacement(slot.AttributeCode, reference, context, _transformReferenceMesh?.Bounds, mesh);
+            TransformPreviewPlacement placement = BuildTransformPreviewPlacement(slot.AttributeCode, reference, context, referenceResolution.GuideKind, _transformReferenceMesh?.Bounds, mesh);
             _transformPreviewModelMatrix = placement.ItemMatrix;
             _transformPreviewAnchor = placement.Anchor;
             _transformViewportGizmoAtAnchor = placement.GizmoAtAnchor;
@@ -1329,6 +1343,11 @@ public sealed partial class DebugWindowManager
 
     private DevToolsPreviewCamera BuildTransformPreviewCamera(NVector2 min, NVector2 max)
     {
+        if (_transformPreviewGuideKind == TransformPreviewGuideKind.Gui2D)
+        {
+            return DevToolsPreviewCamera.Orbit(min, max, _transformPreviewTarget, 0f, 0f, _transformPreviewDistance);
+        }
+
         return DevToolsPreviewCamera.Orbit(min, max, _transformPreviewTarget, _transformPreviewYaw, _transformPreviewPitch, _transformPreviewDistance);
     }
 
@@ -1818,6 +1837,92 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private static void DrawTransformGui2DReference(ImDrawListPtr drawList, NVector2 min, NVector2 max, uint gridColor, uint majorColor, uint textColor)
+    {
+        NVector2 size = max - min;
+        float side = MathF.Min(size.X, size.Y) * 0.72f;
+        NVector2 center = (min + max) * 0.5f;
+        NVector2 frameMin = center - new NVector2(side * 0.5f, side * 0.5f);
+        NVector2 frameMax = center + new NVector2(side * 0.5f, side * 0.5f);
+        drawList.AddRect(frameMin, frameMax, majorColor, 2f, ImDrawFlags.None, 2f);
+        drawList.AddLine(new NVector2(center.X, frameMin.Y), new NVector2(center.X, frameMax.Y), gridColor, 1f);
+        drawList.AddLine(new NVector2(frameMin.X, center.Y), new NVector2(frameMax.X, center.Y), gridColor, 1f);
+        float third = side / 3f;
+        for (int i = 1; i < 3; i++)
+        {
+            float x = frameMin.X + third * i;
+            float y = frameMin.Y + third * i;
+            drawList.AddLine(new NVector2(x, frameMin.Y), new NVector2(x, frameMax.Y), gridColor, 1f);
+            drawList.AddLine(new NVector2(frameMin.X, y), new NVector2(frameMax.X, y), gridColor, 1f);
+        }
+
+        drawList.AddText(frameMin + new NVector2(6f, 6f), textColor, "GUI frame");
+    }
+
+    private static void DrawTransformPreviewGuide(ImDrawListPtr drawList, DevToolsPreviewCamera camera, TransformPreviewGuideKind guideKind, uint color)
+    {
+        switch (guideKind)
+        {
+            case TransformPreviewGuideKind.Hand:
+            case TransformPreviewGuideKind.OffHand:
+                DrawTransformAttachmentGuide(drawList, camera, guideKind == TransformPreviewGuideKind.OffHand ? -1f : 1f, color);
+                break;
+            case TransformPreviewGuideKind.Tongs:
+                DrawTransformTongsGuide(drawList, camera, color);
+                break;
+            case TransformPreviewGuideKind.DisplaySlot:
+                DrawTransformDisplaySlotGuide(drawList, camera, color);
+                break;
+            case TransformPreviewGuideKind.GroundPlane:
+                DrawTransformGroundGuide(drawList, camera, color);
+                break;
+        }
+    }
+
+    private static void DrawTransformAttachmentGuide(ImDrawListPtr drawList, DevToolsPreviewCamera camera, float side, uint color)
+    {
+        Vector3 wrist = new(0.5f, 0.5f, 0.5f);
+        Vector3 grip = wrist + new Vector3(0.35f * side, 0f, 0f);
+        DrawTransformPreviewLine(drawList, camera, wrist, grip, color, 2.4f);
+        DrawTransformPreviewLine(drawList, camera, grip, grip + new Vector3(0f, 0.28f, 0f), color, 1.8f);
+        DrawTransformPreviewLine(drawList, camera, grip, grip + new Vector3(0f, -0.28f, 0f), color, 1.8f);
+        DrawTransformPreviewLine(drawList, camera, grip, grip + new Vector3(0f, 0f, 0.28f), color, 1.8f);
+    }
+
+    private static void DrawTransformTongsGuide(ImDrawListPtr drawList, DevToolsPreviewCamera camera, uint color)
+    {
+        Vector3 basePoint = new(0.5f, 0.5f, 0.5f);
+        Vector3 tip = basePoint + new Vector3(0.7f, 0f, 0f);
+        DrawTransformPreviewLine(drawList, camera, basePoint, tip, color, 2.2f);
+        DrawTransformPreviewLine(drawList, camera, tip, tip + new Vector3(0.18f, 0.12f, 0f), color, 2f);
+        DrawTransformPreviewLine(drawList, camera, tip, tip + new Vector3(0.18f, -0.12f, 0f), color, 2f);
+    }
+
+    private static void DrawTransformDisplaySlotGuide(ImDrawListPtr drawList, DevToolsPreviewCamera camera, uint color)
+    {
+        Vector3 center = new(0.5f, 0.5f, 0.5f);
+        float r = 0.35f;
+        Vector3 a = center + new Vector3(-r, 0f, -r);
+        Vector3 b = center + new Vector3(r, 0f, -r);
+        Vector3 c = center + new Vector3(r, 0f, r);
+        Vector3 d = center + new Vector3(-r, 0f, r);
+        DrawTransformPreviewLine(drawList, camera, a, b, color, 2f);
+        DrawTransformPreviewLine(drawList, camera, b, c, color, 2f);
+        DrawTransformPreviewLine(drawList, camera, c, d, color, 2f);
+        DrawTransformPreviewLine(drawList, camera, d, a, color, 2f);
+        DrawTransformPreviewLine(drawList, camera, center, center + Vector3.UnitY * 0.6f, color, 1.8f);
+    }
+
+    private static void DrawTransformGroundGuide(ImDrawListPtr drawList, DevToolsPreviewCamera camera, uint color)
+    {
+        Vector3 center = new(0.5f, 0f, 0.5f);
+        float r = 0.5f;
+        DrawTransformPreviewLine(drawList, camera, center + new Vector3(-r, 0f, -r), center + new Vector3(r, 0f, -r), color, 2f);
+        DrawTransformPreviewLine(drawList, camera, center + new Vector3(r, 0f, -r), center + new Vector3(r, 0f, r), color, 2f);
+        DrawTransformPreviewLine(drawList, camera, center + new Vector3(r, 0f, r), center + new Vector3(-r, 0f, r), color, 2f);
+        DrawTransformPreviewLine(drawList, camera, center + new Vector3(-r, 0f, r), center + new Vector3(-r, 0f, -r), color, 2f);
+    }
+
     private static Vector3 GetTransformReferenceAnchor(TransformGizmoContext context, DevToolsPreviewBounds referenceBounds)
     {
         if (!referenceBounds.IsValid) return Vector3.Zero;
@@ -1846,6 +1951,7 @@ public sealed partial class DebugWindowManager
         string attributeCode,
         Block? reference,
         TransformGizmoContext context,
+        TransformPreviewGuideKind guideKind,
         DevToolsPreviewBounds? referenceBounds,
         MeshData mesh)
     {
@@ -1881,7 +1987,53 @@ public sealed partial class DebugWindowManager
         }
 
         Vector3 anchor = transformedBounds.IsValid ? transformedBounds.Center : Vector3.Zero;
+        if (guideKind != TransformPreviewGuideKind.None)
+        {
+            Vector3 guideAnchor = GetTransformGuideAnchor(guideKind);
+            if (transformedBounds.IsValid)
+            {
+                Vector3 meshAnchor = guideKind == TransformPreviewGuideKind.GroundPlane
+                    ? DevToolsPreviewPlacement.BottomCenter(transformedBounds)
+                    : transformedBounds.Center;
+                Vector3 offset = guideAnchor - meshAnchor;
+                if (offset.LengthSquared > 0.000001f)
+                {
+                    mesh.Translate(offset.X, offset.Y, offset.Z);
+                }
+            }
+
+            return new(identity, guideAnchor, true, $"placement: {GetTransformGuideLabel(guideKind)} reference guide");
+        }
+
         return new(identity, anchor, false, "placement: no reference provider");
+    }
+
+    private static Vector3 GetTransformGuideAnchor(TransformPreviewGuideKind guideKind)
+    {
+        return guideKind switch
+        {
+            TransformPreviewGuideKind.Gui2D => new Vector3(0.5f, 0.5f, 0.5f),
+            TransformPreviewGuideKind.Hand => new Vector3(0.85f, 0.5f, 0.5f),
+            TransformPreviewGuideKind.OffHand => new Vector3(0.15f, 0.5f, 0.5f),
+            TransformPreviewGuideKind.Tongs => new Vector3(0.85f, 0.5f, 0.5f),
+            TransformPreviewGuideKind.DisplaySlot => new Vector3(0.5f, 0.5f, 0.5f),
+            TransformPreviewGuideKind.GroundPlane => new Vector3(0.5f, 0f, 0.5f),
+            _ => Vector3.Zero
+        };
+    }
+
+    private static string GetTransformGuideLabel(TransformPreviewGuideKind guideKind)
+    {
+        return guideKind switch
+        {
+            TransformPreviewGuideKind.Gui2D => "GUI 2D frame",
+            TransformPreviewGuideKind.Hand => "main-hand attachment",
+            TransformPreviewGuideKind.OffHand => "off-hand attachment",
+            TransformPreviewGuideKind.Tongs => "tongs attachment",
+            TransformPreviewGuideKind.DisplaySlot => "display slot",
+            TransformPreviewGuideKind.GroundPlane => "ground plane",
+            _ => "none"
+        };
     }
 
     private static bool TryBuildForgeTransformPlacement(string attributeCode, out TransformPreviewPlacement placement)
@@ -2316,8 +2468,8 @@ public sealed partial class DebugWindowManager
         {
             Block? manualBlock = ResolveReferenceBlock(_transformReferenceBlockCode);
             return manualBlock == null
-                ? new(null, _transformReferenceBlockCode, $"Manual reference not found: {_transformReferenceBlockCode}", true)
-                : new(manualBlock, manualBlock.Code.ToString(), $"Manual reference: {manualBlock.Code}", true);
+                ? CreateGuideReferenceResolution(slot.AttributeCode, $"Manual reference not found: {_transformReferenceBlockCode}")
+                : new(manualBlock, manualBlock.Code.ToString(), $"Manual reference: {manualBlock.Code}", true, TransformPreviewGuideKind.None);
         }
 
         TransformReferenceCandidate? best = null;
@@ -2346,20 +2498,21 @@ public sealed partial class DebugWindowManager
 
         if (best != null)
         {
-            return new(best.Block, best.Block.Code.ToString(), best.Reason, false);
+            return new(best.Block, best.Block.Code.ToString(), best.Reason, false, TransformPreviewGuideKind.None);
         }
 
-        string fallbackCode = GetFallbackDefaultReferenceBlockCode(slot.AttributeCode);
-        if (!string.IsNullOrWhiteSpace(fallbackCode))
+        if (TryResolveFallbackReferenceBlock(asset, slot.AttributeCode, out Block? fallbackBlock, out string fallbackReason))
         {
-            Block? fallbackBlock = ResolveReferenceBlock(fallbackCode);
-            if (fallbackBlock != null)
-            {
-                return new(fallbackBlock, fallbackBlock.Code.ToString(), $"Default reference fallback: {fallbackBlock.Code}", false);
-            }
+            return new(fallbackBlock, fallbackBlock.Code.ToString(), fallbackReason, false, TransformPreviewGuideKind.None);
         }
 
-        return new(null, "", "No metadata-backed reference block found.", false);
+        return CreateGuideReferenceResolution(slot.AttributeCode, "No block reference matched loaded runtime metadata.");
+    }
+
+    private TransformReferenceResolution CreateGuideReferenceResolution(string attributeCode, string reasonPrefix)
+    {
+        TransformPreviewGuideKind guideKind = GetTransformPreviewGuideKind(attributeCode);
+        return new(null, GetTransformGuideLabel(guideKind), $"{reasonPrefix}; using {GetTransformGuideLabel(guideKind)}.", false, guideKind);
     }
 
     private Block? ResolveReferenceBlock(string code)
@@ -2404,6 +2557,111 @@ public sealed partial class DebugWindowManager
         {
             return false;
         }
+    }
+
+    private bool TryResolveFallbackReferenceBlock(TransformAssetEntry asset, string attributeCode, out Block block, out string reason)
+    {
+        string fallbackCode = GetFallbackDefaultReferenceBlockCode(attributeCode);
+        if (!string.IsNullOrWhiteSpace(fallbackCode))
+        {
+            Block? exact = ResolveReferenceBlock(fallbackCode);
+            if (exact != null)
+            {
+                block = exact;
+                reason = $"Default reference fallback: {exact.Code}";
+                return true;
+            }
+        }
+
+        TransformContextRule rule = GetTransformContextRule(GetTransformBaseAttributeCode(attributeCode));
+        string[] tokens = GetReferenceSearchTokens(attributeCode, rule);
+        TransformReferenceCandidate? best = null;
+        foreach (Block candidate in _api.World.Blocks)
+        {
+            if (candidate?.Code == null) continue;
+            string path = candidate.Code.Path;
+            string full = candidate.Code.ToString();
+            string? matchedToken = tokens.FirstOrDefault(token =>
+                path.Contains(token, StringComparison.OrdinalIgnoreCase) ||
+                full.Contains(token, StringComparison.OrdinalIgnoreCase));
+            if (matchedToken == null) continue;
+
+            int score = 100;
+            if (candidate.Code.Domain.Equals(asset.Domain, StringComparison.OrdinalIgnoreCase)) score += 40;
+            score += GetReferenceOrientationScore(candidate.Code.Path);
+            if (HasNonEmptyEnumerableProperty(candidate, "CreativeInventoryTabs") ||
+                HasNonEmptyEnumerableProperty(candidate, "CreativeInventoryStacks"))
+            {
+                score += 10;
+            }
+
+            TransformReferenceCandidate referenceCandidate = new(candidate, score, $"Default reference from context token {matchedToken}: {candidate.Code}");
+            if (best == null ||
+                referenceCandidate.Score > best.Score ||
+                (referenceCandidate.Score == best.Score && string.Compare(referenceCandidate.Block.Code.ToString(), best.Block.Code.ToString(), StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                best = referenceCandidate;
+            }
+        }
+
+        if (best != null)
+        {
+            block = best.Block;
+            reason = best.Reason;
+            return true;
+        }
+
+        block = null!;
+        reason = "";
+        return false;
+    }
+
+    private static string[] GetReferenceSearchTokens(string attributeCode, TransformContextRule rule)
+    {
+        string baseAttribute = GetTransformBaseAttributeCode(attributeCode);
+        List<string> tokens = [];
+        tokens.AddRange(rule.DisplayableKeys);
+        tokens.AddRange(rule.CapabilityKeys);
+        tokens.Add(rule.DisplayName.Replace(" ", "", StringComparison.OrdinalIgnoreCase));
+        tokens.Add(baseAttribute
+            .Replace("Transform", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("on", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("in", "", StringComparison.OrdinalIgnoreCase));
+        return tokens
+            .Select(token => token.Trim().ToLowerInvariant())
+            .Where(token => token.Length >= 4)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static TransformPreviewGuideKind GetTransformPreviewGuideKind(string attributeCode)
+    {
+        string baseAttribute = GetTransformBaseAttributeCode(attributeCode);
+        if (IsGuiTransform(baseAttribute)) return TransformPreviewGuideKind.Gui2D;
+        if (baseAttribute.Contains("tpOffHand", StringComparison.OrdinalIgnoreCase)) return TransformPreviewGuideKind.OffHand;
+        if (baseAttribute.Contains("tong", StringComparison.OrdinalIgnoreCase)) return TransformPreviewGuideKind.Tongs;
+        if (baseAttribute.Contains("tpHand", StringComparison.OrdinalIgnoreCase)) return TransformPreviewGuideKind.Hand;
+        if (baseAttribute.Contains("ground", StringComparison.OrdinalIgnoreCase)) return TransformPreviewGuideKind.GroundPlane;
+        if (baseAttribute.Contains("display", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("shelf", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("rack", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("mount", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("stand", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("vice", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("trap", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("omok", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("firepit", StringComparison.OrdinalIgnoreCase) ||
+            baseAttribute.Contains("forge", StringComparison.OrdinalIgnoreCase))
+        {
+            return TransformPreviewGuideKind.DisplaySlot;
+        }
+
+        return TransformPreviewGuideKind.DisplaySlot;
+    }
+
+    private static bool IsGuiTransform(string attributeCode)
+    {
+        return GetTransformBaseAttributeCode(attributeCode).Equals("guiTransform", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string GetFallbackDefaultReferenceBlockCode(string attributeCode)
@@ -2451,13 +2709,24 @@ public sealed partial class DebugWindowManager
         public bool CanSaveToSource => true;
     }
 
-    private sealed record TransformReferenceResolution(Block? Block, string Code, string Reason, bool IsManual);
+    private sealed record TransformReferenceResolution(Block? Block, string Code, string Reason, bool IsManual, TransformPreviewGuideKind GuideKind);
 
     private sealed record TransformReferenceCandidate(Block Block, int Score, string Reason);
 
     private readonly record struct TransformPreviewPlacement(Matrixf ItemMatrix, Vector3 Anchor, bool GizmoAtAnchor, string Status)
     {
         public static TransformPreviewPlacement Empty => new(CreateIdentityMatrix(), Vector3.Zero, false, "");
+    }
+
+    private enum TransformPreviewGuideKind
+    {
+        None,
+        Gui2D,
+        Hand,
+        OffHand,
+        Tongs,
+        DisplaySlot,
+        GroundPlane
     }
 
     private sealed class TransformSourceSaveFile
