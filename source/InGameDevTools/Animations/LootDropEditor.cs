@@ -2,6 +2,7 @@ using ImGuiNET;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Datastructures;
@@ -15,10 +16,15 @@ public sealed partial class DebugWindowManager
 {
     private const float DefaultLootDropWeight = 1f;
     private const float LootDropWeightEpsilon = 0.0001f;
+    private const int LootDropIndexBatchSize = 90;
 
     private readonly List<LootDropEntry> _lootDropEntries = [];
     private readonly List<LootDropEntry> _visibleLootDropEntries = [];
     private readonly List<LootDropDraft> _lootDropDrafts = [];
+    private readonly List<Block> _lootDropIndexBlocks = [];
+    private readonly List<EntityProperties> _lootDropIndexEntities = [];
+    private readonly List<LootDropEntitySourceAsset> _lootDropIndexEntitySources = [];
+    private readonly List<IAsset> _lootDropIndexTradeAssets = [];
     private readonly ImGuiThreePanelLayoutState _lootDropLayout = new(0.26f, 0.30f);
     private readonly DevToolsEditorDiagnostics _lootDropDiagnostics = new("Loot/Drops");
     private string _lootDropFilter = "";
@@ -27,7 +33,13 @@ public sealed partial class DebugWindowManager
     private int _lootDropEntryIndex;
     private int _lootDropSelectedDraftIndex;
     private bool _lootDropDirtyOnly;
-    private bool _lootDropIndexed;
+    private LootDropIndexState _lootDropIndexState;
+    private LootDropIndexPhase _lootDropIndexPhase;
+    private int _lootDropIndexBlockIndex;
+    private int _lootDropIndexEntityIndex;
+    private int _lootDropIndexEntityTradeIndex;
+    private int _lootDropIndexTradeAssetIndex;
+    private LootDropEntitySourceIndex? _lootDropEntitySourceIndex;
     private string _lootDropLoadedKey = "";
     private string _lootDropOriginalJson = "";
     private string _lootDropTradeJson = "";
@@ -40,34 +52,47 @@ public sealed partial class DebugWindowManager
     {
         _ = deltaSeconds;
         ClearActiveTransformGizmo();
-        EnsureLootDropEntriesIndexed();
 
-        NVector2 available = ImGui.GetContentRegionAvail();
-        float scale = Math.Max(0.75f, _devToolsUiScale);
-        float splitterThickness = Math.Max(5f, 6f * scale);
-        ImGuiLayoutHelper.CalculateThreePanelWidths(
-            available.X,
-            splitterThickness,
-            _lootDropLayout,
-            260f * scale,
-            620f * scale,
-            440f * scale,
-            340f * scale,
-            780f * scale,
-            out float panelAvailableWidth,
-            out float leftWidth,
-            out float centerWidth,
-            out float rightWidth);
+        try
+        {
+            EnsureLootDropEntriesIndexed();
 
-        DrawLootDropBrowser(new NVector2(leftWidth, available.Y));
-        ImGui.SameLine(0, 0);
-        ImGuiLayoutHelper.DrawVerticalSplitter("##loot-drop-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _lootDropLayout.LeftFraction, 260f * scale, Math.Max(260f * scale, panelAvailableWidth - rightWidth - 440f * scale));
-        ImGui.SameLine(0, 0);
-        DrawLootDropEditorPanel(new NVector2(centerWidth, available.Y));
-        ImGui.SameLine(0, 0);
-        ImGuiLayoutHelper.DrawVerticalSplitter("##loot-drop-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _lootDropLayout.RightFraction, 340f * scale, Math.Max(340f * scale, panelAvailableWidth - leftWidth - 440f * scale), invertDrag: true);
-        ImGui.SameLine(0, 0);
-        DrawLootDropInspector(new NVector2(rightWidth, available.Y), showDiagnostics);
+            NVector2 available = ImGui.GetContentRegionAvail();
+            float scale = Math.Max(0.75f, _devToolsUiScale);
+            float splitterThickness = Math.Max(5f, 6f * scale);
+            ImGuiLayoutHelper.CalculateThreePanelWidths(
+                available.X,
+                splitterThickness,
+                _lootDropLayout,
+                260f * scale,
+                620f * scale,
+                440f * scale,
+                340f * scale,
+                780f * scale,
+                out float panelAvailableWidth,
+                out float leftWidth,
+                out float centerWidth,
+                out float rightWidth);
+
+            DrawLootDropBrowser(new NVector2(leftWidth, available.Y));
+            ImGui.SameLine(0, 0);
+            ImGuiLayoutHelper.DrawVerticalSplitter("##loot-drop-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _lootDropLayout.LeftFraction, 260f * scale, Math.Max(260f * scale, panelAvailableWidth - rightWidth - 440f * scale));
+            ImGui.SameLine(0, 0);
+            DrawLootDropEditorPanel(new NVector2(centerWidth, available.Y));
+            ImGui.SameLine(0, 0);
+            ImGuiLayoutHelper.DrawVerticalSplitter("##loot-drop-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _lootDropLayout.RightFraction, 340f * scale, Math.Max(340f * scale, panelAvailableWidth - leftWidth - 440f * scale), invertDrag: true);
+            ImGui.SameLine(0, 0);
+            DrawLootDropInspector(new NVector2(rightWidth, available.Y), showDiagnostics);
+        }
+        catch (Exception exception)
+        {
+            _lootDropIndexState = LootDropIndexState.Failed;
+            _lootDropStatus = $"Loot/drop editor error: {exception.Message}";
+            _lootDropDiagnostics.Exception("Loot/drop editor failed", exception);
+            _api.Logger.Error("[InGameDevTools] Loot/drop editor failed: {0}", exception);
+            ImGui.TextWrapped(_lootDropStatus);
+            _lootDropDiagnostics.Draw("loot-drop-error", showDiagnostics);
+        }
     }
 
     private void ResetLootDropLayout()
@@ -77,54 +102,200 @@ public sealed partial class DebugWindowManager
 
     private void EnsureLootDropEntriesIndexed()
     {
-        if (_lootDropIndexed) return;
+        if (_lootDropIndexState == LootDropIndexState.Ready || _lootDropIndexState == LootDropIndexState.Failed) return;
+        if (_lootDropIndexState == LootDropIndexState.Idle)
+        {
+            StartLootDropIndexing(clearLoaded: false);
+        }
 
+        ProcessLootDropIndexBatch();
+    }
+
+    private void StartLootDropIndexing(bool clearLoaded)
+    {
+        _lootDropIndexState = LootDropIndexState.Indexing;
+        _lootDropIndexPhase = LootDropIndexPhase.Blocks;
+        _lootDropIndexBlockIndex = 0;
+        _lootDropIndexEntityIndex = 0;
+        _lootDropIndexEntityTradeIndex = 0;
+        _lootDropIndexTradeAssetIndex = 0;
         _lootDropEntries.Clear();
+        _visibleLootDropEntries.Clear();
+        _lootDropEntryIndex = 0;
+        _lootDropIndexBlocks.Clear();
+        _lootDropIndexEntities.Clear();
+        _lootDropIndexEntitySources.Clear();
+        _lootDropIndexTradeAssets.Clear();
+
+        if (clearLoaded)
+        {
+            _lootDropLoadedKey = "";
+            _lootDropOriginalJson = "";
+            _lootDropTradeJson = "";
+            _lootDropLiveAppliedHash = "";
+            _lootDropSimulationText = "";
+            _lootDropDrafts.Clear();
+            _lootDropSelectedDraftIndex = 0;
+        }
+
         foreach (Block block in _api.World.Blocks)
         {
-            if (block?.Code == null) continue;
-            IAsset? sourceAsset = FindCollectibleSourceAsset(block);
-            JObject? sourceJson = TryParseJsonObject(ReadAssetText(sourceAsset));
-            if ((block.Drops?.Length ?? 0) > 0 || sourceJson?["drops"] is JArray)
-            {
-                _lootDropEntries.Add(LootDropEntry.ForBlock(block, sourceAsset, sourceJson));
-            }
+            if (block?.Code != null) _lootDropIndexBlocks.Add(block);
         }
 
         foreach (EntityProperties entityType in _api.World.EntityTypes ?? [])
         {
-            if (entityType?.Code == null) continue;
-            IAsset? sourceAsset = FindEntitySourceAsset(entityType);
-            JObject? sourceJson = TryParseJsonObject(ReadAssetText(sourceAsset));
-            if ((entityType.Drops?.Length ?? 0) > 0 || sourceJson?["drops"] is JArray)
-            {
-                _lootDropEntries.Add(LootDropEntry.ForEntity(entityType, sourceAsset, sourceJson));
-            }
+            if (entityType?.Code != null) _lootDropIndexEntities.Add(entityType);
         }
+
+        _lootDropEntitySourceIndex = LootDropEntitySourceIndex.Build(_api, _lootDropDiagnostics);
+        _lootDropIndexEntitySources.AddRange(_lootDropEntitySourceIndex.Sources);
 
         foreach (IAsset asset in _api.Assets.AllAssets.Values)
         {
-            if (asset?.Location == null) continue;
-            string assetPath = asset.Location.Path.Replace('\\', '/');
-            if (!assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
-            if (!assetPath.StartsWith("entities/", StringComparison.OrdinalIgnoreCase) &&
-                !assetPath.StartsWith("config/", StringComparison.OrdinalIgnoreCase) &&
-                !assetPath.Contains("trade", StringComparison.OrdinalIgnoreCase))
+            if (IsLootDropTradeCandidateAsset(asset))
             {
-                continue;
+                _lootDropIndexTradeAssets.Add(asset);
             }
-
-            JObject? sourceJson = TryParseJsonObject(ReadAssetText(asset));
-            if (sourceJson == null) continue;
-            if (!TryFindTradeToken(sourceJson, out List<string> path, out JToken? tradeToken) || tradeToken == null) continue;
-
-            _lootDropEntries.Add(LootDropEntry.ForTrade(asset, sourceJson, path, tradeToken));
         }
 
+        _lootDropIndexTradeAssets.Sort((left, right) => string.Compare(left.Location.ToString(), right.Location.ToString(), StringComparison.OrdinalIgnoreCase));
+        _lootDropStatus = BuildLootDropIndexProgressText();
+    }
+
+    private void ProcessLootDropIndexBatch()
+    {
+        if (_lootDropIndexState != LootDropIndexState.Indexing) return;
+
+        try
+        {
+            int processed = 0;
+            while (processed < LootDropIndexBatchSize && _lootDropIndexState == LootDropIndexState.Indexing)
+            {
+                switch (_lootDropIndexPhase)
+                {
+                    case LootDropIndexPhase.Blocks:
+                        if (_lootDropIndexBlockIndex >= _lootDropIndexBlocks.Count)
+                        {
+                            _lootDropIndexPhase = LootDropIndexPhase.Entities;
+                            continue;
+                        }
+
+                        IndexLootDropBlock(_lootDropIndexBlocks[_lootDropIndexBlockIndex++]);
+                        processed++;
+                        break;
+
+                    case LootDropIndexPhase.Entities:
+                        if (_lootDropIndexEntityIndex >= _lootDropIndexEntities.Count)
+                        {
+                            _lootDropIndexPhase = LootDropIndexPhase.EntityTrades;
+                            continue;
+                        }
+
+                        IndexLootDropEntity(_lootDropIndexEntities[_lootDropIndexEntityIndex++]);
+                        processed++;
+                        break;
+
+                    case LootDropIndexPhase.EntityTrades:
+                        if (_lootDropIndexEntityTradeIndex >= _lootDropIndexEntitySources.Count)
+                        {
+                            _lootDropIndexPhase = LootDropIndexPhase.TradeAssets;
+                            continue;
+                        }
+
+                        IndexLootDropTradeAsset(_lootDropIndexEntitySources[_lootDropIndexEntityTradeIndex].Asset, _lootDropIndexEntitySources[_lootDropIndexEntityTradeIndex].SourceJson);
+                        _lootDropIndexEntityTradeIndex++;
+                        processed++;
+                        break;
+
+                    case LootDropIndexPhase.TradeAssets:
+                        if (_lootDropIndexTradeAssetIndex >= _lootDropIndexTradeAssets.Count)
+                        {
+                            CompleteLootDropIndexing();
+                            continue;
+                        }
+
+                        IndexLootDropTradeAsset(_lootDropIndexTradeAssets[_lootDropIndexTradeAssetIndex++], sourceJson: null);
+                        processed++;
+                        break;
+
+                    default:
+                        CompleteLootDropIndexing();
+                        break;
+                }
+            }
+
+            if (_lootDropIndexState == LootDropIndexState.Indexing)
+            {
+                _lootDropStatus = BuildLootDropIndexProgressText();
+                RebuildVisibleLootDropEntries();
+            }
+        }
+        catch (Exception exception)
+        {
+            _lootDropIndexState = LootDropIndexState.Failed;
+            _lootDropStatus = $"Loot/drop indexing failed: {exception.Message}";
+            _lootDropDiagnostics.Exception("Loot/drop indexing failed", exception);
+            _api.Logger.Error("[InGameDevTools] Loot/drop indexing failed: {0}", exception);
+        }
+    }
+
+    private void CompleteLootDropIndexing()
+    {
         _lootDropEntries.Sort((left, right) => string.Compare(left.Label, right.Label, StringComparison.OrdinalIgnoreCase));
         RebuildVisibleLootDropEntries();
-        _lootDropIndexed = true;
+        _lootDropIndexState = LootDropIndexState.Ready;
         _lootDropStatus = $"Indexed {_lootDropEntries.Count} loot/drop source(s).";
+    }
+
+    private void IndexLootDropBlock(Block block)
+    {
+        if (block.Code == null) return;
+
+        bool hasRuntimeDrops = (block.Drops?.Length ?? 0) > 0;
+        IAsset? sourceAsset = FindCollectibleSourceAsset(block);
+        JObject? sourceJson = hasRuntimeDrops ? null : TryReadLootDropAssetJson(sourceAsset);
+        if (hasRuntimeDrops || sourceJson?["drops"] is JArray)
+        {
+            _lootDropEntries.Add(LootDropEntry.ForBlock(block, sourceAsset, sourceJson));
+        }
+    }
+
+    private void IndexLootDropEntity(EntityProperties entityType)
+    {
+        if (entityType.Code == null) return;
+
+        bool hasRuntimeDrops = (entityType.Drops?.Length ?? 0) > 0;
+        LootDropEntitySourceAsset? source = _lootDropEntitySourceIndex?.Resolve(entityType);
+        JObject? sourceJson = source?.SourceJson;
+        if (hasRuntimeDrops || sourceJson?["drops"] is JArray)
+        {
+            _lootDropEntries.Add(LootDropEntry.ForEntity(entityType, source?.Asset, sourceJson));
+        }
+    }
+
+    private void IndexLootDropTradeAsset(IAsset asset, JObject? sourceJson)
+    {
+        JObject? json = sourceJson ?? TryReadLootDropAssetJson(asset);
+        if (json == null) return;
+        if (!TryFindTradeToken(json, out List<string> path, out JToken? tradeToken) || tradeToken == null) return;
+
+        _lootDropEntries.Add(LootDropEntry.ForTrade(asset, json, path, tradeToken));
+    }
+
+    private static bool IsLootDropTradeCandidateAsset(IAsset? asset)
+    {
+        if (asset?.Location == null) return false;
+        string assetPath = asset.Location.Path.Replace('\\', '/');
+        if (!assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return false;
+        if (assetPath.StartsWith("entities/", StringComparison.OrdinalIgnoreCase)) return false;
+        return assetPath.StartsWith("config/", StringComparison.OrdinalIgnoreCase) ||
+            assetPath.Contains("trade", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string BuildLootDropIndexProgressText()
+    {
+        return $"Indexing loot/drop sources: blocks {_lootDropIndexBlockIndex}/{_lootDropIndexBlocks.Count}, entities {_lootDropIndexEntityIndex}/{_lootDropIndexEntities.Count}, entity trades {_lootDropIndexEntityTradeIndex}/{_lootDropIndexEntitySources.Count}, trade assets {_lootDropIndexTradeAssetIndex}/{_lootDropIndexTradeAssets.Count}.";
     }
 
     private void RebuildVisibleLootDropEntries()
@@ -194,16 +365,25 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.Button("Reload index##loot-drop-reload", new NVector2(-1, 0)))
         {
-            _lootDropIndexed = false;
-            _lootDropLoadedKey = "";
-            _lootDropOriginalJson = "";
-            _lootDropTradeJson = "";
-            _lootDropLiveAppliedHash = "";
-            _lootDropDrafts.Clear();
-            EnsureLootDropEntriesIndexed();
+            StartLootDropIndexing(clearLoaded: true);
         }
 
         ImGui.TextDisabled($"{_visibleLootDropEntries.Count} / {_lootDropEntries.Count}");
+        if (_lootDropIndexState == LootDropIndexState.Indexing)
+        {
+            ImGui.TextWrapped(_lootDropStatus);
+            ImGui.EndChild();
+            return;
+        }
+
+        if (_lootDropIndexState == LootDropIndexState.Failed)
+        {
+            ImGui.TextColored(new NVector4(1f, 0.38f, 0.32f, 1f), "Loot/drop indexing failed.");
+            ImGui.TextWrapped(_lootDropStatus);
+            ImGui.EndChild();
+            return;
+        }
+
         if (_visibleLootDropEntries.Count == 0)
         {
             ImGui.TextDisabled("No matching loot/drop sources.");
@@ -237,6 +417,21 @@ public sealed partial class DebugWindowManager
     private void DrawLootDropEditorPanel(NVector2 size)
     {
         ImGui.BeginChild("##loot-drop-editor", size, true);
+        if (_lootDropIndexState == LootDropIndexState.Indexing)
+        {
+            ImGui.TextWrapped(_lootDropStatus);
+            ImGui.EndChild();
+            return;
+        }
+
+        if (_lootDropIndexState == LootDropIndexState.Failed)
+        {
+            ImGui.TextColored(new NVector4(1f, 0.38f, 0.32f, 1f), "Loot/drop index unavailable.");
+            ImGui.TextWrapped(_lootDropStatus);
+            ImGui.EndChild();
+            return;
+        }
+
         LootDropEntry? entry = SelectedLootDropEntry;
         if (entry == null)
         {
@@ -473,6 +668,24 @@ public sealed partial class DebugWindowManager
     private void DrawLootDropInspector(NVector2 size, bool showDiagnostics)
     {
         ImGui.BeginChild("##loot-drop-inspector", size, true);
+        if (_lootDropIndexState == LootDropIndexState.Indexing)
+        {
+            ImGui.SeparatorText("Status");
+            ImGui.TextWrapped(_lootDropStatus);
+            _lootDropDiagnostics.Draw("loot-drop", showDiagnostics);
+            ImGui.EndChild();
+            return;
+        }
+
+        if (_lootDropIndexState == LootDropIndexState.Failed)
+        {
+            ImGui.SeparatorText("Status");
+            ImGui.TextColored(new NVector4(1f, 0.38f, 0.32f, 1f), _lootDropStatus);
+            _lootDropDiagnostics.Draw("loot-drop", showDiagnostics);
+            ImGui.EndChild();
+            return;
+        }
+
         LootDropEntry? entry = SelectedLootDropEntry;
         if (entry == null)
         {
@@ -808,7 +1021,8 @@ public sealed partial class DebugWindowManager
     {
         try
         {
-            JObject json = entry.SourceJson?.DeepClone() as JObject ?? CreateLootDropAuthoringDocument(entry);
+            string sourceText = ReadAssetText(entry.SourceAsset);
+            JObject json = entry.SourceJson?.DeepClone() as JObject ?? TryParseJsonObject(sourceText) ?? CreateLootDropAuthoringDocument(entry);
             if (entry.Kind == LootDropKind.TradeTable)
             {
                 JToken? tradeToken = TryParseJsonToken(_lootDropTradeJson);
@@ -823,7 +1037,6 @@ public sealed partial class DebugWindowManager
             string domain = entry.SourceAsset?.Location.Domain ?? entry.Domain;
             string assetPath = entry.SourceAsset?.Location.Path ?? BuildLootDropFallbackAssetPath(entry);
             string outputPath = GetToolAuthoredAssetPath("loot-drops", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
-            string sourceText = ReadAssetText(entry.SourceAsset);
             string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : sourceText;
             string newText = json.ToString(Formatting.Indented);
             SourceSaveRequest request = new(
@@ -985,6 +1198,55 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private JObject? TryReadLootDropAssetJson(IAsset? asset)
+    {
+        if (asset == null) return null;
+
+        string text = ReadAssetText(asset);
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        if (TryParseJsonObjectDetailed(text, out JObject? json, out string error)) return json;
+
+        _lootDropDiagnostics.Warning($"Skipped malformed loot/drop source {asset.Location}: {error}", text);
+        return null;
+    }
+
+    private static bool TryParseJsonObjectDetailed(string text, out JObject? json, out string error)
+    {
+        json = null;
+        error = "";
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            error = "empty JSON";
+            return false;
+        }
+
+        try
+        {
+            json = JObject.Parse(text);
+            return true;
+        }
+        catch (Exception firstException)
+        {
+            try
+            {
+                JsonObject? fallbackObject = JsonObject.FromJson(text);
+                if (fallbackObject?.Token is JObject fallback)
+                {
+                    json = fallback;
+                    return true;
+                }
+
+                error = "JSON root is not an object";
+                return false;
+            }
+            catch (Exception secondException)
+            {
+                error = string.IsNullOrWhiteSpace(secondException.Message) ? firstException.Message : secondException.Message;
+                return false;
+            }
+        }
+    }
+
     private static void SetTokenAtPath(JObject root, IReadOnlyList<string> path, JToken value)
     {
         if (path.Count == 0) return;
@@ -1015,44 +1277,6 @@ public sealed partial class DebugWindowManager
         {
             finalArray[finalIndex] = value;
         }
-    }
-
-    private IAsset? FindEntitySourceAsset(EntityProperties entityType)
-    {
-        if (entityType.Code == null) return null;
-        string domain = entityType.Code.Domain;
-        string path = entityType.Code.Path;
-        IAsset? bestAsset = null;
-        int bestScore = -1;
-
-        foreach (IAsset asset in _api.Assets.AllAssets.Values)
-        {
-            if (asset?.Location == null) continue;
-            string assetPath = asset.Location.Path.Replace('\\', '/');
-            if (!assetPath.StartsWith("entities/", StringComparison.OrdinalIgnoreCase) ||
-                !assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(asset.Location.Domain, domain, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            JObject? json = TryParseJsonObject(ReadAssetText(asset));
-            string? code = json?["code"]?.ToString();
-            if (string.IsNullOrWhiteSpace(code)) continue;
-            if (code.Contains(':', StringComparison.Ordinal)) code = code[(code.IndexOf(':') + 1)..];
-
-            int score = -1;
-            if (string.Equals(code, path, StringComparison.OrdinalIgnoreCase)) score = 10000 + code.Length;
-            else if (path.StartsWith(code + "-", StringComparison.OrdinalIgnoreCase)) score = 1000 + code.Length;
-            else if (path.Contains(code, StringComparison.OrdinalIgnoreCase)) score = 100 + code.Length;
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestAsset = asset;
-            }
-        }
-
-        return bestAsset;
     }
 
     private static bool EditJsonString(JObject obj, string property, string label, int maxLength)
@@ -1093,6 +1317,22 @@ public sealed partial class DebugWindowManager
     }
 
     private static string GetLootDropLiveKey(LootDropEntry entry) => $"loot-drop:{entry.Key}";
+
+    private enum LootDropIndexState
+    {
+        Idle,
+        Indexing,
+        Ready,
+        Failed
+    }
+
+    private enum LootDropIndexPhase
+    {
+        Blocks,
+        Entities,
+        EntityTrades,
+        TradeAssets
+    }
 
     private enum LootDropKind
     {
@@ -1185,6 +1425,224 @@ public sealed partial class DebugWindowManager
                 tradeToken);
         }
     }
+
+    private sealed class LootDropEntitySourceIndex
+    {
+        private readonly Dictionary<string, LootDropEntitySourceAsset> _sourcesByCode = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<LootDropEntitySourceAsset> _sources = [];
+
+        public IReadOnlyList<LootDropEntitySourceAsset> Sources => _sources;
+
+        public static LootDropEntitySourceIndex Build(ICoreClientAPI api, DevToolsEditorDiagnostics diagnostics)
+        {
+            LootDropEntitySourceIndex index = new();
+            foreach (IAsset asset in api.Assets.AllAssets.Values)
+            {
+                if (asset?.Location == null) continue;
+                string assetPath = asset.Location.Path.Replace('\\', '/');
+                if (!assetPath.StartsWith("entities/", StringComparison.OrdinalIgnoreCase) ||
+                    !assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string text = ReadAssetText(asset);
+                if (!TryParseJsonObjectDetailed(text, out JObject? json, out string error) || json == null)
+                {
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        diagnostics.Warning($"Skipped malformed entity source {asset.Location}: {error}", text);
+                    }
+                    continue;
+                }
+
+                string? sourceCode = json["code"]?.ToString();
+                if (string.IsNullOrWhiteSpace(sourceCode)) continue;
+
+                LootDropEntitySourceAsset source = new(asset, StripCodeDomain(sourceCode), json);
+                index._sources.Add(source);
+                index.Register(source, source.SourceCode);
+                foreach (string entityCode in ExpandEntityCodes(api, asset.Location.Domain, json, source.SourceCode))
+                {
+                    index.Register(source, entityCode);
+                }
+            }
+
+            index._sources.Sort((left, right) => right.SourceCode.Length.CompareTo(left.SourceCode.Length));
+            return index;
+        }
+
+        public LootDropEntitySourceAsset? Resolve(EntityProperties entityType)
+        {
+            if (entityType.Code == null) return null;
+            string fullCode = NormalizeEntitySourceKey(entityType.Code.Domain, entityType.Code.Path);
+            if (_sourcesByCode.TryGetValue(fullCode, out LootDropEntitySourceAsset? exact)) return exact;
+
+            string path = entityType.Code.Path;
+            foreach (LootDropEntitySourceAsset source in _sources)
+            {
+                if (string.Equals(path, source.SourceCode, StringComparison.OrdinalIgnoreCase) ||
+                    path.StartsWith(source.SourceCode + "-", StringComparison.OrdinalIgnoreCase))
+                {
+                    return source;
+                }
+            }
+
+            return null;
+        }
+
+        private void Register(LootDropEntitySourceAsset source, string code)
+        {
+            if (string.IsNullOrWhiteSpace(code)) return;
+            _sourcesByCode[NormalizeEntitySourceKey(source.Asset.Location.Domain, code)] = source;
+        }
+
+        private static IEnumerable<string> ExpandEntityCodes(ICoreClientAPI api, string domain, JObject sourceJson, string sourceCode)
+        {
+            if (sourceJson["variantgroups"] is not JArray groups || groups.Count == 0)
+            {
+                yield return sourceCode;
+                yield break;
+            }
+
+            List<LootDropVariantGroup> variantGroups = [];
+            foreach (JObject group in groups.OfType<JObject>())
+            {
+                string? groupCode = group["code"]?.ToString();
+                if (string.IsNullOrWhiteSpace(groupCode)) continue;
+                List<string> states = ResolveVariantStates(api, domain, group).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                if (states.Count == 0) yield break;
+                variantGroups.Add(new(groupCode, states));
+            }
+
+            if (variantGroups.Count == 0)
+            {
+                yield return sourceCode;
+                yield break;
+            }
+
+            foreach (Dictionary<string, string> combination in BuildVariantCombinations(variantGroups))
+            {
+                yield return BuildVariantCode(sourceCode, variantGroups, combination);
+            }
+        }
+
+        private static IEnumerable<string> ResolveVariantStates(ICoreClientAPI api, string domain, JObject group)
+        {
+            if (group["states"] is JArray states)
+            {
+                foreach (JToken state in states)
+                {
+                    string? value = state.ToString();
+                    if (!string.IsNullOrWhiteSpace(value)) yield return value;
+                }
+            }
+
+            string? loadFromProperties = group["loadFromProperties"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(loadFromProperties))
+            {
+                foreach (string value in LoadWorldPropertyStates(api, domain, loadFromProperties))
+                {
+                    yield return value;
+                }
+            }
+        }
+
+        private static IEnumerable<string> LoadWorldPropertyStates(ICoreClientAPI api, string domain, string loadFromProperties)
+        {
+            string path = EnsureJsonFilePath($"worldproperties/{loadFromProperties.Trim().TrimStart('/')}");
+            foreach (string candidateDomain in new[] { domain, "game" }.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                IAsset? asset = api.Assets.TryGet(new AssetLocation(candidateDomain, path), true);
+                JObject? json = TryParseJsonObject(ReadAssetText(asset));
+                if (json?["variants"] is not JArray variants) continue;
+
+                foreach (JToken variant in variants)
+                {
+                    string? code = variant.Type == JTokenType.String
+                        ? variant.ToString()
+                        : variant["Code"]?.ToString() ?? variant["code"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(code)) yield return code;
+                }
+
+                yield break;
+            }
+        }
+
+        private static IEnumerable<Dictionary<string, string>> BuildVariantCombinations(IReadOnlyList<LootDropVariantGroup> groups)
+        {
+            List<Dictionary<string, string>> combinations = [new(StringComparer.OrdinalIgnoreCase)];
+            foreach (LootDropVariantGroup group in groups)
+            {
+                List<Dictionary<string, string>> next = [];
+                foreach (Dictionary<string, string> combination in combinations)
+                {
+                    foreach (string state in group.States)
+                    {
+                        Dictionary<string, string> copy = new(combination, StringComparer.OrdinalIgnoreCase)
+                        {
+                            [group.Code] = state
+                        };
+                        next.Add(copy);
+                    }
+                }
+
+                combinations = next;
+            }
+
+            return combinations;
+        }
+
+        private static string BuildVariantCode(string sourceCode, IReadOnlyList<LootDropVariantGroup> groups, IReadOnlyDictionary<string, string> states)
+        {
+            string code = sourceCode;
+            List<string> suffixes = [];
+            foreach (LootDropVariantGroup group in groups)
+            {
+                if (!states.TryGetValue(group.Code, out string? state)) continue;
+                string placeholder = "{" + group.Code + "}";
+                if (code.Contains(placeholder, StringComparison.OrdinalIgnoreCase))
+                {
+                    code = ReplaceInvariant(code, placeholder, state);
+                }
+                else
+                {
+                    suffixes.Add(state);
+                }
+            }
+
+            return suffixes.Count == 0 ? code : $"{code}-{string.Join('-', suffixes)}";
+        }
+
+        private static string NormalizeEntitySourceKey(string defaultDomain, string code)
+        {
+            string trimmed = StripCodeDomain(code);
+            string domain = code.Contains(':', StringComparison.Ordinal) ? code[..code.IndexOf(':')] : defaultDomain;
+            return $"{domain}:{trimmed}";
+        }
+
+        private static string StripCodeDomain(string code)
+        {
+            int separator = code.IndexOf(':');
+            return separator >= 0 ? code[(separator + 1)..] : code;
+        }
+
+        private static string ReplaceInvariant(string value, string oldValue, string newValue)
+        {
+            int index = value.IndexOf(oldValue, StringComparison.OrdinalIgnoreCase);
+            while (index >= 0)
+            {
+                value = value[..index] + newValue + value[(index + oldValue.Length)..];
+                index = value.IndexOf(oldValue, index + newValue.Length, StringComparison.OrdinalIgnoreCase);
+            }
+
+            return value;
+        }
+    }
+
+    private sealed record LootDropEntitySourceAsset(IAsset Asset, string SourceCode, JObject SourceJson);
+
+    private sealed record LootDropVariantGroup(string Code, IReadOnlyList<string> States);
 
     private sealed class LootDropDraft
     {
