@@ -4617,7 +4617,7 @@ public sealed partial class DebugWindowManager
 
     private void SetVanillaIkTargetFromCurrentEnd(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, VanillaIkManualChain chain)
     {
-        if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, out VanillaIkCcdCache? cache, out string error) || cache == null)
+        if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, VanillaIkEffectorMode.DistalEndpoint, out VanillaIkCcdCache? cache, out string error) || cache == null)
         {
             _vanillaStatus = error;
             return;
@@ -4638,7 +4638,7 @@ public sealed partial class DebugWindowManager
             return;
         }
 
-        if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, out VanillaIkCcdCache? cache, out string error) || cache == null)
+        if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, VanillaIkEffectorMode.DistalEndpoint, out VanillaIkCcdCache? cache, out string error) || cache == null)
         {
             _vanillaStatus = error;
             return;
@@ -4967,7 +4967,7 @@ public sealed partial class DebugWindowManager
             _vanillaIkDragKeyFrameIndex != keyFrameIndex ||
             !string.Equals(_vanillaIkDragElementName, selectedElementName, StringComparison.OrdinalIgnoreCase))
         {
-            if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, out VanillaIkCcdCache? cache, out string error) || cache == null)
+            if (!TryCreateVanillaIkCcdCache(row, entry, keyFrame, chain, VanillaIkEffectorMode.GizmoHandle, out VanillaIkCcdCache? cache, out string error) || cache == null)
             {
                 _vanillaStatus = error;
                 return false;
@@ -4999,7 +4999,7 @@ public sealed partial class DebugWindowManager
         return true;
     }
 
-    private bool TryCreateVanillaIkCcdCache(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, VanillaIkManualChain chain, out VanillaIkCcdCache? cache, out string error)
+    private bool TryCreateVanillaIkCcdCache(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, VanillaIkManualChain chain, VanillaIkEffectorMode effectorMode, out VanillaIkCcdCache? cache, out string error)
     {
         cache = null;
         error = "";
@@ -5027,9 +5027,10 @@ public sealed partial class DebugWindowManager
         }
 
         VanillaIkPoseInfo endInfo = infos[^1];
-        if (!TryGetVanillaDistalEndpointModel(endInfo.Pose, endInfo.Origin, out Vec3d endOrigin))
+        bool allowZeroEndSegment = effectorMode == VanillaIkEffectorMode.GizmoHandle;
+        if (!TryGetVanillaIkEffectorModel(endInfo, effectorMode, out Vec3d endOrigin))
         {
-            error = $"Could not find a distal endpoint for {chain.EndElementName}.";
+            error = $"Could not find an IK effector point for {chain.EndElementName}.";
             return false;
         }
 
@@ -5043,6 +5044,7 @@ public sealed partial class DebugWindowManager
         for (int index = 0; index < jointPositions.Length - 1; index++)
         {
             if (Distance(jointPositions[index], jointPositions[index + 1]) > 0.0001) continue;
+            if (allowZeroEndSegment && index == jointPositions.Length - 2 && jointPositions.Length > 2) continue;
 
             error = $"IK chain segment at {chain.ElementNames[index]} has no usable length.";
             return false;
@@ -5060,6 +5062,16 @@ public sealed partial class DebugWindowManager
 
         cache = new VanillaIkCcdCache(chain, infos.ToArray(), jointPositions, endOrigin, selectedAxes, selectedStart, startElements);
         return true;
+    }
+
+    private static bool TryGetVanillaIkEffectorModel(VanillaIkPoseInfo endInfo, VanillaIkEffectorMode mode, out Vec3d origin)
+    {
+        if (mode == VanillaIkEffectorMode.GizmoHandle && TryGetVanillaGizmoHandlePointModel(endInfo.Pose, out origin))
+        {
+            return true;
+        }
+
+        return TryGetVanillaDistalEndpointModel(endInfo.Pose, endInfo.Origin, out origin);
     }
 
     private static AnimationKeyFrameElement GetVanillaIkElementOrDefault(AnimationKeyFrame keyFrame, string elementName)
@@ -5254,6 +5266,18 @@ public sealed partial class DebugWindowManager
 
         Vec3f localOrigin = GetElementLocalRotationOrigin(pose);
         Vec4f transformed = matrix.TransformVector(new Vec4f(localOrigin.X, localOrigin.Y, localOrigin.Z, 1f));
+        origin = new Vec3d(transformed.X, transformed.Y, transformed.Z);
+        return true;
+    }
+
+    private static bool TryGetVanillaGizmoHandlePointModel(ElementPose pose, out Vec3d origin)
+    {
+        origin = new Vec3d();
+        if (pose.ForElement == null) return false;
+        if (!TryBuildVanillaPoseModelMatrix(pose, out Matrixf matrix)) return false;
+
+        NVector3 local = GetVanillaGizmoLocalPoint(pose);
+        Vec4f transformed = matrix.TransformVector(new Vec4f(local.X, local.Y, local.Z, 1f));
         origin = new Vec3d(transformed.X, transformed.Y, transformed.Z);
         return true;
     }
@@ -6240,6 +6264,12 @@ public sealed partial class DebugWindowManager
         AutoConservative,
         AutoExtended,
         ManualOverride
+    }
+
+    private enum VanillaIkEffectorMode
+    {
+        DistalEndpoint,
+        GizmoHandle
     }
 
     private readonly record struct VanillaSymmetryPairCandidate(string ElementName, VanillaSymmetrySide SourceSide);
