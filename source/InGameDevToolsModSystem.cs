@@ -9,6 +9,7 @@ using Vintagestory.API.Config;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Datastructures;
+using Vintagestory.API.Server;
 using VSImGui;
 using System.Reflection;
 
@@ -29,23 +30,34 @@ public sealed class InGameDevToolsModSystem : ModSystem
     private static bool _fontExtractionAttempted;
 
     public static string? BundledOpenDyslexicFontPath { get; private set; }
+    public static ICoreServerAPI? ActiveServerApi { get; private set; }
 
-    public override bool ShouldLoad(EnumAppSide forSide) => forSide == EnumAppSide.Client;
+    public override bool ShouldLoad(EnumAppSide forSide) => forSide is EnumAppSide.Client or EnumAppSide.Server;
 
     public override void StartPre(ICoreAPI api)
     {
         ExtendedElementPose.NameHashCache = new(api, "in-game devtools element pose name hash cache", 500000, 11 * 60 * 1000, threadSafe: true);
-        ExtractBundledFonts(api);
+        if (api.Side == EnumAppSide.Client)
+        {
+            ExtractBundledFonts(api);
+        }
     }
 
     public override void Start(ICoreAPI api)
     {
         RegisterStandaloneClasses(api);
 
+        if (api.Side != EnumAppSide.Client) return;
+
         PlayerRenderingPatches.Api = api;
         new Harmony(TranspilerHarmonyId).PatchAll(typeof(ExtendedElementPose).Assembly);
         AnimationPatches.Patch(AnimationHarmonyId, api);
         DetachedEditorCameraPatches.Patch(DetachedCameraHarmonyId, api);
+    }
+
+    public override void StartServerSide(ICoreServerAPI api)
+    {
+        ActiveServerApi = api;
     }
 
     public override void StartClientSide(ICoreClientAPI api)
@@ -88,6 +100,8 @@ public sealed class InGameDevToolsModSystem : ModSystem
 
     public override void AssetsFinalize(ICoreAPI api)
     {
+        if (api.Side != EnumAppSide.Client) return;
+
         _particleEffectsManager?.LoadAssets();
         ParticleRuntimePatches.Patch(ParticleRuntimeHarmonyId, api);
         _animationsManager?.Load();
@@ -116,6 +130,7 @@ public sealed class InGameDevToolsModSystem : ModSystem
         PlayerRenderingPatches.Api = null;
         ExtendedElementPose.NameHashCache?.Dispose();
         ExtendedElementPose.NameHashCache = null;
+        ActiveServerApi = null;
 
         _debugWindowManager = null;
         _animationsManager = null;

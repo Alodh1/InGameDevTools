@@ -3310,6 +3310,13 @@ public sealed partial class DebugWindowManager
 
     private bool TryFindWorldgenServerApi(out ICoreServerAPI? serverApi, out string source)
     {
+        if (InGameDevToolsModSystem.ActiveServerApi != null)
+        {
+            serverApi = InGameDevToolsModSystem.ActiveServerApi;
+            source = "InGameDevTools server-side mod system";
+            return true;
+        }
+
         HashSet<object> visited = new(ReferenceEqualityComparer.Instance);
         if (TryExtractWorldgenServerApi(_api, "client api", 2, visited, out serverApi, out source))
         {

@@ -5,7 +5,7 @@
     <ModVersion>0.1.11</ModVersion>
     <ModId>ingamedevtools</ModId>
     <Description>Standalone client-side animation and in-game development tools.</Description>
-    <Side>client</Side>
+    <Side>universal</Side>
     <RequiredOnClient>true</RequiredOnClient>
     <RequiredOnServer>false</RequiredOnServer>
   </PropertyGroup>
