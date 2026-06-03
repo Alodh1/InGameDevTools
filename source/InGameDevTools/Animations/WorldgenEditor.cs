@@ -80,6 +80,7 @@ public sealed partial class DebugWindowManager
     private readonly DevToolsEditorDiagnostics _worldgenDiagnostics = new("Worldgen");
     private WorldgenIndexState _worldgenIndexState;
     private int _worldgenIndexAssetIndex;
+    private bool _worldgenIndexIncludedServerAssets;
     private string _worldgenFilter = "";
     private string _worldgenDomainFilter = "";
     private int _worldgenKindFilter;
@@ -195,6 +196,14 @@ public sealed partial class DebugWindowManager
 
     private void EnsureWorldgenEntriesIndexed()
     {
+        if (_worldgenIndexState == WorldgenIndexState.Ready &&
+            _worldgenEntries.Count == 0 &&
+            !_worldgenIndexIncludedServerAssets &&
+            InGameDevToolsModSystem.ActiveServerApi != null)
+        {
+            StartWorldgenIndexing(clearLoaded: false);
+        }
+
         if (_worldgenIndexState == WorldgenIndexState.Ready || _worldgenIndexState == WorldgenIndexState.Failed) return;
         if (_worldgenIndexState == WorldgenIndexState.Idle)
         {
@@ -209,6 +218,7 @@ public sealed partial class DebugWindowManager
         RememberWorldgenDraft();
         _worldgenIndexState = WorldgenIndexState.Indexing;
         _worldgenIndexAssetIndex = 0;
+        _worldgenIndexIncludedServerAssets = false;
         _worldgenEntries.Clear();
         _visibleWorldgenEntries.Clear();
         _worldgenIndexAssets.Clear();
@@ -226,11 +236,31 @@ public sealed partial class DebugWindowManager
         }
 
         HashSet<string> indexedLocations = new(StringComparer.OrdinalIgnoreCase);
-        AddWorldgenIndexAssets(_api.Assets.GetManyInCategory("worldgen", ""), indexedLocations);
-        AddWorldgenIndexAssets(_api.Assets.AllAssets.Values.Where(IsWorldgenJsonAsset), indexedLocations);
+        AddWorldgenAssetSource("client worldgen category", () => _api.Assets.GetManyInCategory("worldgen", ""), indexedLocations);
+        AddWorldgenAssetSource("client loaded assets", () => _api.Assets.AllAssets.Values.Where(IsWorldgenJsonAsset), indexedLocations);
+
+        ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
+        if (serverApi != null)
+        {
+            _worldgenIndexIncludedServerAssets = true;
+            AddWorldgenAssetSource("server worldgen category", () => serverApi.Assets.GetManyInCategory("worldgen", ""), indexedLocations);
+            AddWorldgenAssetSource("server loaded assets", () => serverApi.Assets.AllAssets.Values.Where(IsWorldgenJsonAsset), indexedLocations);
+        }
 
         _worldgenIndexAssets.Sort((left, right) => string.Compare(left.Location.ToString(), right.Location.ToString(), StringComparison.OrdinalIgnoreCase));
         _worldgenStatus = BuildWorldgenIndexProgressText();
+    }
+
+    private void AddWorldgenAssetSource(string label, Func<IEnumerable<IAsset>> getAssets, HashSet<string> indexedLocations)
+    {
+        try
+        {
+            AddWorldgenIndexAssets(getAssets(), indexedLocations);
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Warning($"Skipped {label}: {exception.Message}", exception.ToString());
+        }
     }
 
     private void AddWorldgenIndexAssets(IEnumerable<IAsset> assets, HashSet<string> indexedLocations)
@@ -293,7 +323,8 @@ public sealed partial class DebugWindowManager
 
     private string BuildWorldgenIndexProgressText()
     {
-        return $"Indexing worldgen assets {_worldgenIndexAssetIndex}/{_worldgenIndexAssets.Count}.";
+        string serverSuffix = _worldgenIndexIncludedServerAssets ? " including server assets" : " client assets only";
+        return $"Indexing worldgen assets {_worldgenIndexAssetIndex}/{_worldgenIndexAssets.Count}{serverSuffix}.";
     }
 
     private void IndexWorldgenAsset(IAsset asset)
