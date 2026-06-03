@@ -34,6 +34,7 @@ public sealed partial class DebugWindowManager
     private const int WorldgenPreviewModeBlockPatch = 8;
     private const int WorldgenPreviewModeTerrainShape = 9;
     private const int WorldgenPreviewModeRegion3D = 10;
+    private const int WorldgenPreviewModeRockStrata = 11;
     private static readonly string[] WorldgenKindFilterLabels =
     [
         "All",
@@ -55,7 +56,8 @@ public sealed partial class DebugWindowManager
         "Ore",
         "Block patch suitability",
         "Terrain shape",
-        "3D region"
+        "3D region",
+        "Rock strata"
     ];
     private static readonly string[] WorldgenPeekPassLabels =
     [
@@ -892,6 +894,10 @@ public sealed partial class DebugWindowManager
         {
             DrawWorldgenTerrainShapePreviewControls();
         }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeRockStrata)
+        {
+            DrawWorldgenRockStrataPreviewControls();
+        }
         else if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
         {
             DrawWorldgenRegion3DPreviewControls();
@@ -1003,7 +1009,9 @@ public sealed partial class DebugWindowManager
                     ? $"{modeLabel}: selected draft row"
                     : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
                         ? $"{modeLabel}: selected draft landform"
-                        : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
+                        : _worldgenPreviewMode == WorldgenPreviewModeRockStrata
+                            ? $"{modeLabel}: selected draft stratum"
+                            : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
                             ? _worldgenPreviewPeekProfile == null
                                 ? $"{modeLabel}: draft landform surface"
                                 : $"{modeLabel}: real peeked region"
@@ -1085,6 +1093,22 @@ public sealed partial class DebugWindowManager
         else
         {
             ImGui.TextDisabled("Select a landform row to preview its draft terrain shape.");
+        }
+    }
+
+    private void DrawWorldgenRockStrataPreviewControls()
+    {
+        if (TryGetSelectedWorldgenRockStrataRow(out JObject? row) && row != null)
+        {
+            WorldgenRockStrataDraft draft = WorldgenRockStrataDraft.FromJson(row);
+            string label = draft.BlockCode ?? GetWorldgenRowLabel(WorldgenAssetKind.RockStrata, row, _worldgenRowIndex);
+            ImGui.TextDisabled($"Using selected draft rock stratum: {label}.");
+            ImGui.TextDisabled("Uses the draft stratum's MapLayerCustomPerlin thickness map with engine scaling.");
+            ImGui.TextDisabled("Final province stack order and exact block-column placement still require the real 3D peek path.");
+        }
+        else
+        {
+            ImGui.TextDisabled("Select a rock-strata row to preview its draft thickness map.");
         }
     }
 
@@ -1246,7 +1270,7 @@ public sealed partial class DebugWindowManager
             WorldgenAssetKind.Deposits => WorldgenPreviewModeOre,
             WorldgenAssetKind.BlockPatches => WorldgenPreviewModeBlockPatch,
             WorldgenAssetKind.Landforms => WorldgenPreviewModeTerrainShape,
-            WorldgenAssetKind.RockStrata => WorldgenPreviewModeTerrainShape,
+            WorldgenAssetKind.RockStrata => WorldgenPreviewModeRockStrata,
             _ => WorldgenPreviewModeGradient
         };
     }
@@ -1491,6 +1515,22 @@ public sealed partial class DebugWindowManager
             : 0L;
     }
 
+    private int GetWorldgenPreviewMapHeight()
+    {
+        if (_worldgenPreviewServerApi?.WorldManager.MapSizeY > 0)
+        {
+            return _worldgenPreviewServerApi.WorldManager.MapSizeY;
+        }
+
+        object? raw = TryGetReflectedProperty(_api.World, "MapSizeY");
+        if (raw != null && int.TryParse(raw.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int height) && height > 0)
+        {
+            return height;
+        }
+
+        return 256;
+    }
+
     private string BuildWorldgenPreviewHoverText(int mode, long seed, int blockX, int blockZ)
     {
         _ = seed;
@@ -1508,6 +1548,11 @@ public sealed partial class DebugWindowManager
         if (mode == WorldgenPreviewModeTerrainShape)
         {
             return BuildWorldgenTerrainShapeHoverText(seed, blockX, blockZ);
+        }
+
+        if (mode == WorldgenPreviewModeRockStrata)
+        {
+            return BuildWorldgenRockStrataHoverText(seed, blockX, blockZ);
         }
 
         if (WorldgenPreviewModeUsesMapLayer(mode))
@@ -1701,6 +1746,33 @@ public sealed partial class DebugWindowManager
         {
             _worldgenDiagnostics.Exception("Worldgen terrain shape hover sample failed", exception);
             return $"Terrain shape sample failed: {exception.Message}";
+        }
+    }
+
+    private string BuildWorldgenRockStrataHoverText(long seed, int blockX, int blockZ)
+    {
+        if (!TryGetSelectedWorldgenRockStrataRow(out JObject? row) || row == null)
+        {
+            return "Rock strata: no selected draft row.";
+        }
+
+        try
+        {
+            WorldgenRockStrataDraft draft = WorldgenRockStrataDraft.FromJson(row);
+            if (!draft.IsUsable)
+            {
+                return "Rock strata: selected row needs matching amplitudes, frequencies, and thresholds.";
+            }
+
+            WorldgenRockStrataSampler sampler = CreateWorldgenRockStrataSampler(seed, draft, out string samplerStatus);
+            float thickness = sampler.SampleThickness(blockX, blockZ);
+            string label = draft.BlockCode ?? GetWorldgenRowLabel(WorldgenAssetKind.RockStrata, row, _worldgenRowIndex);
+            return $"Rock strata {label}: draft thickness {thickness:0.#} blocks; {draft.RockGroup ?? "unknown group"}; {draft.GenDir ?? "default direction"}; {samplerStatus}";
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen rock strata hover sample failed", exception);
+            return $"Rock strata sample failed: {exception.Message}";
         }
     }
 
@@ -1948,6 +2020,11 @@ public sealed partial class DebugWindowManager
     private bool TryGetSelectedWorldgenLandformRow(out JObject? row)
     {
         return TryGetSelectedWorldgenRow(WorldgenAssetKind.Landforms, out row);
+    }
+
+    private bool TryGetSelectedWorldgenRockStrataRow(out JObject? row)
+    {
+        return TryGetSelectedWorldgenRow(WorldgenAssetKind.RockStrata, out row);
     }
 
     private bool TryGetSelectedWorldgenRow(WorldgenAssetKind kind, out JObject? row)
@@ -4182,6 +4259,7 @@ public sealed partial class DebugWindowManager
         }
 
         colors = new uint[cellsX * cellsZ];
+        _worldgenPreviewRasterStatus = "";
         if (_worldgenPreviewMode == WorldgenPreviewModeOre)
         {
             if (!TryBuildWorldgenOreRaster(centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
@@ -4201,6 +4279,14 @@ public sealed partial class DebugWindowManager
         else if (_worldgenPreviewMode == WorldgenPreviewModeTerrainShape)
         {
             if (!TryBuildWorldgenTerrainShapeRaster(seed, centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
+            {
+                colors = null;
+                return false;
+            }
+        }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeRockStrata)
+        {
+            if (!TryBuildWorldgenRockStrataRaster(seed, centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
             {
                 colors = null;
                 return false;
@@ -4229,7 +4315,10 @@ public sealed partial class DebugWindowManager
 
         _worldgenPreviewRasterCacheKey = key;
         _worldgenPreviewRasterCache = colors;
-        _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}";
+        if (string.IsNullOrWhiteSpace(_worldgenPreviewRasterStatus))
+        {
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}";
+        }
         error = "";
         return true;
     }
@@ -4483,6 +4572,85 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private bool TryBuildWorldgenRockStrataRaster(
+        long seed,
+        float centerX,
+        float centerZ,
+        float halfWidthBlocks,
+        float halfHeightBlocks,
+        int cellsX,
+        int cellsZ,
+        uint[] colors,
+        out string error)
+    {
+        if (!TryGetSelectedWorldgenRockStrataRow(out JObject? row) || row == null)
+        {
+            error = "Select a rock-strata row to preview thickness.";
+            return false;
+        }
+
+        try
+        {
+            WorldgenRockStrataDraft draft = WorldgenRockStrataDraft.FromJson(row);
+            if (!draft.IsUsable)
+            {
+                error = "Selected rock stratum needs matching amplitudes, frequencies, and thresholds.";
+                return false;
+            }
+
+            WorldgenRockStrataSampler sampler = CreateWorldgenRockStrataSampler(seed, draft, out string samplerStatus);
+            float[] thicknesses = new float[cellsX * cellsZ];
+            float minThickness = float.PositiveInfinity;
+            float maxThickness = float.NegativeInfinity;
+            for (int z = 0; z < cellsZ; z++)
+            {
+                float worldZ = centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ);
+                for (int x = 0; x < cellsX; x++)
+                {
+                    float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
+                    float thickness = sampler.SampleThickness(worldX, worldZ);
+                    int index = z * cellsX + x;
+                    thicknesses[index] = thickness;
+                    minThickness = Math.Min(minThickness, thickness);
+                    maxThickness = Math.Max(maxThickness, thickness);
+                }
+            }
+
+            float range = Math.Max(1f, maxThickness - minThickness);
+            for (int index = 0; index < thicknesses.Length; index++)
+            {
+                float normalized = (thicknesses[index] - minThickness) / range;
+                colors[index] = BuildWorldgenRockStrataPreviewColor(normalized, draft);
+            }
+
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; draft stratum thickness {minThickness:0.#}-{maxThickness:0.#} blocks; {samplerStatus}; final province stack not simulated";
+            error = "";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen rock strata raster failed", exception);
+            error = $"Rock strata render failed: {exception.Message}";
+            return false;
+        }
+    }
+
+    private WorldgenRockStrataSampler CreateWorldgenRockStrataSampler(long seed, WorldgenRockStrataDraft draft, out string status)
+    {
+        int mapSizeY = GetWorldgenPreviewMapHeight();
+        try
+        {
+            status = "engine MapLayerCustomPerlin sampler";
+            return WorldgenRockStrataSampler.CreateEngine(seed, _worldgenRowIndex, mapSizeY, draft);
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen rock strata engine sampler failed", exception);
+            status = $"fallback value-noise sampler; engine sampler failed: {exception.Message}";
+            return WorldgenRockStrataSampler.CreateFallback(seed, mapSizeY, draft);
+        }
+    }
+
     private WorldgenTerrainShapeSampler CreateWorldgenTerrainShapeSampler(JObject row, WorldgenLandformDraft fallbackDraft, out string status)
     {
         try
@@ -4657,6 +4825,7 @@ public sealed partial class DebugWindowManager
             WorldgenPreviewModeBlockPatch => GetSelectedWorldgenRowContext(WorldgenAssetKind.BlockPatches),
             WorldgenPreviewModeLandform => GetSelectedWorldgenRowContext(WorldgenAssetKind.Landforms),
             WorldgenPreviewModeTerrainShape => SelectedWorldgenEntry?.Root?.ToString(Formatting.None) + ":" + _worldgenRowIndex + ":" + _worldgenCurrentText,
+            WorldgenPreviewModeRockStrata => SelectedWorldgenEntry?.Root?.ToString(Formatting.None) + ":" + _worldgenRowIndex + ":" + _worldgenCurrentText,
             _ => ""
         };
     }
@@ -4806,6 +4975,21 @@ public sealed partial class DebugWindowManager
         color.X = Math.Clamp(color.X * shade, 0f, 1f);
         color.Y = Math.Clamp(color.Y * shade, 0f, 1f);
         color.Z = Math.Clamp(color.Z * shade, 0f, 1f);
+        return ImGui.ColorConvertFloat4ToU32(color);
+    }
+
+    private static uint BuildWorldgenRockStrataPreviewColor(float normalized, WorldgenRockStrataDraft draft)
+    {
+        normalized = Math.Clamp(normalized, 0f, 1f);
+        NVector4 low = new(0.10f, 0.095f, 0.085f, 1f);
+        NVector4 high = new(0.62f, 0.58f, 0.48f, 1f);
+        NVector4 color = LerpColor(low, high, normalized);
+
+        if (TryParseHexColor(draft.HexColor, out NVector4 tint))
+        {
+            color = LerpColor(color, tint, 0.35f);
+        }
+
         return ImGui.ColorConvertFloat4ToU32(color);
     }
 
@@ -6036,6 +6220,150 @@ public sealed partial class DebugWindowManager
             float? min = TryReadJsonFloat(row[minName], out float parsedMin) ? parsedMin : null;
             float? max = TryReadJsonFloat(row[maxName], out float parsedMax) ? parsedMax : null;
             return new WorldgenValueRange(min, max);
+        }
+    }
+
+    private sealed class WorldgenRockStrataSampler
+    {
+        private readonly long _seed;
+        private readonly int _mapSizeY;
+        private readonly WorldgenRockStrataDraft _draft;
+        private readonly MapLayerCustomPerlin? _engineLayer;
+
+        private WorldgenRockStrataSampler(long seed, int mapSizeY, WorldgenRockStrataDraft draft, MapLayerCustomPerlin? engineLayer)
+        {
+            _seed = seed;
+            _mapSizeY = mapSizeY;
+            _draft = draft;
+            _engineLayer = engineLayer;
+        }
+
+        public static WorldgenRockStrataSampler CreateEngine(long seed, int rowIndex, int mapSizeY, WorldgenRockStrataDraft draft)
+        {
+            if (!draft.IsUsable)
+            {
+                throw new InvalidOperationException("rock-strata draft arrays are not usable");
+            }
+
+            double[] amplitudes = draft.Amplitudes.Select(value => value * mapSizeY).ToArray();
+            double[] frequencies = draft.Frequencies.Select(value => value / Math.Max(1, TerraGenConfig.rockStrataOctaveScale)).ToArray();
+            double[] thresholds = draft.Thresholds.Select(value => value * mapSizeY).ToArray();
+            return new WorldgenRockStrataSampler(
+                seed,
+                mapSizeY,
+                draft,
+                new MapLayerCustomPerlin(seed + 23423 + Math.Max(0, rowIndex), amplitudes, frequencies, thresholds));
+        }
+
+        public static WorldgenRockStrataSampler CreateFallback(long seed, int mapSizeY, WorldgenRockStrataDraft draft)
+        {
+            return new WorldgenRockStrataSampler(seed, mapSizeY, draft, null);
+        }
+
+        public float SampleThickness(float worldX, float worldZ)
+        {
+            int scale = Math.Max(1, TerraGenConfig.rockStrataScale);
+            int sampleX = (int)MathF.Floor(worldX / scale);
+            int sampleZ = (int)MathF.Floor(worldZ / scale);
+            if (_engineLayer != null)
+            {
+                return Math.Max(0f, _engineLayer.GenLayer(sampleX, sampleZ, 1, 1)[0]);
+            }
+
+            return SampleFallbackThickness(worldX, worldZ);
+        }
+
+        private float SampleFallbackThickness(float worldX, float worldZ)
+        {
+            double total = 0.0;
+            int count = Math.Min(_draft.Amplitudes.Length, Math.Min(_draft.Frequencies.Length, _draft.Thresholds.Length));
+            if (count <= 0) return 0f;
+
+            for (int index = 0; index < count; index++)
+            {
+                double amplitude = _draft.Amplitudes[index] * _mapSizeY;
+                double frequency = _draft.Frequencies[index] / Math.Max(1, TerraGenConfig.rockStrataOctaveScale);
+                double threshold = _draft.Thresholds[index] * _mapSizeY;
+                double value = ValueNoise01(_seed, worldX * frequency, worldZ * frequency, index) * amplitude;
+                total += Math.Max(0.0, value - threshold);
+            }
+
+            return (float)Math.Max(0.0, total);
+        }
+
+        private static float ValueNoise01(long seed, double x, double z, int octave)
+        {
+            int x0 = (int)Math.Floor(x);
+            int z0 = (int)Math.Floor(z);
+            double fx = x - x0;
+            double fz = z - z0;
+            double sx = fx * fx * (3.0 - 2.0 * fx);
+            double sz = fz * fz * (3.0 - 2.0 * fz);
+
+            double a = Lerp(Hash01(seed, x0, z0, octave), Hash01(seed, x0 + 1, z0, octave), sx);
+            double b = Lerp(Hash01(seed, x0, z0 + 1, octave), Hash01(seed, x0 + 1, z0 + 1, octave), sx);
+            return (float)Lerp(a, b, sz);
+        }
+
+        private static double Lerp(double a, double b, double t) => a + (b - a) * t;
+
+        private static double Hash01(long seed, int x, int z, int octave)
+        {
+            unchecked
+            {
+                ulong hash = (ulong)seed;
+                hash ^= (ulong)(uint)x * 0x9E3779B185EBCA87UL;
+                hash ^= (ulong)(uint)z * 0xC2B2AE3D27D4EB4FUL;
+                hash ^= (ulong)(uint)octave * 0x165667B19E3779F9UL;
+                hash ^= hash >> 33;
+                hash *= 0xff51afd7ed558ccdUL;
+                hash ^= hash >> 33;
+                hash *= 0xc4ceb9fe1a85ec53UL;
+                hash ^= hash >> 33;
+                return (hash & 0x00FFFFFFUL) / (double)0x01000000UL;
+            }
+        }
+    }
+
+    private readonly record struct WorldgenRockStrataDraft(
+        string? BlockCode,
+        string? HexColor,
+        string? RockGroup,
+        string? GenDir,
+        double[] Amplitudes,
+        double[] Frequencies,
+        double[] Thresholds)
+    {
+        public bool IsUsable => Amplitudes.Length > 0 &&
+            Amplitudes.Length == Frequencies.Length &&
+            Amplitudes.Length == Thresholds.Length;
+
+        public static WorldgenRockStrataDraft FromJson(JObject row)
+        {
+            return new WorldgenRockStrataDraft(
+                row["blockcode"]?.ToString(),
+                row["hexcolor"]?.ToString(),
+                row["rockGroup"]?.ToString(),
+                row["genDir"]?.ToString(),
+                ReadDoubleArray(row["amplitudes"] as JArray),
+                ReadDoubleArray(row["frequencies"] as JArray),
+                ReadDoubleArray(row["thresholds"] as JArray));
+        }
+
+        private static double[] ReadDoubleArray(JArray? array)
+        {
+            if (array == null || array.Count == 0) return [];
+
+            List<double> values = new(array.Count);
+            foreach (JToken token in array)
+            {
+                if (TryReadJsonFloat(token, out float value))
+                {
+                    values.Add(value);
+                }
+            }
+
+            return values.ToArray();
         }
     }
 
