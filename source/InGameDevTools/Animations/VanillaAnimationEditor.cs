@@ -115,6 +115,7 @@ public sealed partial class DebugWindowManager
     private bool _vanillaOnionSkinNext = true;
     private float _vanillaOnionSkinOpacity = 0.22f;
     private bool _vanillaIkFollowMove;
+    private bool _vanillaIkLockMoveToDragAxis = true;
     private VanillaIkChainMode _vanillaIkMode = VanillaIkChainMode.AutoLimb;
     private readonly List<string> _vanillaIkChainElementNames = [];
     private bool _vanillaIkHasTarget;
@@ -1976,7 +1977,7 @@ public sealed partial class DebugWindowManager
 
         AnimationKeyFrameElement desiredElement = CloneElement(element);
         SetVanillaGizmoMoveOffsetValues(desiredElement, offsetX, offsetY, offsetZ);
-        if (_vanillaIkFollowMove && TryApplyVanillaViewportIkMove(row, entry, desiredElement))
+        if (_vanillaIkFollowMove && TryApplyVanillaViewportIkMove(row, entry, desiredElement, modelDeltaVector))
         {
             return true;
         }
@@ -3622,6 +3623,22 @@ public sealed partial class DebugWindowManager
                 : "IK Move disabled.";
         }
 
+        if (_vanillaIkFollowMove)
+        {
+            bool lockToDragAxis = _vanillaIkLockMoveToDragAxis;
+            if (ImGui.Checkbox("Lock IK to drag axis##vanilla-ik-lock-drag-axis", ref lockToDragAxis))
+            {
+                _vanillaIkLockMoveToDragAxis = lockToDragAxis;
+                _vanillaStatus = _vanillaIkLockMoveToDragAxis
+                    ? "IK Move target locked to the active Move gizmo axis."
+                    : "IK Move target is free.";
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("When enabled, dragging a Move gizmo axis constrains the IK target to that same world/local axis instead of rebuilding the target from all offset channels.");
+            }
+        }
+
         if (_vanillaIkMode == VanillaIkChainMode.ManualOverride && ImGui.Button("Clear IK chain##vanilla-ik-clear"))
         {
             _vanillaIkChainElementNames.Clear();
@@ -4441,7 +4458,7 @@ public sealed partial class DebugWindowManager
             : new(true, written, created, overwritten, $"Baked half-cycle symmetry for {sourceSide.ToString().ToLowerInvariant()} side: wrote {written}, created {created} keyframe(s), overwrote {overwritten} element(s).");
     }
 
-    private bool TryApplyVanillaViewportIkMove(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrameElement desiredElement)
+    private bool TryApplyVanillaViewportIkMove(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrameElement desiredElement, NVector3 dragModelDelta)
     {
         if (entry.Animation.KeyFrames == null || entry.Animation.KeyFrames.Length == 0) return false;
         int keyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, entry.Animation.KeyFrames.Length - 1);
@@ -4479,7 +4496,9 @@ public sealed partial class DebugWindowManager
             _vanillaIkDragCache = cache;
         }
 
-        Vec3d target = GetVanillaIkDesiredEndTarget(_vanillaIkDragCache, desiredElement);
+        Vec3d target = _vanillaIkLockMoveToDragAxis && dragModelDelta.LengthSquared() > 0.000001f
+            ? Add(_vanillaIkDragCache.EndOrigin, new Vec3d(dragModelDelta.X, dragModelDelta.Y, dragModelDelta.Z))
+            : GetVanillaIkDesiredEndTarget(_vanillaIkDragCache, desiredElement);
         if (!TrySolveVanillaIkCcdToTarget(_vanillaIkDragCache, target, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
@@ -4488,9 +4507,10 @@ public sealed partial class DebugWindowManager
 
         ApplyVanillaIkSolvedElements(keyFrame, chain, solvedElements);
         ApplyVanillaElementEdit(row, entry, keyFrame, chain.ElementNames.ToArray());
+        string targetMode = _vanillaIkLockMoveToDragAxis ? " on drag axis" : "";
         _vanillaStatus = finalDistance <= VanillaIkSolveTolerance
-            ? $"IK Move solved {chain.ElementNames.Count} element(s)."
-            : $"IK Move solved best effort; remaining distance {finalDistance:0.###}.";
+            ? $"IK Move solved {chain.ElementNames.Count} element(s){targetMode}."
+            : $"IK Move solved best effort{targetMode}; remaining distance {finalDistance:0.###}.";
         return true;
     }
 
