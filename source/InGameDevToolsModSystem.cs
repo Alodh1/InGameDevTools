@@ -31,6 +31,8 @@ public sealed class InGameDevToolsModSystem : ModSystem
 
     public static string? BundledOpenDyslexicFontPath { get; private set; }
 
+    public override double ExecuteOrder() => -0.1;
+
     public override bool ShouldLoad(EnumAppSide forSide) => forSide == EnumAppSide.Client;
 
     public override void StartPre(ICoreAPI api)

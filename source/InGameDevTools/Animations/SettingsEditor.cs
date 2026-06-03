@@ -23,6 +23,7 @@ public sealed partial class DebugWindowManager
     private const string SettingsPresetCustom = "Custom";
     private const string SettingsFontDefault = DevToolsConfig.FontDefault;
     private const string SettingsFontOpenDyslexic = "OpenDyslexic-Regular";
+    private static readonly int[] SettingsOpenDyslexicSizes = Enumerable.Range(12, 17).ToArray();
     private static readonly string[] SettingsThemePresets =
     [
         SettingsPresetVintageBrown,
@@ -143,7 +144,6 @@ public sealed partial class DebugWindowManager
 
         DrawSettingsFontControls(ref changed);
         DrawSettingsAccessibilityControls(ref changed);
-        DrawSettingsPreview();
         DrawSettingsAdvancedColors(ref changed);
         DrawSettingsImportExport(ref changed);
 
@@ -169,25 +169,52 @@ public sealed partial class DebugWindowManager
         if (ImGui.Combo("Font##settings-font", ref fontIndex, fontOptions.ToArray(), fontOptions.Count))
         {
             _devToolsConfig.FontName = fontOptions[fontIndex];
-            QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName, _devToolsConfig.FontSize);
+            QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName);
+            changed |= SnapSettingsFontSizeToLoadedOption();
             changed = true;
         }
 
-        int fontSize = _devToolsConfig.FontSize;
-        ImGui.SetNextItemWidth(180f);
-        if (ImGui.SliderInt("Font size##settings-font-size", ref fontSize, 12, 28))
-        {
-            _devToolsConfig.FontSize = fontSize;
-            QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName, _devToolsConfig.FontSize);
-            changed = true;
-        }
+        QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName);
+        DrawSettingsFontSizeControl(ref changed);
 
-        QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName, _devToolsConfig.FontSize);
-        ImGui.TextDisabled(GetSettingsFontStatus(fontOptions));
+        ImGui.TextDisabled(GetSettingsFontStatus());
         if (!string.IsNullOrWhiteSpace(_settingsFontRuntimeStatus))
         {
             ImGui.TextDisabled(_settingsFontRuntimeStatus);
         }
+    }
+
+    private void DrawSettingsFontSizeControl(ref bool changed)
+    {
+        bool isDefaultFont = _devToolsConfig.FontName.Equals(SettingsFontDefault, StringComparison.OrdinalIgnoreCase);
+        int[] sizeOptions = isDefaultFont ? [] : GetSettingsFontSizeOptions(_devToolsConfig.FontName);
+        if (sizeOptions.Length == 0)
+        {
+            ImGui.BeginDisabled();
+            int size = _devToolsConfig.FontSize;
+            ImGui.SetNextItemWidth(180f);
+            ImGui.InputInt("Font size##settings-font-size-unloaded", ref size);
+            ImGui.EndDisabled();
+            return;
+        }
+
+        int selectedIndex = Array.IndexOf(sizeOptions, _devToolsConfig.FontSize);
+        if (selectedIndex < 0)
+        {
+            selectedIndex = FindNearestSizeIndex(sizeOptions, _devToolsConfig.FontSize);
+            _devToolsConfig.FontSize = sizeOptions[selectedIndex];
+            changed = true;
+        }
+
+        string[] labels = sizeOptions.Select(size => $"{size}px").ToArray();
+        ImGui.SetNextItemWidth(180f);
+        if (isDefaultFont) ImGui.BeginDisabled();
+        if (ImGui.Combo("Font size##settings-font-size", ref selectedIndex, labels, labels.Length))
+        {
+            _devToolsConfig.FontSize = sizeOptions[selectedIndex];
+            changed = true;
+        }
+        if (isDefaultFont) ImGui.EndDisabled();
     }
 
     private void DrawSettingsAccessibilityControls(ref bool changed)
@@ -235,35 +262,6 @@ public sealed partial class DebugWindowManager
         return changed;
     }
 
-    private void DrawSettingsPreview()
-    {
-        if (!ImGui.CollapsingHeader("Live preview##settings-preview", ImGuiTreeNodeFlags.DefaultOpen)) return;
-
-        ImGui.TextUnformatted("Text");
-        ImGui.SameLine();
-        ImGui.TextDisabled("Disabled text");
-        ImGui.SameLine();
-        ImGui.TextColored(new NVector4(0.95f, 0.34f, 0.24f, 1f), "Warning text");
-
-        bool checkbox = true;
-        ImGui.Checkbox("Checkbox##settings-preview-checkbox", ref checkbox);
-        ImGui.SameLine();
-        ImGui.Button("Button##settings-preview-button");
-        ImGui.SameLine();
-        bool disabled = false;
-        ImGui.BeginDisabled();
-        ImGui.Button("Disabled##settings-preview-disabled");
-        ImGui.EndDisabled();
-
-        ImGui.SetNextItemWidth(220f);
-        ImGui.SliderFloat("Slider##settings-preview-slider", ref _settingsPreviewSlider, 0f, 1f);
-        ImGui.Selectable("Selected row##settings-preview-selected", true);
-        ImGui.Selectable("Normal row##settings-preview-normal", false);
-        _ = disabled;
-    }
-
-    private float _settingsPreviewSlider = 0.42f;
-
     private void DrawSettingsAdvancedColors(ref bool changed)
     {
         if (!ImGui.CollapsingHeader("Advanced colors##settings-colors")) return;
@@ -275,7 +273,6 @@ public sealed partial class DebugWindowManager
             changed = true;
         }
 
-        ImGui.TextDisabled("Click a swatch to edit. Rows stay compact so every color slot remains readable.");
         float height = 420f * Math.Max(0.75f, _devToolsUiScale);
         ImGuiTableFlags flags =
             ImGuiTableFlags.RowBg |
@@ -439,7 +436,7 @@ public sealed partial class DebugWindowManager
         return fonts.ToList();
     }
 
-    private string GetSettingsFontStatus(IReadOnlyCollection<string> fontOptions)
+    private string GetSettingsFontStatus()
     {
         if (_devToolsConfig.FontName.Equals(SettingsFontDefault, StringComparison.OrdinalIgnoreCase))
         {
@@ -450,6 +447,68 @@ public sealed partial class DebugWindowManager
         return loaded
             ? $"Loaded: {_devToolsConfig.FontName} {_devToolsConfig.FontSize}px."
             : $"{_devToolsConfig.FontName} is not loaded yet.";
+    }
+
+    private int[] GetSettingsFontSizeOptions(string fontName)
+    {
+        if (fontName.Equals(SettingsFontDefault, StringComparison.OrdinalIgnoreCase)) return [];
+        if (fontName.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase) && IsAnyOpenDyslexicSizeLoaded())
+        {
+            return SettingsOpenDyslexicSizes;
+        }
+
+        try
+        {
+            return FontManager.GetLoadedFonts()
+                .Where(entry =>
+                    entry.font.Equals(fontName, StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetFileNameWithoutExtension(entry.font).Equals(fontName, StringComparison.OrdinalIgnoreCase))
+                .Select(entry => entry.size)
+                .Distinct()
+                .OrderBy(size => size)
+                .ToArray();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private bool SnapSettingsFontSizeToLoadedOption()
+    {
+        int[] sizes = GetSettingsFontSizeOptions(_devToolsConfig.FontName);
+        if (sizes.Length == 0 || sizes.Contains(_devToolsConfig.FontSize)) return false;
+
+        _devToolsConfig.FontSize = sizes[FindNearestSizeIndex(sizes, _devToolsConfig.FontSize)];
+        return true;
+    }
+
+    private static int FindNearestSizeIndex(int[] sizes, int target)
+    {
+        int bestIndex = 0;
+        int bestDistance = int.MaxValue;
+        for (int index = 0; index < sizes.Length; index++)
+        {
+            int distance = Math.Abs(sizes[index] - target);
+            if (distance >= bestDistance) continue;
+
+            bestDistance = distance;
+            bestIndex = index;
+        }
+
+        return bestIndex;
+    }
+
+    private static bool IsAnyOpenDyslexicSizeLoaded()
+    {
+        try
+        {
+            return FontManager.GetLoadedFonts().Any(entry => entry.font.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool TryResolveSettingsFontName(string fontName, int size, out string resolvedName)
@@ -476,35 +535,39 @@ public sealed partial class DebugWindowManager
         return false;
     }
 
-    private void QueueSettingsFontRuntimeLoadIfNeeded(string fontName, int size)
+    private void QueueSettingsFontRuntimeLoadIfNeeded(string fontName)
     {
         if (!fontName.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase)) return;
-        if (TryResolveSettingsFontName(fontName, size, out _)) return;
+        if (IsAnyOpenDyslexicSizeLoaded()) return;
         if (_settingsOpenDyslexicLoadQueued) return;
 
-        string loadKey = $"{fontName}:{size}";
+        string loadKey = fontName;
         if (_settingsFailedRuntimeFontLoads.Contains(loadKey)) return;
 
         _settingsOpenDyslexicLoadQueued = true;
-        _settingsFontRuntimeStatus = $"Loading {SettingsFontOpenDyslexic} {size}px...";
+        _settingsFontRuntimeStatus = $"Loading {SettingsFontOpenDyslexic} sizes...";
         _api.Event.EnqueueMainThreadTask(() =>
         {
             _settingsOpenDyslexicLoadQueued = false;
-            _settingsFontRuntimeStatus = TryLoadOpenDyslexicRuntime(size);
-            if (!TryResolveSettingsFontName(fontName, size, out _))
+            _settingsFontRuntimeStatus = TryLoadOpenDyslexicRuntime();
+            if (!IsAnyOpenDyslexicSizeLoaded())
             {
                 _settingsFailedRuntimeFontLoads.Add(loadKey);
+            }
+            else
+            {
+                SnapSettingsFontSizeToLoadedOption();
             }
         }, "ingamedevtools-load-opendyslexic-font");
     }
 
-    private string TryLoadOpenDyslexicRuntime(int size)
+    private string TryLoadOpenDyslexicRuntime()
     {
         try
         {
-            if (TryResolveSettingsFontName(SettingsFontOpenDyslexic, size, out _))
+            if (IsAnyOpenDyslexicSizeLoaded())
             {
-                return $"{SettingsFontOpenDyslexic} {size}px is loaded.";
+                return $"{SettingsFontOpenDyslexic} is loaded.";
             }
 
             string? path = InGameDevToolsModSystem.BundledOpenDyslexicFontPath;
@@ -513,12 +576,20 @@ public sealed partial class DebugWindowManager
                 return "OpenDyslexic font file was not extracted; restart may be required.";
             }
 
-            ImFontPtr font = ImGui.GetIO().Fonts.AddFontFromFileTTF(path, size);
-            RegisterRuntimeFontWithVSImGui(path, size, font);
-            bool refreshed = RefreshVSImGuiFontTexture();
+            int loadedCount = 0;
+            foreach (int size in SettingsOpenDyslexicSizes)
+            {
+                if (TryResolveSettingsFontName(SettingsFontOpenDyslexic, size, out _)) continue;
+
+                ImFontPtr font = ImGui.GetIO().Fonts.AddFontFromFileTTF(path, size);
+                RegisterRuntimeFontWithVSImGui(path, size, font);
+                loadedCount++;
+            }
+
+            bool refreshed = loadedCount == 0 || RefreshVSImGuiFontTexture();
             return refreshed
-                ? $"Loaded {SettingsFontOpenDyslexic} {size}px at runtime."
-                : $"Loaded {SettingsFontOpenDyslexic} {size}px; texture refresh may require reopening the ImGui window.";
+                ? $"Loaded {SettingsFontOpenDyslexic} sizes at runtime."
+                : $"Loaded {SettingsFontOpenDyslexic} sizes; texture refresh may require reopening the ImGui window.";
         }
         catch (Exception exception)
         {
