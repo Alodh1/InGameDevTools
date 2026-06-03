@@ -3,6 +3,7 @@ using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using OpenTK.Graphics.OpenGL4;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -144,6 +145,8 @@ public sealed partial class DebugWindowManager
     private WorldgenLoadedWorldOracleProfile? _worldgenPreviewOracleProfile;
     private string _worldgenPreviewOracleStatus = "No loaded-world comparison yet.";
     private bool _worldgenPreviewShowOracleDiff = true;
+    private double _worldgenPreview3DDrawAverageMs;
+    private string _worldgenPreview3DDrawProfileStatus = "3D draw profile not sampled yet.";
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -4052,6 +4055,7 @@ public sealed partial class DebugWindowManager
             return;
         }
 
+        long drawProfileStart = Stopwatch.GetTimestamp();
         WorldgenTerrainShapeSampler sampler = CreateWorldgenTerrainShapeSampler(row, draft, out string samplerStatus);
 
         float width = max.X - min.X;
@@ -4132,7 +4136,8 @@ public sealed partial class DebugWindowManager
         drawList.AddLine(origin, xAxis, axisX, 2f);
         drawList.AddLine(origin, zAxis, axisZ, 2f);
 
-        _worldgenPreviewRasterStatus = $"3D draft surface: {grid}x{grid}; height {minHeight:0.000}-{maxHeight:0.000}; {samplerStatus}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
+        string drawProfile = UpdateWorldgen3DDrawProfile("draft surface draw-list", cells.Count, grid * grid, drawProfileStart);
+        _worldgenPreviewRasterStatus = $"3D draft surface: {grid}x{grid}; height {minHeight:0.000}-{maxHeight:0.000}; {samplerStatus}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}; {drawProfile}";
     }
 
     private void DrawWorldgenPeekRegionPreview(ImDrawListPtr drawList, NVector2 min, NVector2 max, WorldgenPeekRegionProfile profile)
@@ -4148,6 +4153,7 @@ public sealed partial class DebugWindowManager
             return;
         }
 
+        long drawProfileStart = Stopwatch.GetTimestamp();
         float width = max.X - min.X;
         float height = max.Y - min.Y;
         float viewportMinDimension = Math.Max(1f, Math.Min(width, height));
@@ -4206,7 +4212,22 @@ public sealed partial class DebugWindowManager
         drawList.AddLine(origin, zAxis, axisZ, 2f);
 
         string oracleSuffix = oracleProfile == null ? "" : $"; oracle diff {oracleProfile.HeightMismatchCells}/{oracleProfile.ComparedCells} height, {oracleProfile.TopBlockMismatchCells} block";
-        _worldgenPreviewRasterStatus = $"3D real {profile.PassLabel} region: chunks {profile.OriginChunkX},{profile.OriginChunkZ} size {profile.RegionSizeChunks}x{profile.RegionSizeChunks}; {faces.Count} visible face(s); height {profile.MinHeight}-{profile.MaxHeight}{oracleSuffix}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
+        string drawProfile = UpdateWorldgen3DDrawProfile("real region draw-list", faces.Count, widthBlocks * depthBlocks, drawProfileStart);
+        _worldgenPreviewRasterStatus = $"3D real {profile.PassLabel} region: chunks {profile.OriginChunkX},{profile.OriginChunkZ} size {profile.RegionSizeChunks}x{profile.RegionSizeChunks}; {faces.Count} visible face(s); height {profile.MinHeight}-{profile.MaxHeight}{oracleSuffix}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}; {drawProfile}";
+    }
+
+    private string UpdateWorldgen3DDrawProfile(string path, int primitives, int samples, long startedTimestamp)
+    {
+        double elapsedMs = Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds;
+        _worldgenPreview3DDrawAverageMs = _worldgenPreview3DDrawAverageMs <= 0.0
+            ? elapsedMs
+            : _worldgenPreview3DDrawAverageMs * 0.85 + elapsedMs * 0.15;
+
+        string recommendation = _worldgenPreview3DDrawAverageMs >= 8.0 || primitives >= 12000
+            ? "mesh/FBO recommended"
+            : "draw-list OK";
+        _worldgenPreview3DDrawProfileStatus = $"{path}: {primitives} primitive(s), {samples} sample(s), {elapsedMs:0.00} ms last, {_worldgenPreview3DDrawAverageMs:0.00} ms avg; {recommendation}";
+        return _worldgenPreview3DDrawProfileStatus;
     }
 
     private void AddWorldgenPeekTopFace(
