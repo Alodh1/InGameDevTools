@@ -57,6 +57,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
     public void Dispose()
     {
+        RestoreWorldgenPreviewForEditorTeardown("devtools disposed");
         FlushDevToolsConfigSave(force: true);
         if (!_drawSubscribed || _imguiModSystem == null) return;
 
@@ -762,6 +763,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGuiWindowFlags windowFlags = ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings;
         if (_devToolsCollapsed)
         {
+            RestoreWorldgenPreviewForEditorTeardown("devtools collapsed");
             DrawCollapsedDevToolsWindow(displaySize, windowFlags);
             _detachedEditorCamera?.Update(deltaSeconds, editorOpen: false);
             FlushDevToolsConfigSave(force: false);
@@ -864,10 +866,18 @@ public sealed partial class DebugWindowManager : IDisposable
                 }
                 ImGui.EndTabBar();
             }
+            if (_activeDevToolsTab != DevToolsTab.Worldgen)
+            {
+                RestoreWorldgenPreviewForEditorTeardown("left Worldgen tab");
+            }
             ImGui.SetWindowFontScale(1f);
             DrawSourceSavePopup();
         }
         ImGui.End();
+        if (!_showAnimationEditor)
+        {
+            RestoreWorldgenPreviewForEditorTeardown("devtools window closed");
+        }
 
         DrawVanillaPoppedOutViewport();
 

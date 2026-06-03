@@ -19,6 +19,7 @@ namespace InGameDevTools.Animations;
 public sealed partial class DebugWindowManager
 {
     private const int WorldgenIndexBatchSize = 80;
+    private const double WorldgenPeekWatchdogSeconds = 10.0;
     private const int WorldgenPreviewModeGradient = 0;
     private const int WorldgenPreviewModeClimate = 1;
     private const int WorldgenPreviewModeForest = 2;
@@ -120,6 +121,9 @@ public sealed partial class DebugWindowManager
     private string _worldgenPreviewRasterStatus = "Raster cache empty.";
     private bool _worldgenPreviewPeekPending;
     private string _worldgenPreviewPeekStatus = "No real chunk peek requested yet.";
+    private readonly object _worldgenActivePeekGate = new();
+    private WorldgenActivePeek? _worldgenActivePeek;
+    private long _worldgenPeekSerial;
     private int _worldgenPreviewRegionSize = 1;
     private int _worldgenPreviewPassIndex;
     private bool _worldgenPreviewAutoPeekOnEdit = true;
@@ -139,6 +143,7 @@ public sealed partial class DebugWindowManager
 
         try
         {
+            ProcessWorldgenPeekWatchdog();
             EnsureWorldgenEntriesIndexed();
 
             NVector2 available = ImGui.GetContentRegionAvail();
@@ -830,6 +835,10 @@ public sealed partial class DebugWindowManager
             _worldgenPreviewAutoMode = false;
             if (_worldgenPreviewMode != previewModeBefore)
             {
+                if (previewModeBefore == WorldgenPreviewModeRegion3D && _worldgenPreviewMode != WorldgenPreviewModeRegion3D)
+                {
+                    RestoreActiveWorldgenPeek("preview mode changed");
+                }
                 _worldgenPreviewMapLayer = null;
                 InvalidateWorldgenPreviewRasterCache();
                 ScheduleWorldgenRealtimePeek("preview mode changed");
@@ -2681,6 +2690,7 @@ public sealed partial class DebugWindowManager
     {
         try
         {
+            RestoreActiveWorldgenPeek("singleplayer server API refresh");
             _worldgenPreviewGenMaps = null;
             _worldgenPreviewGenDeposits = null;
             _worldgenPreviewMapLayer = null;
@@ -2708,6 +2718,7 @@ public sealed partial class DebugWindowManager
 
     private void ClearWorldgenPeekProfile(string status)
     {
+        RestoreActiveWorldgenPeek(status);
         _worldgenPreviewPeekPending = false;
         _worldgenPreviewPeekProfile = null;
         _worldgenPreviewPeekCacheKey = null;
@@ -2887,6 +2898,84 @@ public sealed partial class DebugWindowManager
         return $"{_worldgenLoadedKey}:{_worldgenRowIndex}:{_worldgenCurrentText.Length}:{StringComparer.Ordinal.GetHashCode(_worldgenCurrentText)}";
     }
 
+    private void ProcessWorldgenPeekWatchdog()
+    {
+        WorldgenActivePeek? activePeek = _worldgenActivePeek;
+        if (activePeek == null) return;
+
+        double elapsedSeconds = (DateTime.UtcNow - activePeek.StartedUtc).TotalSeconds;
+        if (elapsedSeconds < WorldgenPeekWatchdogSeconds) return;
+
+        string restoreSummary = RestoreActiveWorldgenPeek($"real terrain peek timed out after {elapsedSeconds:0.0}s");
+        _worldgenPreviewPeekStatus = $"Real terrain peek timed out after {elapsedSeconds:0.0}s; restored live worldgen state. {restoreSummary}";
+        _worldgenDiagnostics.Warning("Worldgen real terrain peek timed out", _worldgenPreviewPeekStatus);
+    }
+
+    private void RestoreWorldgenPreviewForEditorTeardown(string reason)
+    {
+        RestoreActiveWorldgenPeek(reason);
+    }
+
+    private string RestoreActiveWorldgenPeek(string reason)
+    {
+        WorldgenActivePeek? activePeek;
+        lock (_worldgenActivePeekGate)
+        {
+            activePeek = _worldgenActivePeek;
+            _worldgenActivePeek = null;
+        }
+
+        if (activePeek == null) return "No active real terrain peek.";
+
+        string restoreStatus = activePeek.RestoreLiveState();
+        WorldgenPeekCleanupResult cleanup = activePeek.CleanupPreviewColumns();
+        if (cleanup.FailedColumns > 0)
+        {
+            _worldgenDiagnostics.Warning($"Worldgen preview cleanup had failures after {reason}", cleanup.Details);
+        }
+
+        _worldgenPreviewPeekPending = false;
+        _worldgenPreviewPeekDirty = false;
+        _worldgenPreviewAutoPeekStatus = $"Auto 3D refresh stopped: {reason}.";
+        return $"{restoreStatus}; {cleanup.Summary}";
+    }
+
+    private void TrackActiveWorldgenPeek(WorldgenActivePeek activePeek)
+    {
+        RestoreActiveWorldgenPeek("new real terrain peek replaced the previous one");
+        lock (_worldgenActivePeekGate)
+        {
+            _worldgenActivePeek = activePeek;
+        }
+    }
+
+    private bool TryCompleteActiveWorldgenPeek(WorldgenActivePeek activePeek, out string restoreStatus, out WorldgenPeekCleanupResult cleanup)
+    {
+        lock (_worldgenActivePeekGate)
+        {
+            if (!ReferenceEquals(_worldgenActivePeek, activePeek))
+            {
+                restoreStatus = "peek was already cancelled";
+                cleanup = WorldgenPeekCleanupResult.Empty;
+                return false;
+            }
+
+            _worldgenActivePeek = null;
+        }
+
+        restoreStatus = activePeek.RestoreLiveState();
+        cleanup = activePeek.CleanupPreviewColumns();
+        return true;
+    }
+
+    private bool IsActiveWorldgenPeek(WorldgenActivePeek activePeek)
+    {
+        lock (_worldgenActivePeekGate)
+        {
+            return ReferenceEquals(_worldgenActivePeek, activePeek);
+        }
+    }
+
     private void RequestWorldgenPeekRegion(bool forceRefresh = false, string reason = "manual")
     {
         ICoreServerAPI? serverApi = _worldgenPreviewServerApi;
@@ -2954,6 +3043,7 @@ public sealed partial class DebugWindowManager
         Exception? firstFailure = null;
         bool restoreSendChunks = true;
         bool sendChunksChanged = false;
+        WorldgenActivePeek? activePeek = null;
 
         for (int dz = 0; dz < regionSize; dz++)
         {
@@ -2982,11 +3072,36 @@ public sealed partial class DebugWindowManager
                 _worldgenDiagnostics.Warning($"Worldgen peek could not pause SendChunks: {sendChunksError}");
             }
 
+            activePeek = new WorldgenActivePeek(
+                ++_worldgenPeekSerial,
+                worldManager,
+                draftScope,
+                draftScopeStatus,
+                autoGenerateChanged,
+                restoreAutoGenerate,
+                sendChunksChanged,
+                restoreSendChunks,
+                requestedColumns,
+                initiallyLoadedColumns,
+                $"{passLabel} {regionSize}x{regionSize} at {originChunkX},{originChunkZ}");
+            TrackActiveWorldgenPeek(activePeek);
+
             void OnGenerated(Dictionary<Vec2i, IServerChunk[]> columns)
             {
+                if (!IsActiveWorldgenPeek(activePeek))
+                {
+                    WorldgenPeekCleanupResult lateCleanup = activePeek.CleanupReturnedColumns(columns);
+                    if (lateCleanup.FailedColumns > 0)
+                    {
+                        _worldgenDiagnostics.Warning("Worldgen late preview cleanup had failures", lateCleanup.Details);
+                    }
+                    return;
+                }
+
                 WorldgenPeekRegionProfile? profileToDispatch = null;
                 Exception? failureToDispatch = null;
                 WorldgenPeekCleanupResult cleanupToDispatch = WorldgenPeekCleanupResult.Empty;
+                string restoreStatusToDispatch = "";
                 bool shouldDispatch = false;
 
                 lock (gate)
@@ -3025,15 +3140,6 @@ public sealed partial class DebugWindowManager
                             {
                                 profileToDispatch = BuildWorldgenPeekRegionProfile(regionColumns, originChunkX, originChunkZ, regionSize, chunkSize, untilPass, passLabel);
                             }
-
-                            cleanupToDispatch = CleanupWorldgenPeekColumns(worldManager, requestedColumns, initiallyLoadedColumns);
-                            if (profileToDispatch != null)
-                            {
-                                string draftSummary = draftScope.Applied
-                                    ? $"{cleanupToDispatch.Summary}; {draftScope.Status}"
-                                    : $"{cleanupToDispatch.Summary}; {draftScopeStatus}";
-                                profileToDispatch = profileToDispatch with { CleanupSummary = draftSummary };
-                            }
                         }
                         catch (Exception exception)
                         {
@@ -3044,14 +3150,22 @@ public sealed partial class DebugWindowManager
 
                 if (!shouldDispatch) return;
 
-                draftScope.Dispose();
-                if (autoGenerateChanged)
+                if (!TryCompleteActiveWorldgenPeek(activePeek, out restoreStatusToDispatch, out cleanupToDispatch))
                 {
-                    TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
+                    WorldgenPeekCleanupResult lateCleanup = activePeek.CleanupReturnedColumns(columns);
+                    if (lateCleanup.FailedColumns > 0)
+                    {
+                        _worldgenDiagnostics.Warning("Worldgen late preview cleanup had failures", lateCleanup.Details);
+                    }
+                    return;
                 }
-                if (sendChunksChanged)
+
+                if (profileToDispatch != null)
                 {
-                    TrySetWorldgenSendChunks(worldManager, restoreSendChunks, out _);
+                    string draftSummary = activePeek.DraftApplied
+                        ? $"{cleanupToDispatch.Summary}; {activePeek.DraftStatus}; {restoreStatusToDispatch}"
+                        : $"{cleanupToDispatch.Summary}; {activePeek.DraftFallbackStatus}; {restoreStatusToDispatch}";
+                    profileToDispatch = profileToDispatch with { CleanupSummary = draftSummary };
                 }
 
                 _api.Event.EnqueueMainThreadTask(() =>
@@ -3090,18 +3204,27 @@ public sealed partial class DebugWindowManager
         }
         catch (Exception exception)
         {
-            draftScope.Dispose();
-            if (autoGenerateChanged)
+            string restoreSummary;
+            if (activePeek != null)
             {
-                TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
+                restoreSummary = RestoreActiveWorldgenPeek($"real {passLabel} region peek request failed");
             }
-            if (sendChunksChanged)
+            else
             {
-                TrySetWorldgenSendChunks(worldManager, restoreSendChunks, out _);
+                draftScope.Dispose();
+                if (autoGenerateChanged)
+                {
+                    TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
+                }
+                if (sendChunksChanged)
+                {
+                    TrySetWorldgenSendChunks(worldManager, restoreSendChunks, out _);
+                }
+                restoreSummary = "Restored local peek setup.";
             }
 
             _worldgenPreviewPeekPending = false;
-            _worldgenPreviewPeekStatus = $"Real {passLabel} region peek request failed: {exception.Message}";
+            _worldgenPreviewPeekStatus = $"Real {passLabel} region peek request failed: {exception.Message}; {restoreSummary}";
             _worldgenDiagnostics.Exception("Worldgen region peek request failed", exception);
         }
     }
@@ -5215,6 +5338,125 @@ public sealed partial class DebugWindowManager
         string Details)
     {
         public static WorldgenPeekCleanupResult Empty { get; } = new(0, 0, 0, "Cleanup not run.", "");
+    }
+
+    private sealed class WorldgenActivePeek
+    {
+        private readonly object _gate = new();
+        private readonly IWorldManagerAPI _worldManager;
+        private readonly WorldgenPeekDraftScope _draftScope;
+        private readonly bool _autoGenerateChanged;
+        private readonly bool _restoreAutoGenerate;
+        private readonly bool _sendChunksChanged;
+        private readonly bool _restoreSendChunks;
+        private readonly IReadOnlyList<Vec2i> _requestedColumns;
+        private readonly IReadOnlyDictionary<Vec2i, bool> _initiallyLoadedColumns;
+        private bool _restored;
+        private bool _cleanupRun;
+
+        public WorldgenActivePeek(
+            long id,
+            IWorldManagerAPI worldManager,
+            WorldgenPeekDraftScope draftScope,
+            string draftFallbackStatus,
+            bool autoGenerateChanged,
+            bool restoreAutoGenerate,
+            bool sendChunksChanged,
+            bool restoreSendChunks,
+            IReadOnlyList<Vec2i> requestedColumns,
+            IReadOnlyDictionary<Vec2i, bool> initiallyLoadedColumns,
+            string label)
+        {
+            Id = id;
+            _worldManager = worldManager;
+            _draftScope = draftScope;
+            DraftFallbackStatus = draftFallbackStatus;
+            _autoGenerateChanged = autoGenerateChanged;
+            _restoreAutoGenerate = restoreAutoGenerate;
+            _sendChunksChanged = sendChunksChanged;
+            _restoreSendChunks = restoreSendChunks;
+            _requestedColumns = requestedColumns.ToArray();
+            _initiallyLoadedColumns = new Dictionary<Vec2i, bool>(initiallyLoadedColumns);
+            Label = label;
+            StartedUtc = DateTime.UtcNow;
+        }
+
+        public long Id { get; }
+        public DateTime StartedUtc { get; }
+        public string Label { get; }
+        public bool DraftApplied => _draftScope.Applied;
+        public string DraftStatus => _draftScope.Status;
+        public string DraftFallbackStatus { get; }
+
+        public string RestoreLiveState()
+        {
+            lock (_gate)
+            {
+                if (_restored)
+                {
+                    return "Live worldgen state was already restored.";
+                }
+
+                _restored = true;
+            }
+
+            List<string> failures = [];
+            try
+            {
+                _draftScope.Dispose();
+            }
+            catch (Exception exception)
+            {
+                failures.Add($"draft restore failed: {exception.Message}");
+            }
+
+            if (_autoGenerateChanged && !TrySetWorldgenAutoGenerateChunks(_worldManager, _restoreAutoGenerate, out string? autoGenerateError))
+            {
+                failures.Add($"AutoGenerateChunks restore failed: {autoGenerateError}");
+            }
+
+            if (_sendChunksChanged && !TrySetWorldgenSendChunks(_worldManager, _restoreSendChunks, out string? sendChunksError))
+            {
+                failures.Add($"SendChunks restore failed: {sendChunksError}");
+            }
+
+            return failures.Count == 0
+                ? "Restored live worldgen state."
+                : "Restored live worldgen state with failures: " + string.Join("; ", failures);
+        }
+
+        public WorldgenPeekCleanupResult CleanupPreviewColumns()
+        {
+            lock (_gate)
+            {
+                if (_cleanupRun)
+                {
+                    return WorldgenPeekCleanupResult.Empty;
+                }
+
+                _cleanupRun = true;
+            }
+
+            return CleanupWorldgenPeekColumns(_worldManager, _requestedColumns, _initiallyLoadedColumns);
+        }
+
+        public WorldgenPeekCleanupResult CleanupReturnedColumns(Dictionary<Vec2i, IServerChunk[]> columns)
+        {
+            if (columns.Count == 0) return WorldgenPeekCleanupResult.Empty;
+
+            List<Vec2i> returnedColumns = [];
+            foreach (Vec2i key in columns.Keys)
+            {
+                if (_initiallyLoadedColumns.ContainsKey(key))
+                {
+                    returnedColumns.Add(key);
+                }
+            }
+
+            return returnedColumns.Count == 0
+                ? WorldgenPeekCleanupResult.Empty
+                : CleanupWorldgenPeekColumns(_worldManager, returnedColumns, _initiallyLoadedColumns);
+        }
     }
 
     private sealed class WorldgenPeekDraftScope : IDisposable
