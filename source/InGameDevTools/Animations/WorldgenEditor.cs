@@ -587,6 +587,8 @@ public sealed partial class DebugWindowManager
         changed |= DrawWorldgenFloatField(row, "maxRain", "Max rain");
         changed |= DrawWorldgenFloatField(row, "minForest", "Min forest");
         changed |= DrawWorldgenFloatField(row, "maxForest", "Max forest");
+        changed |= DrawWorldgenFloatField(row, "minShrub", "Min shrub");
+        changed |= DrawWorldgenFloatField(row, "maxShrub", "Max shrub");
         changed |= DrawWorldgenFloatField(row, "minFertility", "Min fertility");
         changed |= DrawWorldgenFloatField(row, "maxFertility", "Max fertility");
         changed |= DrawWorldgenFloatField(row, "minY", "Min Y");
@@ -1060,8 +1062,9 @@ public sealed partial class DebugWindowManager
         {
             string label = GetWorldgenRowLabel(WorldgenAssetKind.BlockPatches, row, _worldgenRowIndex);
             ImGui.TextDisabled($"Using selected draft block patch: {label}.");
-            ImGui.TextDisabled("Suitability uses live climate/forest maps plus draft temp/rain/forest/chance constraints.");
-            ImGui.TextDisabled("Fertility and Y constraints are shown in JSON but deferred until the terrain/surface pass.");
+            ImGui.TextDisabled("2D suitability is approximate: live climate/forest/shrub maps plus draft temp/rain/forest/shrub constraints.");
+            ImGui.TextDisabled("Exact engine checks still require generated terrain Y, surface/liquid block, substrate, map density, and category collisions.");
+            ImGui.TextDisabled("Chance affects expected attempt density, not the suitability mask.");
         }
         else
         {
@@ -1660,11 +1663,13 @@ public sealed partial class DebugWindowManager
         {
             int climateValue = genMaps.climateGen.GenLayer(blockX, blockZ, 1, 1)[0];
             int forestValue = genMaps.forestGen?.GenLayer(blockX, blockZ, 1, 1)[0] ?? 0;
-            WorldgenClimateSample sample = DecodeWorldgenClimateSample(climateValue, forestValue);
+            int? shrubValue = genMaps.bushGen?.GenLayer(blockX, blockZ, 1, 1)[0];
+            WorldgenClimateSample sample = DecodeWorldgenClimateSample(climateValue, forestValue, shrubValue);
             WorldgenBlockPatchDraft draft = WorldgenBlockPatchDraft.FromJson(row);
             bool suitable = draft.IsSuitable(sample);
             string label = GetWorldgenRowLabel(WorldgenAssetKind.BlockPatches, row, _worldgenRowIndex);
-            return $"Block patch {label}: {(suitable ? "suitable" : "rejected")}; temp {sample.TemperatureCelsius:0.#}C, rain {sample.Rain:0.###}, forest {sample.Forest:0.###}, chance {draft.Chance:0.###}";
+            string shrub = sample.HasShrub ? $", shrub {sample.Shrub:0.###}" : "";
+            return $"Block patch {label}: {(suitable ? "approx suitable" : "approx rejected")}; temp {sample.TemperatureCelsius:0.#}C, rain {sample.Rain:0.###}, forest {sample.Forest:0.###}{shrub}, chance {draft.Chance:0.###}. Unchecked: terrain Y, surface/liquid block, substrate, map density, category collisions.";
         }
         catch (Exception exception)
         {
@@ -4287,6 +4292,7 @@ public sealed partial class DebugWindowManager
 
         MapLayerBase climate = genMaps.climateGen;
         MapLayerBase? forest = genMaps.forestGen;
+        MapLayerBase? shrub = genMaps.bushGen;
         WorldgenBlockPatchDraft draft = WorldgenBlockPatchDraft.FromJson(row);
 
         try
@@ -4300,14 +4306,16 @@ public sealed partial class DebugWindowManager
                     int worldX = (int)MathF.Floor(centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX));
                     int climateValue = climate.GenLayer(worldX, worldZ, 1, 1)[0];
                     int forestValue = forest?.GenLayer(worldX, worldZ, 1, 1)[0] ?? 0;
-                    WorldgenClimateSample sample = DecodeWorldgenClimateSample(climateValue, forestValue);
+                    int? shrubValue = shrub?.GenLayer(worldX, worldZ, 1, 1)[0];
+                    WorldgenClimateSample sample = DecodeWorldgenClimateSample(climateValue, forestValue, shrubValue);
                     bool matches = draft.IsSuitable(sample);
                     if (matches) suitable++;
                     colors[z * cellsX + x] = BuildWorldgenBlockPatchPreviewColor(sample, draft, matches);
                 }
             }
 
-            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; block-patch suitable {suitable}/{cellsX * cellsZ}";
+            string shrubStatus = shrub == null ? "; shrub unavailable" : "; shrub sampled";
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; approximate block-patch suitable {suitable}/{cellsX * cellsZ}{shrubStatus}; exact terrain/surface checks deferred";
             error = "";
             return true;
         }
@@ -4623,7 +4631,7 @@ public sealed partial class DebugWindowManager
             1f));
     }
 
-    private static WorldgenClimateSample DecodeWorldgenClimateSample(int climateValue, int forestValue)
+    private static WorldgenClimateSample DecodeWorldgenClimateSample(int climateValue, int forestValue, int? shrubValue = null)
     {
         int rawTemp;
         int rawRain;
@@ -4641,7 +4649,8 @@ public sealed partial class DebugWindowManager
         float tempCelsius = rawTemp / 4f - 20f;
         float rain = Math.Clamp(rawRain / 255f, 0f, 1f);
         float forest = Math.Clamp(forestValue / 255f, 0f, 1f);
-        return new WorldgenClimateSample(tempCelsius, rain, forest, 0f);
+        float shrub = shrubValue == null ? 0f : Math.Clamp(shrubValue.Value / 255f, 0f, 1f);
+        return new WorldgenClimateSample(tempCelsius, rain, forest, shrub, shrubValue != null, 0f);
     }
 
     private static uint BuildWorldgenPreviewColor(long seed, float worldX, float worldZ, int mode)
@@ -5861,7 +5870,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private readonly record struct WorldgenClimateSample(float TemperatureCelsius, float Rain, float Forest, float Fertility, bool HasFertility = false);
+    private readonly record struct WorldgenClimateSample(float TemperatureCelsius, float Rain, float Forest, float Shrub, bool HasShrub, float Fertility, bool HasFertility = false);
 
     private readonly record struct WorldgenValueRange(float? Min, float? Max)
     {
@@ -5885,6 +5894,7 @@ public sealed partial class DebugWindowManager
         WorldgenValueRange Temperature,
         WorldgenValueRange Rain,
         WorldgenValueRange Forest,
+        WorldgenValueRange Shrub,
         WorldgenValueRange Fertility,
         float Chance)
     {
@@ -5894,6 +5904,7 @@ public sealed partial class DebugWindowManager
                 ReadRange(row, "minTemp", "maxTemp"),
                 ReadRange(row, "minRain", "maxRain"),
                 ReadRange(row, "minForest", "maxForest"),
+                ReadRange(row, "minShrub", "maxShrub"),
                 ReadRange(row, "minFertility", "maxFertility"),
                 TryReadJsonFloat(row["chance"], out float chance) ? chance : 1f);
         }
@@ -5903,6 +5914,7 @@ public sealed partial class DebugWindowManager
             if (!Temperature.Contains(sample.TemperatureCelsius)) return false;
             if (!Rain.Contains(sample.Rain)) return false;
             if (!Forest.Contains(sample.Forest)) return false;
+            if (sample.HasShrub && !Shrub.Contains(sample.Shrub)) return false;
             if (sample.HasFertility && !Fertility.Contains(sample.Fertility)) return false;
             return true;
         }
@@ -5912,8 +5924,9 @@ public sealed partial class DebugWindowManager
             float temp = Temperature.RejectionDistance(sample.TemperatureCelsius) / 60f;
             float rain = Rain.RejectionDistance(sample.Rain);
             float forest = Forest.RejectionDistance(sample.Forest);
+            float shrub = sample.HasShrub ? Shrub.RejectionDistance(sample.Shrub) : 0f;
             float fertility = sample.HasFertility ? Fertility.RejectionDistance(sample.Fertility) : 0f;
-            return Math.Clamp(temp + rain + forest + fertility, 0f, 1f);
+            return Math.Clamp(temp + rain + forest + shrub + fertility, 0f, 1f);
         }
 
         private static WorldgenValueRange ReadRange(JObject row, string minName, string maxName)
