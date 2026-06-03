@@ -3299,59 +3299,91 @@ public sealed partial class DebugWindowManager
 
         ImGui.SeparatorText("Element");
         string[] knownElements = GetShapeElementNames(document).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
-        if (knownElements.Length > 0)
-        {
-            _vanillaSelection.AddElementIndex = Math.Clamp(_vanillaSelection.AddElementIndex, 0, knownElements.Length - 1);
-            ImGui.Combo("Known element##vanilla-add-element", ref _vanillaSelection.AddElementIndex, knownElements, knownElements.Length);
-            if (ImGui.Button("Add selected element##vanilla-element"))
-            {
-                string name = knownElements[_vanillaSelection.AddElementIndex];
-                keyFrame.Elements.TryAdd(name, new AnimationKeyFrameElement());
-                _vanillaSelection.ElementName = name;
-                MarkVanillaDirty(document);
-                RefreshVanillaPreviewAfterEdit(row, name);
-            }
-        }
+        HashSet<string> keyFrameElementNames = new(keyFrame.Elements.Keys, StringComparer.OrdinalIgnoreCase);
+        HashSet<string> knownElementNames = new(knownElements, StringComparer.OrdinalIgnoreCase);
+        string[] elementNames = knownElements
+            .Concat(keyFrame.Elements.Keys)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
-        string[] elementNames = keyFrame.Elements.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
-        bool selectedKnownShapeElement = IsKnownVanillaShapeElement(document, _vanillaSelection.ElementName);
-        if (elementNames.Length == 0 && !selectedKnownShapeElement)
+        if (elementNames.Length == 0)
         {
-            ImGui.TextDisabled("No animated elements in this keyframe.");
+            ImGui.TextDisabled("No shape elements are available for this animation.");
             return;
         }
 
-        if (elementNames.Length > 0)
+        if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName) ||
+            (!keyFrameElementNames.Contains(_vanillaSelection.ElementName) && !knownElementNames.Contains(_vanillaSelection.ElementName)))
         {
-            int selectedElementIndex = Math.Max(0, Array.FindIndex(elementNames, name => string.Equals(name, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase)));
-            if (selectedElementIndex >= elementNames.Length) selectedElementIndex = 0;
-            DrawVanillaElementList(elementNames, selectedElementIndex);
+            _vanillaSelection.ElementName = elementNames[0];
         }
 
-        if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName) || !keyFrame.Elements.TryGetValue(_vanillaSelection.ElementName, out AnimationKeyFrameElement? element))
+        int selectedElementIndex = Math.Max(0, Array.FindIndex(elementNames, name => string.Equals(name, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase)));
+        if (selectedElementIndex >= elementNames.Length) selectedElementIndex = 0;
+        DrawVanillaElementList(elementNames, selectedElementIndex, keyFrameElementNames);
+
+        bool selectedInKeyFrame = keyFrame.Elements.TryGetValue(_vanillaSelection.ElementName, out AnimationKeyFrameElement? element) && element != null;
+        bool selectedKnownShapeElement = knownElementNames.Contains(_vanillaSelection.ElementName);
+
+        bool canAddSelected = !selectedInKeyFrame && selectedKnownShapeElement;
+        if (!canAddSelected) ImGui.BeginDisabled();
+        if (ImGui.Button("Add selected channel##vanilla-element"))
         {
-            if (selectedKnownShapeElement)
+            element = new AnimationKeyFrameElement();
+            keyFrame.Elements[_vanillaSelection.ElementName] = element;
+            selectedInKeyFrame = true;
+            keyFrameElementNames.Add(_vanillaSelection.ElementName);
+            MarkVanillaDirty(document);
+            RefreshVanillaPreviewAfterEdit(row, _vanillaSelection.ElementName);
+        }
+        if (!canAddSelected) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        string[] missingKnownElements = knownElements.Where(name => !keyFrameElementNames.Contains(name)).ToArray();
+        if (missingKnownElements.Length == 0) ImGui.BeginDisabled();
+        if (ImGui.Button("Add all shape elements##vanilla-element"))
+        {
+            if (AddMissingVanillaElementsToKeyFrame(keyFrame, missingKnownElements, out string[] addedNames) > 0)
             {
-                element = new AnimationKeyFrameElement();
-                ImGui.TextDisabled($"{_vanillaSelection.ElementName} is selected from the shape; it will be added to this keyframe when edited.");
+                MarkVanillaDirty(document);
+                RefreshVanillaPreviewAfterEdit(row, addedNames);
+                _vanillaStatus = $"Added {addedNames.Length} shape element channel(s) to frame {keyFrame.Frame}.";
+                keyFrameElementNames.UnionWith(addedNames);
             }
-            else if (elementNames.Length > 0)
+        }
+        if (missingKnownElements.Length == 0) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        int prunableCount = keyFrame.Elements.Count(entry => IsUnchangedVanillaElement(entry.Value));
+        if (prunableCount == 0) ImGui.BeginDisabled();
+        if (ImGui.Button("Prune unchanged##vanilla-element"))
+        {
+            int removed = PruneUnchangedVanillaElements(keyFrame, out string[] removedNames);
+            if (removed > 0)
             {
-                _vanillaSelection.ElementName = elementNames[0];
-                element = keyFrame.Elements[_vanillaSelection.ElementName];
-            }
-            else
-            {
+                MarkVanillaDirty(document);
+                RefreshVanillaPreviewAfterEdit(row);
+                _vanillaStatus = $"Pruned {removed} unchanged element channel(s) from frame {keyFrame.Frame}.";
+                keyFrameElementNames.ExceptWith(removedNames);
                 return;
             }
         }
+        if (prunableCount == 0) ImGui.EndDisabled();
 
-        bool selectedInKeyFrame = keyFrame.Elements.ContainsKey(_vanillaSelection.ElementName);
+        if (!selectedInKeyFrame)
+        {
+            if (!selectedKnownShapeElement) return;
+            element = new AnimationKeyFrameElement();
+            ImGui.TextDisabled($"{_vanillaSelection.ElementName} is virtual in this keyframe; editing it will add only this channel.");
+        }
+        if (element == null) return;
+
         if (!selectedInKeyFrame) ImGui.BeginDisabled();
         if (ImGui.Button("Remove element##vanilla-element"))
         {
             keyFrame.Elements.Remove(_vanillaSelection.ElementName);
-            _vanillaSelection.ElementName = "";
             MarkVanillaDirty(document);
             RefreshVanillaPreviewAfterEdit(row);
             if (!selectedInKeyFrame) ImGui.EndDisabled();
@@ -3396,7 +3428,63 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void DrawVanillaElementList(string[] elementNames, int selectedElementIndex)
+    private static int AddMissingVanillaElementsToKeyFrame(AnimationKeyFrame keyFrame, IEnumerable<string> elementNames, out string[] addedNames)
+    {
+        keyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
+        List<string> added = [];
+        foreach (string elementName in elementNames.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (keyFrame.Elements.ContainsKey(elementName)) continue;
+
+            keyFrame.Elements[elementName] = new AnimationKeyFrameElement();
+            added.Add(elementName);
+        }
+
+        addedNames = added.ToArray();
+        return addedNames.Length;
+    }
+
+    private static int PruneUnchangedVanillaElements(AnimationKeyFrame keyFrame, out string[] removedNames)
+    {
+        if (keyFrame.Elements == null || keyFrame.Elements.Count == 0)
+        {
+            removedNames = [];
+            return 0;
+        }
+
+        removedNames = keyFrame.Elements
+            .Where(entry => IsUnchangedVanillaElement(entry.Value))
+            .Select(entry => entry.Key)
+            .ToArray();
+
+        foreach (string name in removedNames)
+        {
+            keyFrame.Elements.Remove(name);
+        }
+
+        return removedNames.Length;
+    }
+
+    private static bool IsUnchangedVanillaElement(AnimationKeyFrameElement element)
+    {
+        return element.OffsetX == null &&
+            element.OffsetY == null &&
+            element.OffsetZ == null &&
+            element.StretchX == null &&
+            element.StretchY == null &&
+            element.StretchZ == null &&
+            element.RotationX == null &&
+            element.RotationY == null &&
+            element.RotationZ == null &&
+            element.OriginX == null &&
+            element.OriginY == null &&
+            element.OriginZ == null &&
+            !element.RotShortestDistanceX &&
+            !element.RotShortestDistanceY &&
+            !element.RotShortestDistanceZ;
+    }
+
+    private void DrawVanillaElementList(string[] elementNames, int selectedElementIndex, IReadOnlySet<string> keyFrameElementNames)
     {
         if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName) && elementNames.Length > 0)
         {
@@ -3413,7 +3501,10 @@ public sealed partial class DebugWindowManager
             string elementName = elementNames[index];
             bool selected = string.Equals(elementName, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase);
             bool inIkChain = _vanillaIkMode == VanillaIkChainMode.ManualOverride && ContainsVanillaIkChainElement(elementName);
-            string label = inIkChain ? $"[IK] {elementName}##vanilla-element-{index}" : $"{elementName}##vanilla-element-{index}";
+            bool inKeyFrame = keyFrameElementNames.Contains(elementName);
+            string prefix = inIkChain ? "[IK] " : "";
+            string suffix = inKeyFrame ? "" : " (virtual)";
+            string label = $"{prefix}{elementName}{suffix}##vanilla-element-{index}";
 
             if (ImGui.Selectable(label, selected))
             {
@@ -3431,6 +3522,10 @@ public sealed partial class DebugWindowManager
             if (inIkChain && ImGui.IsItemHovered())
             {
                 ImGui.SetTooltip("Selected for the manual IK chain. Switch to Manual override to edit this chain.");
+            }
+            else if (!inKeyFrame && ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Virtual channel: this shape element is selectable now and will be added to the keyframe only when edited.");
             }
         }
 
