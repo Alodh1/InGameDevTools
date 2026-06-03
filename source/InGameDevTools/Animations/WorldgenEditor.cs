@@ -51,6 +51,24 @@ public sealed partial class DebugWindowManager
         "Terrain shape",
         "3D region"
     ];
+    private static readonly string[] WorldgenPeekPassLabels =
+    [
+        "Terrain",
+        "Terrain features",
+        "Vegetation",
+        "Neighbour sunlight",
+        "Pre-done",
+        "Done"
+    ];
+    private static readonly EnumWorldGenPass[] WorldgenPeekPasses =
+    [
+        EnumWorldGenPass.Terrain,
+        EnumWorldGenPass.TerrainFeatures,
+        EnumWorldGenPass.Vegetation,
+        EnumWorldGenPass.NeighbourSunLightFlood,
+        EnumWorldGenPass.PreDone,
+        EnumWorldGenPass.Done
+    ];
 
     private readonly List<WorldgenAssetEntry> _worldgenEntries = [];
     private readonly List<WorldgenAssetEntry> _visibleWorldgenEntries = [];
@@ -99,7 +117,10 @@ public sealed partial class DebugWindowManager
     private string _worldgenPreviewRasterStatus = "Raster cache empty.";
     private bool _worldgenPreviewPeekPending;
     private string _worldgenPreviewPeekStatus = "No real chunk peek requested yet.";
-    private WorldgenPeekColumnProfile? _worldgenPreviewPeekProfile;
+    private int _worldgenPreviewRegionSize = 1;
+    private int _worldgenPreviewPassIndex;
+    private WorldgenPeekRegionCacheKey? _worldgenPreviewPeekCacheKey;
+    private WorldgenPeekRegionProfile? _worldgenPreviewPeekProfile;
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -913,7 +934,7 @@ public sealed partial class DebugWindowManager
                         : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
                             ? _worldgenPreviewPeekProfile == null
                                 ? $"{modeLabel}: draft landform surface"
-                                : $"{modeLabel}: real peeked terrain column"
+                                : $"{modeLabel}: real peeked region"
                 : $"{modeLabel}: viewport host";
         string inputStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
             ? "RMB/MMB pans. Mouse wheel zooms. Sampling live MapLayerBase.GenLayer."
@@ -922,7 +943,7 @@ public sealed partial class DebugWindowManager
                     : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
                         ? "RMB/MMB pans. Mouse wheel zooms. Evaluating selected landform draft shape."
                         : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
-                            ? "LMB orbits. RMB/MMB pans. Mouse wheel zooms. Peek renders real Terrain pass when available."
+                            ? "LMB orbits. RMB/MMB pans. Mouse wheel zooms. Peek renders the selected engine pass when available."
                 : "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.";
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, inputStatus);
@@ -1002,34 +1023,54 @@ public sealed partial class DebugWindowManager
             string label = GetWorldgenRowLabel(WorldgenAssetKind.Landforms, row, _worldgenRowIndex);
             ImGui.TextDisabled($"3D draft surface: {label}.");
             ImGui.TextDisabled(_worldgenPreviewPeekProfile == null
-                ? "Uses the selected landform height field until a real terrain column is peeked."
-                : "Rendering the last real Terrain-pass chunk column returned by PeekChunkColumn.");
+                ? "Uses the selected landform height field until a real terrain region is peeked."
+                : "Rendering the last real chunk region returned by PeekChunkColumn.");
         }
         else
         {
             ImGui.TextDisabled("Select a landform row, then choose 3D region to view its draft surface.");
         }
 
+        int previousRegionSize = _worldgenPreviewRegionSize;
+        ImGui.SetNextItemWidth(Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.35f));
+        if (ImGui.SliderInt("Region chunks##worldgen-peek-region-size", ref _worldgenPreviewRegionSize, 1, 3))
+        {
+            _worldgenPreviewRegionSize = Math.Clamp(_worldgenPreviewRegionSize, 1, 3);
+            if (_worldgenPreviewRegionSize != previousRegionSize)
+            {
+                ClearWorldgenPeekProfile("Region size changed; peek again to refresh the real 3D preview.");
+            }
+        }
+
+        int previousPassIndex = _worldgenPreviewPassIndex;
+        ImGui.SetNextItemWidth(Math.Max(150f, ImGui.GetContentRegionAvail().X * 0.50f));
+        if (ImGui.Combo("Pass##worldgen-peek-pass", ref _worldgenPreviewPassIndex, WorldgenPeekPassLabels, WorldgenPeekPassLabels.Length))
+        {
+            _worldgenPreviewPassIndex = Math.Clamp(_worldgenPreviewPassIndex, 0, WorldgenPeekPassLabels.Length - 1);
+            if (_worldgenPreviewPassIndex != previousPassIndex)
+            {
+                ClearWorldgenPeekProfile("Worldgen pass changed; peek again to refresh the real 3D preview.");
+            }
+        }
+
         bool canPeek = _worldgenPreviewServerApi != null && !_worldgenPreviewPeekPending;
         if (!canPeek) ImGui.BeginDisabled();
-        if (ImGui.Button("Peek terrain column##worldgen-peek-column"))
+        if (ImGui.Button("Peek region##worldgen-peek-region"))
         {
-            RequestWorldgenPeekColumn();
+            RequestWorldgenPeekRegion();
         }
         if (!canPeek) ImGui.EndDisabled();
 
         ImGui.SameLine();
         if (ImGui.Button("Clear peek##worldgen-clear-peek"))
         {
-            _worldgenPreviewPeekPending = false;
-            _worldgenPreviewPeekProfile = null;
-            _worldgenPreviewPeekStatus = "No real chunk peek requested yet.";
+            ClearWorldgenPeekProfile("No real chunk peek requested yet.");
         }
 
         ImGui.TextDisabled(_worldgenPreviewPeekStatus);
         if (_worldgenPreviewPeekProfile is { } profile)
         {
-            ImGui.TextDisabled($"Last real column: chunk {profile.ChunkX},{profile.ChunkZ}; height {profile.MinHeight}-{profile.MaxHeight}; avg {profile.AverageHeight:0.0}.");
+            ImGui.TextDisabled($"Last real region: chunks {profile.OriginChunkX},{profile.OriginChunkZ} size {profile.RegionSizeChunks}x{profile.RegionSizeChunks}; pass {profile.PassLabel}; height {profile.MinHeight}-{profile.MaxHeight}; avg {profile.AverageHeight:0.0}.");
             ImGui.TextDisabled($"Sample row: {profile.SampleSummary}");
         }
     }
@@ -1782,7 +1823,27 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void RequestWorldgenPeekColumn()
+    private void ClearWorldgenPeekProfile(string status)
+    {
+        _worldgenPreviewPeekPending = false;
+        _worldgenPreviewPeekProfile = null;
+        _worldgenPreviewPeekCacheKey = null;
+        _worldgenPreviewPeekStatus = status;
+    }
+
+    private EnumWorldGenPass GetSelectedWorldgenPeekPass()
+    {
+        int index = Math.Clamp(_worldgenPreviewPassIndex, 0, WorldgenPeekPasses.Length - 1);
+        return WorldgenPeekPasses[index];
+    }
+
+    private string GetSelectedWorldgenPeekPassLabel()
+    {
+        int index = Math.Clamp(_worldgenPreviewPassIndex, 0, WorldgenPeekPassLabels.Length - 1);
+        return WorldgenPeekPassLabels[index];
+    }
+
+    private void RequestWorldgenPeekRegion()
     {
         ICoreServerAPI? serverApi = _worldgenPreviewServerApi;
         if (serverApi == null)
@@ -1810,93 +1871,224 @@ public sealed partial class DebugWindowManager
             chunkSize = GlobalConstants.ChunkSize;
         }
 
-        int chunkX = FloorDiv(_worldgenPreviewOriginX, chunkSize);
-        int chunkZ = FloorDiv(_worldgenPreviewOriginZ, chunkSize);
+        int regionSize = Math.Clamp(_worldgenPreviewRegionSize, 1, 3);
+        int centerChunkX = FloorDiv(_worldgenPreviewOriginX, chunkSize);
+        int centerChunkZ = FloorDiv(_worldgenPreviewOriginZ, chunkSize);
+        int originChunkX = centerChunkX - regionSize / 2;
+        int originChunkZ = centerChunkZ - regionSize / 2;
+        EnumWorldGenPass untilPass = GetSelectedWorldgenPeekPass();
+        string passLabel = GetSelectedWorldgenPeekPassLabel();
+        WorldgenPeekRegionCacheKey cacheKey = new(ParseWorldgenPreviewSeed(), originChunkX, originChunkZ, regionSize, untilPass);
+        if (_worldgenPreviewPeekProfile != null && _worldgenPreviewPeekCacheKey == cacheKey)
+        {
+            _worldgenPreviewPeekStatus = $"Using cached {passLabel} peek for {regionSize}x{regionSize} chunks at {originChunkX},{originChunkZ}.";
+            return;
+        }
+
         _worldgenPreviewPeekPending = true;
         _worldgenPreviewPeekProfile = null;
-        _worldgenPreviewPeekStatus = $"Requesting real Terrain peek for chunk {chunkX},{chunkZ}...";
+        _worldgenPreviewPeekCacheKey = null;
+        _worldgenPreviewPeekStatus = $"Requesting real {passLabel} peek for {regionSize}x{regionSize} chunks at {originChunkX},{originChunkZ}...";
+
+        bool restoreAutoGenerate = TryGetWorldgenAutoGenerateChunks(worldManager, out bool previousAutoGenerate)
+            ? previousAutoGenerate
+            : true;
+        bool autoGenerateChanged = TrySetWorldgenAutoGenerateChunks(worldManager, false, out string? autoGenerateError);
+        if (!autoGenerateChanged && !string.IsNullOrWhiteSpace(autoGenerateError))
+        {
+            _worldgenDiagnostics.Warning($"Worldgen peek could not pause AutoGenerateChunks: {autoGenerateError}");
+        }
+
+        int totalRequests = regionSize * regionSize;
+        int remainingRequests = totalRequests;
+        object gate = new();
+        Dictionary<Vec2i, IServerChunk[]> regionColumns = new();
+        Exception? firstFailure = null;
 
         try
         {
-            ChunkPeekOptions options = new()
+            void OnGenerated(Dictionary<Vec2i, IServerChunk[]> columns)
             {
-                UntilPass = EnumWorldGenPass.Terrain,
-                OnGenerated = columns =>
+                WorldgenPeekRegionProfile? profileToDispatch = null;
+                Exception? failureToDispatch = null;
+                bool shouldDispatch = false;
+
+                lock (gate)
                 {
-                    WorldgenPeekColumnProfile? profile = null;
-                    Exception? failure = null;
                     try
                     {
-                        profile = BuildWorldgenPeekColumnProfile(columns, chunkX, chunkZ, chunkSize);
+                        foreach (KeyValuePair<Vec2i, IServerChunk[]> pair in columns)
+                        {
+                            if (pair.Key.X < originChunkX ||
+                                pair.Key.Y < originChunkZ ||
+                                pair.Key.X >= originChunkX + regionSize ||
+                                pair.Key.Y >= originChunkZ + regionSize)
+                            {
+                                continue;
+                            }
+
+                            regionColumns[pair.Key] = pair.Value;
+                        }
                     }
                     catch (Exception exception)
                     {
-                        failure = exception;
+                        firstFailure ??= exception;
                     }
 
-                    _api.Event.EnqueueMainThreadTask(() =>
+                    remainingRequests--;
+                    if (remainingRequests <= 0)
                     {
-                        _worldgenPreviewPeekPending = false;
-                        if (failure != null)
+                        shouldDispatch = true;
+                        try
                         {
-                            _worldgenPreviewPeekStatus = $"Real terrain peek failed: {failure.Message}";
-                            _worldgenDiagnostics.Exception("Worldgen terrain peek failed", failure);
-                            return;
+                            if (firstFailure != null)
+                            {
+                                failureToDispatch = firstFailure;
+                            }
+                            else
+                            {
+                                profileToDispatch = BuildWorldgenPeekRegionProfile(regionColumns, originChunkX, originChunkZ, regionSize, chunkSize, untilPass, passLabel);
+                            }
                         }
-
-                        _worldgenPreviewPeekProfile = profile;
-                        _worldgenPreviewPeekStatus = profile == null
-                            ? $"Real terrain peek returned no chunks for {chunkX},{chunkZ}."
-                            : $"Real terrain peek: chunk {profile.ChunkX},{profile.ChunkZ}; {profile.ColumnsReturned} column(s), {profile.ChunksReturned} vertical chunk(s).";
-                    }, "ingamedevtools-worldgen-peek-column");
+                        catch (Exception exception)
+                        {
+                            failureToDispatch = exception;
+                        }
+                    }
                 }
-            };
 
-            worldManager.PeekChunkColumn(chunkX, chunkZ, options);
+                if (!shouldDispatch) return;
+
+                if (autoGenerateChanged)
+                {
+                    TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
+                }
+
+                _api.Event.EnqueueMainThreadTask(() =>
+                {
+                    _worldgenPreviewPeekPending = false;
+                    if (failureToDispatch != null)
+                    {
+                        _worldgenPreviewPeekStatus = $"Real {passLabel} region peek failed: {failureToDispatch.Message}";
+                        _worldgenDiagnostics.Exception("Worldgen region peek failed", failureToDispatch);
+                        return;
+                    }
+
+                    _worldgenPreviewPeekProfile = profileToDispatch;
+                    _worldgenPreviewPeekCacheKey = profileToDispatch == null ? null : cacheKey;
+                    _worldgenPreviewPeekStatus = profileToDispatch == null
+                        ? $"Real {passLabel} region peek returned no chunks at {originChunkX},{originChunkZ}."
+                        : $"Real {passLabel} region peek: {profileToDispatch.ColumnsReturned}/{totalRequests} column(s), {profileToDispatch.ChunksReturned} vertical chunk(s); AutoGenerateChunks paused during peek.";
+                }, "ingamedevtools-worldgen-peek-region");
+            }
+
+            for (int dz = 0; dz < regionSize; dz++)
+            {
+                for (int dx = 0; dx < regionSize; dx++)
+                {
+                    int requestChunkX = originChunkX + dx;
+                    int requestChunkZ = originChunkZ + dz;
+                    ChunkPeekOptions options = new()
+                    {
+                        UntilPass = untilPass,
+                        OnGenerated = OnGenerated
+                    };
+
+                    worldManager.PeekChunkColumn(requestChunkX, requestChunkZ, options);
+                }
+            }
         }
         catch (Exception exception)
         {
+            if (autoGenerateChanged)
+            {
+                TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
+            }
+
             _worldgenPreviewPeekPending = false;
-            _worldgenPreviewPeekStatus = $"Real terrain peek request failed: {exception.Message}";
-            _worldgenDiagnostics.Exception("Worldgen terrain peek request failed", exception);
+            _worldgenPreviewPeekStatus = $"Real {passLabel} region peek request failed: {exception.Message}";
+            _worldgenDiagnostics.Exception("Worldgen region peek request failed", exception);
         }
     }
 
-    private static WorldgenPeekColumnProfile? BuildWorldgenPeekColumnProfile(Dictionary<Vec2i, IServerChunk[]> columns, int requestedChunkX, int requestedChunkZ, int chunkSize)
+    private static bool TrySetWorldgenAutoGenerateChunks(IWorldManagerAPI worldManager, bool enabled, out string? error)
+    {
+        try
+        {
+            worldManager.AutoGenerateChunks = enabled;
+            error = null;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+    }
+
+    private static bool TryGetWorldgenAutoGenerateChunks(IWorldManagerAPI worldManager, out bool enabled)
+    {
+        try
+        {
+            enabled = worldManager.AutoGenerateChunks;
+            return true;
+        }
+        catch
+        {
+            enabled = true;
+            return false;
+        }
+    }
+
+    private static WorldgenPeekRegionProfile? BuildWorldgenPeekRegionProfile(
+        Dictionary<Vec2i, IServerChunk[]> columns,
+        int originChunkX,
+        int originChunkZ,
+        int regionSize,
+        int chunkSize,
+        EnumWorldGenPass untilPass,
+        string passLabel)
     {
         if (columns.Count == 0) return null;
 
-        IServerChunk[]? chunks = null;
-        Vec2i selectedKey = new(requestedChunkX, requestedChunkZ);
-        if (!columns.TryGetValue(selectedKey, out chunks))
-        {
-            KeyValuePair<Vec2i, IServerChunk[]> first = columns.First();
-            selectedKey = first.Key;
-            chunks = first.Value;
-        }
-
-        if (chunks == null || chunks.Length == 0) return null;
-
-        int[] heights = new int[chunkSize * chunkSize];
-        int[] topBlockIds = new int[chunkSize * chunkSize];
+        int safeRegionSize = Math.Clamp(regionSize, 1, 3);
+        int width = chunkSize * safeRegionSize;
+        int depth = chunkSize * safeRegionSize;
+        int[] heights = new int[width * depth];
+        int[] topBlockIds = new int[width * depth];
+        Array.Fill(heights, -1);
         int minHeight = int.MaxValue;
         int maxHeight = int.MinValue;
         long totalHeight = 0;
         int solidColumns = 0;
+        int verticalChunksReturned = 0;
 
-        for (int z = 0; z < chunkSize; z++)
+        for (int dz = 0; dz < safeRegionSize; dz++)
         {
-            for (int x = 0; x < chunkSize; x++)
+            for (int dx = 0; dx < safeRegionSize; dx++)
             {
-                int height = FindWorldgenPeekColumnHeight(chunks, x, z, chunkSize, out int topBlockId);
-                heights[z * chunkSize + x] = height;
-                topBlockIds[z * chunkSize + x] = topBlockId;
-                if (height < 0) continue;
+                Vec2i key = new(originChunkX + dx, originChunkZ + dz);
+                if (!columns.TryGetValue(key, out IServerChunk[]? chunks) || chunks == null || chunks.Length == 0) continue;
 
-                minHeight = Math.Min(minHeight, height);
-                maxHeight = Math.Max(maxHeight, height);
-                totalHeight += height;
-                solidColumns++;
+                verticalChunksReturned += chunks.Length;
+                for (int z = 0; z < chunkSize; z++)
+                {
+                    for (int x = 0; x < chunkSize; x++)
+                    {
+                        int height = FindWorldgenPeekColumnHeight(chunks, x, z, chunkSize, out int topBlockId);
+                        int globalX = dx * chunkSize + x;
+                        int globalZ = dz * chunkSize + z;
+                        int index = globalZ * width + globalX;
+                        heights[index] = height;
+                        topBlockIds[index] = topBlockId;
+                        if (height < 0) continue;
+
+                        minHeight = Math.Min(minHeight, height);
+                        maxHeight = Math.Max(maxHeight, height);
+                        totalHeight += height;
+                        solidColumns++;
+                    }
+                }
             }
         }
 
@@ -1907,16 +2099,21 @@ public sealed partial class DebugWindowManager
         }
 
         float averageHeight = solidColumns == 0 ? -1f : totalHeight / (float)solidColumns;
-        return new WorldgenPeekColumnProfile(
-            selectedKey.X,
-            selectedKey.Y,
+        return new WorldgenPeekRegionProfile(
+            originChunkX,
+            originChunkZ,
+            safeRegionSize,
+            untilPass,
+            passLabel,
             columns.Count,
-            chunks.Length,
+            verticalChunksReturned,
             minHeight,
             maxHeight,
             averageHeight,
-            BuildWorldgenPeekSampleSummary(heights, chunkSize),
+            BuildWorldgenPeekSampleSummary(heights, width, depth),
             chunkSize,
+            width,
+            depth,
             heights,
             topBlockIds);
     }
@@ -1945,16 +2142,16 @@ public sealed partial class DebugWindowManager
         return -1;
     }
 
-    private static string BuildWorldgenPeekSampleSummary(int[] heights, int chunkSize)
+    private static string BuildWorldgenPeekSampleSummary(int[] heights, int width, int depth)
     {
-        if (heights.Length == 0 || chunkSize <= 0) return "empty";
+        if (heights.Length == 0 || width <= 0 || depth <= 0) return "empty";
 
-        int z = Math.Clamp(chunkSize / 2, 0, chunkSize - 1);
-        int step = Math.Max(1, chunkSize / 8);
+        int z = Math.Clamp(depth / 2, 0, depth - 1);
+        int step = Math.Max(1, width / 8);
         List<string> samples = new();
-        for (int x = 0; x < chunkSize; x += step)
+        for (int x = 0; x < width; x += step)
         {
-            samples.Add(heights[z * chunkSize + x].ToString(CultureInfo.InvariantCulture));
+            samples.Add(heights[z * width + x].ToString(CultureInfo.InvariantCulture));
         }
 
         return string.Join(", ", samples);
@@ -2211,7 +2408,7 @@ public sealed partial class DebugWindowManager
 
         if (_worldgenPreviewPeekProfile is { } peekProfile)
         {
-            DrawWorldgenPeekColumnPreview(drawList, min, max, peekProfile);
+            DrawWorldgenPeekRegionPreview(drawList, min, max, peekProfile);
             return;
         }
 
@@ -2325,19 +2522,23 @@ public sealed partial class DebugWindowManager
         _worldgenPreviewRasterStatus = $"3D draft surface: {grid}x{grid}; height {minHeight:0.000}-{maxHeight:0.000}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
     }
 
-    private void DrawWorldgenPeekColumnPreview(ImDrawListPtr drawList, NVector2 min, NVector2 max, WorldgenPeekColumnProfile profile)
+    private void DrawWorldgenPeekRegionPreview(ImDrawListPtr drawList, NVector2 min, NVector2 max, WorldgenPeekRegionProfile profile)
     {
-        int chunkSize = profile.ChunkSize;
-        if (chunkSize <= 0 || profile.Heights.Length < chunkSize * chunkSize || profile.TopBlockIds.Length < chunkSize * chunkSize)
+        int widthBlocks = profile.Width;
+        int depthBlocks = profile.Depth;
+        if (widthBlocks <= 0 ||
+            depthBlocks <= 0 ||
+            profile.Heights.Length < widthBlocks * depthBlocks ||
+            profile.TopBlockIds.Length < widthBlocks * depthBlocks)
         {
-            DrawWorldgenPreviewUnavailable(drawList, min, max, "Peeked terrain column data is incomplete.", "Press Peek terrain column again.");
+            DrawWorldgenPreviewUnavailable(drawList, min, max, "Peeked terrain region data is incomplete.", "Press Peek region again.");
             return;
         }
 
         float width = max.X - min.X;
         float height = max.Y - min.Y;
         float viewportMinDimension = Math.Max(1f, Math.Min(width, height));
-        float screenScale = viewportMinDimension * 0.66f / Math.Max(1, chunkSize);
+        float screenScale = viewportMinDimension * 0.66f / Math.Max(1, Math.Max(widthBlocks, depthBlocks));
         int baseHeight = profile.MinHeight < 0 ? 0 : Math.Max(0, profile.MinHeight - Math.Max(4, (profile.MaxHeight - profile.MinHeight) / 8));
         float heightSpan = Math.Max(8f, profile.MaxHeight - baseHeight + 2f);
         float heightScale = viewportMinDimension * 0.44f / heightSpan;
@@ -2346,19 +2547,19 @@ public sealed partial class DebugWindowManager
         float pitch = MathF.Sin(_worldgenPreview3DPitch);
         NVector2 center = new(min.X + width * 0.5f, min.Y + height * 0.68f);
 
-        List<WorldgenVoxelFace> faces = new(chunkSize * chunkSize * 3);
-        for (int z = 0; z < chunkSize; z++)
+        List<WorldgenVoxelFace> faces = new(widthBlocks * depthBlocks * 3);
+        for (int z = 0; z < depthBlocks; z++)
         {
-            for (int x = 0; x < chunkSize; x++)
+            for (int x = 0; x < widthBlocks; x++)
             {
-                int index = z * chunkSize + x;
+                int index = z * widthBlocks + x;
                 int topY = profile.Heights[index];
                 if (topY < 0) continue;
 
                 int topBlockId = profile.TopBlockIds[index];
                 float yTop = topY + 1f;
-                float localX = x - chunkSize * 0.5f;
-                float localZ = z - chunkSize * 0.5f;
+                float localX = x - widthBlocks * 0.5f;
+                float localZ = z - depthBlocks * 0.5f;
                 float heightNorm = profile.MaxHeight <= profile.MinHeight
                     ? 0.5f
                     : (topY - profile.MinHeight) / (float)Math.Max(1, profile.MaxHeight - profile.MinHeight);
@@ -2379,13 +2580,13 @@ public sealed partial class DebugWindowManager
 
         uint axisX = ImGui.ColorConvertFloat4ToU32(new NVector4(0.78f, 0.22f, 0.15f, 0.90f));
         uint axisZ = ImGui.ColorConvertFloat4ToU32(new NVector4(0.22f, 0.38f, 0.92f, 0.90f));
-        NVector2 origin = ProjectWorldgenVoxelPoint(-chunkSize * 0.5f, -chunkSize * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
-        NVector2 xAxis = ProjectWorldgenVoxelPoint(chunkSize * 0.5f, -chunkSize * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
-        NVector2 zAxis = ProjectWorldgenVoxelPoint(-chunkSize * 0.5f, chunkSize * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 origin = ProjectWorldgenVoxelPoint(-widthBlocks * 0.5f, -depthBlocks * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 xAxis = ProjectWorldgenVoxelPoint(widthBlocks * 0.5f, -depthBlocks * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 zAxis = ProjectWorldgenVoxelPoint(-widthBlocks * 0.5f, depthBlocks * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
         drawList.AddLine(origin, xAxis, axisX, 2f);
         drawList.AddLine(origin, zAxis, axisZ, 2f);
 
-        _worldgenPreviewRasterStatus = $"3D real Terrain column: chunk {profile.ChunkX},{profile.ChunkZ}; {faces.Count} visible face(s); height {profile.MinHeight}-{profile.MaxHeight}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
+        _worldgenPreviewRasterStatus = $"3D real {profile.PassLabel} region: chunks {profile.OriginChunkX},{profile.OriginChunkZ} size {profile.RegionSizeChunks}x{profile.RegionSizeChunks}; {faces.Count} visible face(s); height {profile.MinHeight}-{profile.MaxHeight}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
     }
 
     private void AddWorldgenPeekTopFace(
@@ -2412,7 +2613,7 @@ public sealed partial class DebugWindowManager
 
     private void TryAddWorldgenPeekSideFace(
         List<WorldgenVoxelFace> faces,
-        WorldgenPeekColumnProfile profile,
+        WorldgenPeekRegionProfile profile,
         int x,
         int z,
         int neighborX,
@@ -2997,10 +3198,10 @@ public sealed partial class DebugWindowManager
         return (depthA + depthB) * 0.5f;
     }
 
-    private static int GetWorldgenPeekHeight(WorldgenPeekColumnProfile profile, int x, int z)
+    private static int GetWorldgenPeekHeight(WorldgenPeekRegionProfile profile, int x, int z)
     {
-        if (x < 0 || z < 0 || x >= profile.ChunkSize || z >= profile.ChunkSize) return -1;
-        int index = z * profile.ChunkSize + x;
+        if (x < 0 || z < 0 || x >= profile.Width || z >= profile.Depth) return -1;
+        int index = z * profile.Width + x;
         return index < profile.Heights.Length ? profile.Heights[index] : -1;
     }
 
@@ -3655,9 +3856,19 @@ public sealed partial class DebugWindowManager
         South
     }
 
-    private sealed record WorldgenPeekColumnProfile(
-        int ChunkX,
-        int ChunkZ,
+    private readonly record struct WorldgenPeekRegionCacheKey(
+        long Seed,
+        int OriginChunkX,
+        int OriginChunkZ,
+        int RegionSizeChunks,
+        EnumWorldGenPass UntilPass);
+
+    private sealed record WorldgenPeekRegionProfile(
+        int OriginChunkX,
+        int OriginChunkZ,
+        int RegionSizeChunks,
+        EnumWorldGenPass UntilPass,
+        string PassLabel,
         int ColumnsReturned,
         int ChunksReturned,
         int MinHeight,
@@ -3665,6 +3876,8 @@ public sealed partial class DebugWindowManager
         float AverageHeight,
         string SampleSummary,
         int ChunkSize,
+        int Width,
+        int Depth,
         int[] Heights,
         int[] TopBlockIds);
 
