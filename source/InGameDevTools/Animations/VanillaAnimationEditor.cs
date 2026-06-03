@@ -2856,7 +2856,9 @@ public sealed partial class DebugWindowManager
     {
         try
         {
-            if (_vanillaPreviewScene == null || _vanillaPreviewScene.Key != row.Key || rebuildMesh)
+            bool sameScene = _vanillaPreviewScene?.Key == row.Key;
+            float requestedFrame = sameScene ? _vanillaPreviewScene!.CurrentFrame : 0f;
+            if (_vanillaPreviewScene == null || !sameScene || rebuildMesh)
             {
                 DisposeVanillaPreviewScene();
                 _vanillaPreviewScene = VanillaAnimationPreviewScene.Create(_api, row);
@@ -2868,7 +2870,7 @@ public sealed partial class DebugWindowManager
 
             if (_vanillaPreviewScene != null)
             {
-                _vanillaPreviewScene.Scrub(Math.Clamp(_vanillaPreviewScene.CurrentFrame, 0, Math.Max(0, _vanillaPreviewScene.QuantityFrames - 1)));
+                _vanillaPreviewScene.Scrub(Math.Clamp(requestedFrame, 0, Math.Max(0, _vanillaPreviewScene.QuantityFrames - 1)));
                 _vanillaStatus = _vanillaPreviewScene.Status;
             }
         }
@@ -2881,10 +2883,27 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void RefreshVanillaPreviewAfterEdit(VanillaBrowserRow row)
+    private void RefreshVanillaPreviewAfterEdit(VanillaBrowserRow row, params string[] changedElementNames)
     {
         if (_vanillaPreviewScene?.Key != row.Key) return;
-        BuildVanillaPreviewScene(row, rebuildMesh: false);
+        BuildVanillaPreviewScene(row, ShouldRebuildVanillaPreviewMeshAfterEdit(changedElementNames));
+    }
+
+    private bool ShouldRebuildVanillaPreviewMeshAfterEdit(IEnumerable<string>? changedElementNames)
+    {
+        if (_vanillaPreviewScene == null || changedElementNames == null) return false;
+
+        foreach (string elementName in changedElementNames.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!TryFindVanillaPose(_vanillaPreviewScene.Animator.RootPoses, elementName, out ElementPose? pose, out _) ||
+                pose?.ForElement == null ||
+                pose.ForElement.JointId <= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void PauseVanillaLiveSymmetryPreview(VanillaBrowserRow row, VanillaAnimation animation)
@@ -3290,7 +3309,7 @@ public sealed partial class DebugWindowManager
                 keyFrame.Elements.TryAdd(name, new AnimationKeyFrameElement());
                 _vanillaSelection.ElementName = name;
                 MarkVanillaDirty(document);
-                RefreshVanillaPreviewAfterEdit(row);
+                RefreshVanillaPreviewAfterEdit(row, name);
             }
         }
 
@@ -4545,7 +4564,7 @@ public sealed partial class DebugWindowManager
         VanillaSymmetryResult symmetry = PropagateVanillaLiveSymmetry(entry.Document, entry.Animation, sourceKeyFrame, changedElementNames);
         PreserveVanillaSelectedKeyFrame(entry.Animation, sourceKeyFrame);
         MarkVanillaDirty(entry.Document);
-        RefreshVanillaPreviewAfterEdit(row);
+        RefreshVanillaPreviewAfterEdit(row, changedElementNames);
 
         if (symmetry.Applied)
         {
