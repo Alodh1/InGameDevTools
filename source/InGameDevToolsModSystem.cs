@@ -10,7 +10,6 @@ using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Datastructures;
 using VSImGui;
-using VSImGui.API;
 using System.Reflection;
 
 namespace InGameDevTools;
@@ -27,18 +26,16 @@ public sealed class InGameDevToolsModSystem : ModSystem
     private AnimationsManager? _animationsManager;
     private DebugWindowManager? _debugWindowManager;
     private long _ensureBehaviorsListener = -1;
-    private static bool _fontRegistrationAttempted;
+    private static bool _fontExtractionAttempted;
 
     public static string? BundledOpenDyslexicFontPath { get; private set; }
-
-    public override double ExecuteOrder() => -0.1;
 
     public override bool ShouldLoad(EnumAppSide forSide) => forSide == EnumAppSide.Client;
 
     public override void StartPre(ICoreAPI api)
     {
         ExtendedElementPose.NameHashCache = new(api, "in-game devtools element pose name hash cache", 500000, 11 * 60 * 1000, threadSafe: true);
-        RegisterBundledFonts(api);
+        ExtractBundledFonts(api);
     }
 
     public override void Start(ICoreAPI api)
@@ -173,29 +170,20 @@ public sealed class InGameDevToolsModSystem : ModSystem
         }
     }
 
-    private static void RegisterBundledFonts(ICoreAPI api)
+    private static void ExtractBundledFonts(ICoreAPI api)
     {
-        if (_fontRegistrationAttempted) return;
-        _fontRegistrationAttempted = true;
+        if (_fontExtractionAttempted) return;
+        _fontExtractionAttempted = true;
 
         try
         {
             string? fontPath = ExtractEmbeddedFont(api, "InGameDevTools.Fonts.OpenDyslexic-Regular.otf", "OpenDyslexic-Regular.otf");
             if (string.IsNullOrWhiteSpace(fontPath)) return;
             BundledOpenDyslexicFontPath = fontPath;
-
-            FontManager.BeforeFontsLoaded += (fonts, sizes) =>
-            {
-                fonts.Add(fontPath);
-                for (int size = 12; size <= 28; size++)
-                {
-                    sizes.Add(size);
-                }
-            };
         }
         catch (Exception exception)
         {
-            LoggerUtil.Warn(api, typeof(InGameDevToolsModSystem), $"Could not register bundled OpenDyslexic font: {exception}");
+            LoggerUtil.Warn(api, typeof(InGameDevToolsModSystem), $"Could not extract bundled OpenDyslexic font: {exception}");
         }
     }
 
