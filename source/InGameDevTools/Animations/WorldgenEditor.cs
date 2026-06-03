@@ -945,7 +945,9 @@ public sealed partial class DebugWindowManager
         string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
         string hoverDetails = BuildWorldgenPreviewHoverText(_worldgenPreviewMode, seed, hoverX, hoverZ);
         string modeStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
-            ? $"{modeLabel}: live server {GetWorldgenPreviewMapLayerFieldName(_worldgenPreviewMode)}"
+            ? _worldgenPreviewServerApi != null
+                ? $"{modeLabel}: live server {GetWorldgenPreviewMapLayerFieldName(_worldgenPreviewMode)}"
+                : $"{modeLabel}: procedural fallback; live server layer unavailable"
             : _worldgenPreviewMode == WorldgenPreviewModeClimate
                 ? $"{modeLabel}: live server climateGen"
                 : _worldgenPreviewMode == WorldgenPreviewModeBlockPatch
@@ -960,7 +962,12 @@ public sealed partial class DebugWindowManager
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, $"Cursor block: X {hoverX}, Z {hoverZ}");
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), muted, _worldgenPreviewConfigStatus);
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 70f), muted, serverRequired ? _worldgenPreviewServerStatus : "Singleplayer server API: not required for this mode.");
+        string serverLine = serverRequired
+            ? _worldgenPreviewServerStatus
+            : WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
+                ? _worldgenPreviewServerStatus
+                : "Singleplayer server API: not required for this mode.";
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 70f), muted, serverLine);
         if (!string.IsNullOrWhiteSpace(hoverDetails))
         {
             drawList.AddText(new NVector2(min.X + 12f, min.Y + 90f), muted, hoverDetails);
@@ -1456,7 +1463,13 @@ public sealed partial class DebugWindowManager
         if (WorldgenPreviewModeUsesMapLayer(mode))
         {
             MapLayerBase? layer = GetWorldgenPreviewMapLayer(mode);
-            if (layer == null) return _worldgenPreviewMapLayerStatus;
+            if (layer == null)
+            {
+                string fallbackStatus = string.IsNullOrWhiteSpace(_worldgenPreviewMapLayerStatus)
+                    ? "Live map layer unavailable."
+                    : _worldgenPreviewMapLayerStatus;
+                return $"{fallbackStatus} Showing procedural fallback.";
+            }
 
             try
             {
@@ -3476,7 +3489,7 @@ public sealed partial class DebugWindowManager
 
     private static bool WorldgenPreviewModeRequiresServer(int mode)
     {
-        return mode != WorldgenPreviewModeGradient;
+        return mode is WorldgenPreviewModeOre or WorldgenPreviewModeBlockPatch;
     }
 
     private static void DrawWorldgenPreviewUnavailable(
@@ -3884,7 +3897,7 @@ public sealed partial class DebugWindowManager
         }
         else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
         {
-            if (!TryBuildWorldgenMapLayerRaster(centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
+            if (!TryBuildWorldgenMapLayerRaster(seed, centerX, centerZ, halfWidthBlocks, halfHeightBlocks, cellsX, cellsZ, colors, out error))
             {
                 colors = null;
                 return false;
@@ -4066,6 +4079,7 @@ public sealed partial class DebugWindowManager
     }
 
     private bool TryBuildWorldgenMapLayerRaster(
+        long seed,
         float centerX,
         float centerZ,
         float halfWidthBlocks,
@@ -4078,8 +4092,22 @@ public sealed partial class DebugWindowManager
         MapLayerBase? mapLayer = GetWorldgenPreviewMapLayer(_worldgenPreviewMode);
         if (mapLayer == null)
         {
-            error = string.IsNullOrWhiteSpace(_worldgenPreviewMapLayerStatus) ? "Map layer unavailable." : _worldgenPreviewMapLayerStatus;
-            return false;
+            for (int z = 0; z < cellsZ; z++)
+            {
+                float worldZ = centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ);
+                for (int x = 0; x < cellsX; x++)
+                {
+                    float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
+                    colors[z * cellsX + x] = BuildWorldgenPreviewColor(seed, worldX, worldZ, _worldgenPreviewMode);
+                }
+            }
+
+            string fallbackReason = string.IsNullOrWhiteSpace(_worldgenPreviewMapLayerStatus)
+                ? "live map layer unavailable"
+                : _worldgenPreviewMapLayerStatus;
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; procedural fallback ({fallbackReason})";
+            error = "";
+            return true;
         }
 
         try
