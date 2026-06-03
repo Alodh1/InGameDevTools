@@ -4645,7 +4645,7 @@ public sealed partial class DebugWindowManager
         }
 
         Vec3d target = new(_vanillaIkTargetX, _vanillaIkTargetY, _vanillaIkTargetZ);
-        if (!TrySolveVanillaIkCcdToTarget(cache, target, _vanillaIkPreserveDraggedPartRotation, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
+        if (!TrySolveVanillaIkCcdToTarget(cache, target, _vanillaIkPreserveDraggedPartRotation, keepHandleLocalTransform: false, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
             return;
@@ -4983,7 +4983,7 @@ public sealed partial class DebugWindowManager
         Vec3d target = _vanillaIkLockMoveToDragAxis && dragModelDelta.LengthSquared() > 0.000001f
             ? Add(_vanillaIkDragCache.EndOrigin, new Vec3d(dragModelDelta.X, dragModelDelta.Y, dragModelDelta.Z))
             : GetVanillaIkDesiredEndTarget(_vanillaIkDragCache, desiredElement);
-        if (!TrySolveVanillaIkCcdToTarget(_vanillaIkDragCache, target, _vanillaIkPreserveDraggedPartRotation, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
+        if (!TrySolveVanillaIkCcdToTarget(_vanillaIkDragCache, target, _vanillaIkPreserveDraggedPartRotation, keepHandleLocalTransform: true, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
             return false;
@@ -4992,7 +4992,7 @@ public sealed partial class DebugWindowManager
         ApplyVanillaIkSolvedElements(keyFrame, chain, solvedElements);
         ApplyVanillaElementEdit(row, entry, keyFrame, chain.ElementNames.ToArray());
         string targetMode = _vanillaIkLockMoveToDragAxis ? " on drag axis" : "";
-        string handleMode = _vanillaIkPreserveDraggedPartRotation ? " with locked handle" : "";
+        string handleMode = _vanillaIkPreserveDraggedPartRotation ? " with connected handle" : "";
         _vanillaStatus = finalDistance <= VanillaIkSolveTolerance
             ? $"IK Move solved {chain.ElementNames.Count} element(s){targetMode}{handleMode}."
             : $"IK Move solved best effort{targetMode}{handleMode}; remaining distance {finalDistance:0.###}.";
@@ -5095,7 +5095,7 @@ public sealed partial class DebugWindowManager
         return Add(cache.EndOrigin, Add(Add(Scale(cache.SelectedAxes.X, dx), Scale(cache.SelectedAxes.Y, dy)), Scale(cache.SelectedAxes.Z, dz)));
     }
 
-    private static bool TrySolveVanillaIkCcdToTarget(VanillaIkCcdCache cache, Vec3d requestedTarget, bool preserveHandleRotation, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string error)
+    private static bool TrySolveVanillaIkCcdToTarget(VanillaIkCcdCache cache, Vec3d requestedTarget, bool preserveHandleRotation, bool keepHandleLocalTransform, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string error)
     {
         solvedElements = cache.StartElements.Select(CloneElement).ToArray();
         finalDistance = Distance(cache.EndOrigin, requestedTarget);
@@ -5108,15 +5108,18 @@ public sealed partial class DebugWindowManager
             return false;
         }
 
-        if (preserveHandleRotation && count == 1)
+        bool solveWithUpstreamDriversOnly = preserveHandleRotation || keepHandleLocalTransform;
+        int driverCount = solveWithUpstreamDriversOnly ? count - 1 : count;
+        if (driverCount == 0)
         {
-            error = "Locked handle needs a parent chain; disable handle rotation lock or add driver bones.";
+            error = keepHandleLocalTransform || preserveHandleRotation
+                ? "Locked IK handle needs a parent chain; disable handle rotation lock or add driver bones."
+                : "IK needs at least one driver bone.";
             return false;
         }
 
         Vec3d[] joints = cache.JointPositions.Select(point => new Vec3d(point.X, point.Y, point.Z)).ToArray();
         RigIkMatrix3[] rotations = cache.BoneInfos.Select(info => info.WorldRotation).ToArray();
-        int driverCount = preserveHandleRotation ? count - 1 : count;
         Vec3d lockedHandleEndpointOffset = preserveHandleRotation
             ? Sub(cache.EndOrigin, cache.JointPositions[count - 1])
             : new Vec3d();
@@ -5139,12 +5142,12 @@ public sealed partial class DebugWindowManager
                     joints[jointIndex] = Add(origin, delta.TransformDirection(Sub(joints[jointIndex], origin)));
                 }
 
-                for (int rotationIndex = boneIndex; rotationIndex < (preserveHandleRotation ? driverCount : rotations.Length); rotationIndex++)
+                for (int rotationIndex = boneIndex; rotationIndex < (solveWithUpstreamDriversOnly ? driverCount : rotations.Length); rotationIndex++)
                 {
                     rotations[rotationIndex] = delta.Mul(rotations[rotationIndex]).Orthonormalized();
                 }
 
-                if (preserveHandleRotation)
+                if (preserveHandleRotation && !keepHandleLocalTransform)
                 {
                     joints[^1] = Add(joints[count - 1], lockedHandleEndpointOffset);
                 }
@@ -5165,6 +5168,12 @@ public sealed partial class DebugWindowManager
         for (int index = 0; index < count; index++)
         {
             RigIkMatrix3 parentWorld = index > 0 ? rotations[index - 1] : cache.BoneInfos[index].ParentWorldRotation;
+            if (keepHandleLocalTransform && index == count - 1)
+            {
+                solvedElements[index] = CloneElement(cache.StartElements[index]);
+                continue;
+            }
+
             RigIkMatrix3 world = preserveHandleRotation && index == count - 1
                 ? cache.BoneInfos[index].WorldRotation
                 : rotations[index];
@@ -8838,6 +8847,8 @@ public sealed partial class DebugWindowManager
             GL.GetInteger(GetPName.FrontFace, out int restoreFrontFace);
             GL.GetInteger(GetPName.CullFaceMode, out int restoreCullFaceMode);
             bool restoreBlend = GL.IsEnabled(EnableCap.Blend);
+            bool[] restoreColorMask = new bool[4];
+            GL.GetBoolean(GetPName.ColorWritemask, restoreColorMask);
             float[] restoreClearColor = new float[4];
             GL.GetFloat(GetPName.ColorClearValue, restoreClearColor);
             IShaderProgram? shader = null;
@@ -8859,10 +8870,11 @@ public sealed partial class DebugWindowManager
                 GL.DepthFunc(DepthFunction.Lequal);
                 render.GLDepthMask(true);
                 render.GlDisableCullFace();
-                render.GlToggleBlend(true, EnumBlendMode.Standard);
+                render.GlToggleBlend(false);
                 GL.ClearColor(0.055f, 0.052f, 0.045f, 1f);
                 GL.ClearDepth(1.0);
                 GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+                GL.ColorMask(true, true, true, false);
 
                 ModSystemFpHands? fpHands = _api.ModLoader.GetModSystem<ModSystemFpHands>(true);
                 bool classicFirstPerson = mode == VanillaPreviewMode.FirstPerson && fpHands?.fpModeHandShader != null;
@@ -8916,6 +8928,7 @@ public sealed partial class DebugWindowManager
                 {
                     if (!ghost.Enabled || !scene.TryEvaluateGhostPose(ghost.Frame)) continue;
 
+                    render.GlToggleBlend(true, EnumBlendMode.Standard);
                     render.GLDepthMask(false);
                     SetUniform(shader, "renderColor", new Vec4f(ghost.Red, ghost.Green, ghost.Blue, Math.Clamp(ghost.Opacity, 0.05f, 0.8f)));
                     if (shader.UBOs != null && shader.UBOs.TryGetValue("Animation", out UBORef ghostAnimationUbo) && scene.GhostAnimator.Matrices != null)
@@ -8925,6 +8938,7 @@ public sealed partial class DebugWindowManager
 
                     render.RenderMultiTextureMesh(meshRef, "entityTex", 0);
                     render.GLDepthMask(true);
+                    render.GlToggleBlend(false);
                     SetUniform(shader, "renderColor", ColorUtil.WhiteArgbVec);
                 }
                 glError = GL.GetError();
@@ -8952,6 +8966,7 @@ public sealed partial class DebugWindowManager
                 else render.GlDisableCullFace();
                 GL.ClearDepth(restoreDepthClearValue);
                 GL.ClearColor(restoreClearColor[0], restoreClearColor[1], restoreClearColor[2], restoreClearColor[3]);
+                GL.ColorMask(restoreColorMask[0], restoreColorMask[1], restoreColorMask[2], restoreColorMask[3]);
                 GL.DepthFunc((DepthFunction)restoreDepthFunc);
                 render.GLDepthMask(restoreDepthMask);
                 if (restoreBlend) render.GlToggleBlend(true, EnumBlendMode.Standard);
