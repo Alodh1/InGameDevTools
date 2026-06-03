@@ -6068,9 +6068,10 @@ public sealed partial class DebugWindowManager
         string MetadataSignature,
         string ShapeSignature,
         bool Hidden,
-        string HiddenReason)
+        string HiddenReason,
+        VanillaPlayerModelSource? PlayerModel = null)
     {
-        public string Code => EntityType.Code?.ToString() ?? FullLabel;
+        public string Code => PlayerModel?.FullCode ?? EntityType.Code?.ToString() ?? FullLabel;
     }
 
     private sealed record VanillaEntitySourceInfo(
@@ -6083,6 +6084,22 @@ public sealed partial class DebugWindowManager
         string HiddenReason)
     {
         public string Key => $"{Location.Domain}:{AssetPath}";
+    }
+
+    private sealed record VanillaPlayerModelSource(
+        string Code,
+        AssetLocation ConfigLocation,
+        string ConfigAssetPath,
+        JObject ConfigSourceJson,
+        AssetLocation ShapeLocation,
+        JObject? ShapeSourceJson,
+        Shape Shape,
+        EntityProperties AnimationEntityType,
+        string AnimationSourceCode,
+        int MatchedElementCount)
+    {
+        public string Domain => ConfigLocation.Domain;
+        public string FullCode => Code.Contains(':', StringComparison.Ordinal) ? Code : $"{Domain}:{Code}";
     }
 
     private sealed record VanillaGroupTargets(IReadOnlyList<EntityProperties> Targets, int Skipped);
@@ -6152,8 +6169,35 @@ public sealed partial class DebugWindowManager
                     hiddenReason));
             }
 
+            foreach (VanillaPlayerModelSource playerModel in VanillaPlayerModelSourceIndex.Build(api, members.Select(member => member.EntityType)))
+            {
+                VanillaEntitySourceInfo source = new(
+                    playerModel.ConfigLocation,
+                    playerModel.ConfigAssetPath,
+                    playerModel.FullCode,
+                    playerModel.ConfigSourceJson,
+                    HasVariantGroups: false,
+                    Hidden: false,
+                    HiddenReason: "");
+                string label = ImGuiLayoutHelper.CompactAssetCode(playerModel.FullCode);
+                members.Add(new(
+                    playerModel.AnimationEntityType,
+                    label,
+                    playerModel.FullCode,
+                    playerModel.Domain,
+                    source,
+                    BuildMetadataCompatibilitySignature(playerModel.AnimationEntityType),
+                    BuildPlayerModelShapeCompatibilitySignature(playerModel),
+                    Hidden: false,
+                    HiddenReason: "",
+                    playerModel));
+            }
+
             _allEntityDomains.AddRange(members.Select(member => member.Domain).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(domain => domain, StringComparer.OrdinalIgnoreCase));
-            _exactEntityOptions.AddRange(members.Select(member => BuildEntityOption([member], "exact", "Exact runtime entity")));
+            _exactEntityOptions.AddRange(members.Select(member => BuildEntityOption(
+                [member],
+                member.PlayerModel != null ? "playermodel" : "exact",
+                member.PlayerModel != null ? "Playermodelib model" : "Exact runtime entity")));
             _groupedEntityOptions.AddRange(BuildGroupedEntityOptions(members));
             _exactEntityOptions.Sort(CompareEntityOptions);
             _groupedEntityOptions.Sort(CompareEntityOptions);
@@ -6207,7 +6251,7 @@ public sealed partial class DebugWindowManager
         private static IEnumerable<VanillaEntityOption> BuildGroupedEntityOptions(IReadOnlyList<VanillaEntityMember> members)
         {
             List<VanillaEntityOption> options = [];
-            HashSet<EntityProperties> grouped = [];
+            HashSet<VanillaEntityMember> grouped = [];
 
             foreach (IGrouping<string, VanillaEntityMember> sourceGroup in members
                 .Where(member => member.Source != null)
@@ -6217,11 +6261,11 @@ public sealed partial class DebugWindowManager
                 if (groupMembers.Count > 1 || groupMembers[0].Source?.HasVariantGroups == true)
                 {
                     options.Add(BuildEntityOption(groupMembers, "source", "Source family"));
-                    foreach (VanillaEntityMember member in groupMembers) grouped.Add(member.EntityType);
+                    foreach (VanillaEntityMember member in groupMembers) grouped.Add(member);
                 }
             }
 
-            List<VanillaEntityMember> remaining = members.Where(member => !grouped.Contains(member.EntityType)).ToList();
+            List<VanillaEntityMember> remaining = members.Where(member => !grouped.Contains(member)).ToList();
             foreach (IGrouping<string, VanillaEntityMember> signatureGroup in remaining
                 .Where(member => !string.IsNullOrWhiteSpace(BuildCompatibleEntityGroupKey(member)))
                 .GroupBy(BuildCompatibleEntityGroupKey, StringComparer.Ordinal))
@@ -6229,10 +6273,10 @@ public sealed partial class DebugWindowManager
                 List<VanillaEntityMember> groupMembers = signatureGroup.OrderBy(member => member.Label, StringComparer.OrdinalIgnoreCase).ToList();
                 if (groupMembers.Count <= 1) continue;
                 options.Add(BuildEntityOption(groupMembers, "compatible", "Compatible animation signature"));
-                foreach (VanillaEntityMember member in groupMembers) grouped.Add(member.EntityType);
+                foreach (VanillaEntityMember member in groupMembers) grouped.Add(member);
             }
 
-            foreach (VanillaEntityMember member in members.Where(member => !grouped.Contains(member.EntityType)))
+            foreach (VanillaEntityMember member in members.Where(member => !grouped.Contains(member)))
             {
                 options.Add(BuildEntityOption([member], "single", "Single runtime entity"));
             }
@@ -6406,6 +6450,289 @@ public sealed partial class DebugWindowManager
             }
 
             return builder.ToString();
+        }
+
+        private static string BuildPlayerModelShapeCompatibilitySignature(VanillaPlayerModelSource playerModel)
+        {
+            VanillaAnimation[] animations = playerModel.Shape.Animations ?? [];
+            if (animations.Length == 0) return "";
+
+            StringBuilder builder = new();
+            builder.Append("playermodel:").Append(playerModel.AnimationSourceCode).Append(':').Append(playerModel.MatchedElementCount).Append('|');
+            for (int index = 0; index < animations.Length; index++)
+            {
+                VanillaAnimation animation = animations[index];
+                builder.Append(index)
+                    .Append(':')
+                    .Append(animation.Code ?? animation.Name ?? "")
+                    .Append(':')
+                    .Append(animation.QuantityFrames)
+                    .Append(':');
+
+                foreach (AnimationKeyFrame keyFrame in animation.KeyFrames ?? [])
+                {
+                    builder.Append(keyFrame.Frame).Append('[');
+                    if (keyFrame.Elements != null)
+                    {
+                        foreach (string elementName in keyFrame.Elements.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
+                        {
+                            builder.Append(elementName).Append(',');
+                        }
+                    }
+                    builder.Append(']');
+                }
+
+                builder.Append('|');
+            }
+
+            return builder.ToString();
+        }
+
+        private sealed class VanillaPlayerModelSourceIndex
+        {
+            public static IReadOnlyList<VanillaPlayerModelSource> Build(ICoreClientAPI api, IEnumerable<EntityProperties> entityTypes)
+            {
+                Dictionary<string, VanillaPlayerModelConfig> configs = LoadConfigs(api);
+                if (configs.Count == 0) return [];
+
+                List<EntityProperties> animationCandidates = entityTypes
+                    .Where(entityType => (entityType.Client?.LoadedShapeForEntity ?? entityType.Client?.LoadedShape)?.Animations?.Length > 0)
+                    .Distinct()
+                    .ToList();
+                if (animationCandidates.Count == 0) return [];
+
+                List<VanillaPlayerModelSource> result = [];
+                HashSet<string> indexedShapes = new(StringComparer.OrdinalIgnoreCase);
+                foreach (VanillaPlayerModelConfig config in configs.Values.OrderBy(config => config.FullCode, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (!config.Enabled) continue;
+                    AssetLocation? shapeLocation = ResolveShapeLocation(api, config.ShapePath, config.ConfigLocation.Domain);
+                    if (shapeLocation == null) continue;
+
+                    IAsset? shapeAsset = api.Assets.TryGet(shapeLocation, true);
+                    Shape? modelShape = TryLoadShape(shapeAsset);
+                    if (modelShape == null) continue;
+
+                    Shape? scoreShape = modelShape;
+                    if (!string.IsNullOrWhiteSpace(config.BaseShapeCode) &&
+                        configs.TryGetValue(NormalizeModelCode(config.BaseShapeCode, config.ConfigLocation.Domain), out VanillaPlayerModelConfig? baseConfig))
+                    {
+                        AssetLocation? baseShapeLocation = ResolveShapeLocation(api, baseConfig.ShapePath, baseConfig.ConfigLocation.Domain);
+                        Shape? baseShape = TryLoadShape(api.Assets.TryGet(baseShapeLocation, true));
+                        scoreShape = baseShape ?? scoreShape;
+                    }
+
+                    if (!TryFindBestAnimationSource(animationCandidates, scoreShape, out EntityProperties? animationEntity, out Shape? animationShape, out int matchedElements) ||
+                        animationEntity == null ||
+                        animationShape?.Animations == null ||
+                        animationShape.Animations.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    Shape editableShape = modelShape.Clone() ?? modelShape;
+                    editableShape.Animations = animationShape.Animations.Select(CloneVanillaAnimation).ToArray();
+                    JObject? shapeSourceJson = TryLoadJson(api, shapeLocation);
+                    string shapeKey = $"{config.FullCode}|{shapeLocation}";
+                    if (!indexedShapes.Add(shapeKey)) continue;
+
+                    result.Add(new(
+                        config.Code,
+                        config.ConfigLocation,
+                        config.ConfigAssetPath,
+                        config.SourceJson,
+                        shapeLocation,
+                        shapeSourceJson,
+                        editableShape,
+                        animationEntity,
+                        animationEntity.Code?.ToString() ?? config.FullCode,
+                        matchedElements));
+                }
+
+                return result;
+            }
+
+            private static Dictionary<string, VanillaPlayerModelConfig> LoadConfigs(ICoreClientAPI api)
+            {
+                Dictionary<string, VanillaPlayerModelConfig> configs = new(StringComparer.OrdinalIgnoreCase);
+                foreach (IAsset asset in api.Assets.AllAssets.Values)
+                {
+                    if (asset?.Location == null) continue;
+                    string assetPath = asset.Location.Path.Replace('\\', '/');
+                    if (!assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
+                        (!assetPath.StartsWith("config/", StringComparison.OrdinalIgnoreCase) &&
+                         !assetPath.Contains("/config/", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    JObject? source = TryParseJsonObject(ReadAssetText(asset));
+                    if (source == null) continue;
+
+                    foreach (JProperty property in source.Properties())
+                    {
+                        if (property.Value is not JObject entry) continue;
+                        string? shapePath = entry["ShapePath"]?.ToString();
+                        if (string.IsNullOrWhiteSpace(shapePath)) continue;
+
+                        bool hasPlayerModelSignals =
+                            entry["BaseShapeCode"] != null ||
+                            entry["KeyElements"] is JArray ||
+                            entry["SkinnableParts"] is JArray ||
+                            assetPath.Contains("/customplayermodels/", StringComparison.OrdinalIgnoreCase) ||
+                            assetPath.Contains("/baseshapes/", StringComparison.OrdinalIgnoreCase);
+                        if (!hasPlayerModelSignals) continue;
+
+                        bool enabled = entry["Enabled"]?.Type != JTokenType.Boolean || entry["Enabled"]?.Value<bool>() == true;
+                        string code = NormalizeModelCode(property.Name, asset.Location.Domain);
+                        configs[code] = new(
+                            code,
+                            new AssetLocation(asset.Location.Domain, assetPath),
+                            assetPath,
+                            source,
+                            shapePath,
+                            entry["BaseShapeCode"]?.ToString(),
+                            enabled);
+                    }
+                }
+
+                return configs;
+            }
+
+            private static bool TryFindBestAnimationSource(
+                IReadOnlyList<EntityProperties> candidates,
+                Shape modelShape,
+                out EntityProperties? entityType,
+                out Shape? animationShape,
+                out int matchedElements)
+            {
+                HashSet<string> modelElements = CollectShapeElementNames(modelShape);
+                entityType = null;
+                animationShape = null;
+                matchedElements = 0;
+                if (modelElements.Count == 0) return false;
+
+                foreach (EntityProperties candidate in candidates)
+                {
+                    Shape? candidateShape = candidate.Client?.LoadedShapeForEntity ?? candidate.Client?.LoadedShape;
+                    VanillaAnimation[] animations = candidateShape?.Animations ?? [];
+                    if (animations.Length == 0) continue;
+
+                    HashSet<string> animationElements = CollectAnimationElementNames(animations);
+                    int score = animationElements.Count(modelElements.Contains);
+                    if (score <= matchedElements) continue;
+
+                    matchedElements = score;
+                    entityType = candidate;
+                    animationShape = candidateShape;
+                }
+
+                return matchedElements > 0;
+            }
+
+            private static AssetLocation? ResolveShapeLocation(ICoreClientAPI api, string rawPath, string defaultDomain)
+            {
+                if (string.IsNullOrWhiteSpace(rawPath)) return null;
+                AssetLocation raw = AssetLocation.Create(rawPath.Trim(), string.IsNullOrWhiteSpace(defaultDomain) ? "game" : defaultDomain);
+                foreach (AssetLocation candidate in EnumerateShapeLocationCandidates(raw))
+                {
+                    if (api.Assets.TryGet(candidate, true) != null)
+                    {
+                        return candidate;
+                    }
+                }
+
+                return null;
+            }
+
+            private static IEnumerable<AssetLocation> EnumerateShapeLocationCandidates(AssetLocation raw)
+            {
+                string path = raw.Path.Replace('\\', '/').TrimStart('/');
+                string domain = raw.Domain;
+                yield return new AssetLocation(domain, path);
+
+                if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return new AssetLocation(domain, path + ".json");
+                }
+
+                if (!path.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return new AssetLocation(domain, "shapes/" + path);
+                    yield return new AssetLocation(domain, "shapes/" + path + ".json");
+                }
+            }
+
+            private static Shape? TryLoadShape(IAsset? asset)
+            {
+                if (asset == null) return null;
+                try
+                {
+                    return asset.ToObject<Shape>();
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            private static HashSet<string> CollectShapeElementNames(Shape shape)
+            {
+                HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
+                if (shape.Elements == null) return names;
+                foreach (ShapeElement element in shape.Elements)
+                {
+                    Collect(element, names);
+                }
+
+                return names;
+
+                static void Collect(ShapeElement element, HashSet<string> names)
+                {
+                    if (!string.IsNullOrWhiteSpace(element.Name)) names.Add(element.Name);
+                    if (element.Children == null) return;
+                    foreach (ShapeElement child in element.Children)
+                    {
+                        Collect(child, names);
+                    }
+                }
+            }
+
+            private static HashSet<string> CollectAnimationElementNames(IEnumerable<VanillaAnimation> animations)
+            {
+                HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
+                foreach (VanillaAnimation animation in animations)
+                {
+                    foreach (AnimationKeyFrame keyFrame in animation.KeyFrames ?? [])
+                    {
+                        if (keyFrame.Elements == null) continue;
+                        foreach (string elementName in keyFrame.Elements.Keys)
+                        {
+                            if (!string.IsNullOrWhiteSpace(elementName)) names.Add(elementName);
+                        }
+                    }
+                }
+
+                return names;
+            }
+
+            private static string NormalizeModelCode(string code, string defaultDomain)
+            {
+                AssetLocation location = AssetLocation.Create(code, string.IsNullOrWhiteSpace(defaultDomain) ? "game" : defaultDomain);
+                return $"{location.Domain}:{location.Path}";
+            }
+
+            private sealed record VanillaPlayerModelConfig(
+                string Code,
+                AssetLocation ConfigLocation,
+                string ConfigAssetPath,
+                JObject SourceJson,
+                string ShapePath,
+                string? BaseShapeCode,
+                bool Enabled)
+            {
+                public string FullCode => Code;
+            }
         }
 
         private sealed class VanillaEntitySourceIndex
@@ -6740,22 +7067,25 @@ public sealed partial class DebugWindowManager
         {
             VanillaEntityMember selectedMember = option.Members[Math.Clamp(memberIndex, 0, option.Members.Count - 1)];
             EntityProperties entityType = selectedMember.EntityType;
+            VanillaPlayerModelSource? playerModel = selectedMember.PlayerModel;
             try
             {
                 _documents.Clear();
                 _shapeAnimationsByCode.Clear();
 
                 AnimationMetaData[]? metadata = entityType.Client?.Animations;
-                Shape? shape = entityType.Client?.LoadedShapeForEntity ?? entityType.Client?.LoadedShape;
-                string entityCode = entityType.Code?.ToString() ?? $"entity-{entityType.Id}";
+                Shape? shape = playerModel?.Shape ?? entityType.Client?.LoadedShapeForEntity ?? entityType.Client?.LoadedShape;
+                string entityCode = playerModel?.FullCode ?? entityType.Code?.ToString() ?? $"entity-{entityType.Id}";
                 string groupLabel = groupEdit && option.Members.Count > 1 ? option.Label : ImGuiLayoutHelper.CompactAssetCode(entityCode);
 
-                JObject? entitySourceJson = selectedMember.Source?.SourceJson ?? TryLoadJson(api, GetEntityAssetLocation(entityType));
-                AssetLocation? entityAssetLocation = selectedMember.Source?.Location ?? GetEntityAssetLocation(entityType);
-                AssetLocation? shapeAssetLocation = GetShapeAssetLocation(entityType);
-                JObject? shapeSourceJson = TryLoadJson(api, shapeAssetLocation);
+                JObject? entitySourceJson = playerModel?.ConfigSourceJson ?? selectedMember.Source?.SourceJson ?? TryLoadJson(api, GetEntityAssetLocation(entityType));
+                AssetLocation? entityAssetLocation = playerModel?.ConfigLocation ?? selectedMember.Source?.Location ?? GetEntityAssetLocation(entityType);
+                AssetLocation? shapeAssetLocation = playerModel?.ShapeLocation ?? GetShapeAssetLocation(entityType);
+                JObject? shapeSourceJson = playerModel?.ShapeSourceJson ?? TryLoadJson(api, shapeAssetLocation);
                 IReadOnlyList<VanillaEntityMember> editMembers = groupEdit ? option.Members : [selectedMember];
-                VanillaGroupTargets shapeTargets = BuildGroupTargets(editMembers, selectedMember, VanillaDocumentKind.Shape);
+                VanillaGroupTargets shapeTargets = playerModel != null
+                    ? new VanillaGroupTargets([playerModel.AnimationEntityType], 0)
+                    : BuildGroupTargets(editMembers, selectedMember, VanillaDocumentKind.Shape);
                 VanillaGroupTargets metadataTargets = BuildGroupTargets(editMembers, selectedMember, VanillaDocumentKind.EntityMetadata);
 
                 VanillaAnimationDocument? shapeDocument = null;
@@ -6766,7 +7096,7 @@ public sealed partial class DebugWindowManager
                         Kind = VanillaDocumentKind.Shape,
                         Domain = shapeAssetLocation?.Domain ?? entityType.Code?.Domain ?? "game",
                         AssetPath = shapeAssetLocation != null ? EnsureJsonPath(shapeAssetLocation.Path) : $"shapes/{entityType.Code?.Path ?? entityCode}.json",
-                        DisplayPath = $"{entityCode} shape",
+                        DisplayPath = playerModel != null ? $"{entityCode} Playermodelib model" : $"{entityCode} shape",
                         EntityCode = entityCode,
                         EntityType = entityType,
                         Shape = shape,
@@ -6774,7 +7104,8 @@ public sealed partial class DebugWindowManager
                         GroupLabel = groupLabel,
                         RuntimeTargetEntities = shapeTargets.Targets,
                         RuntimeSkippedMembers = shapeTargets.Skipped,
-                        RuntimeGroupKind = option.GroupKind
+                        RuntimeGroupKind = playerModel != null ? "Playermodelib model" : option.GroupKind,
+                        PlayerModelSource = playerModel
                     };
 
                     for (int index = 0; index < shape.Animations.Length; index++)
@@ -6790,42 +7121,49 @@ public sealed partial class DebugWindowManager
                     shapeDocument.MarkClean();
                 }
 
-                VanillaAnimationDocument metadataDocument = new()
+                if (playerModel == null)
                 {
-                    Kind = VanillaDocumentKind.EntityMetadata,
-                    Domain = entityAssetLocation?.Domain ?? entityType.Code?.Domain ?? "game",
-                    AssetPath = entityAssetLocation?.Path ?? $"entities/{entityType.Code?.Path ?? entityCode}.json",
-                    DisplayPath = entityCode,
-                    EntityCode = entityCode,
-                    EntityType = entityType,
-                    Shape = shape,
-                    SourceJson = entitySourceJson,
-                    GroupLabel = groupLabel,
-                    RuntimeTargetEntities = metadataTargets.Targets,
-                    RuntimeSkippedMembers = metadataTargets.Skipped,
-                    RuntimeGroupKind = option.GroupKind
-                };
-
-                if (metadata != null)
-                {
-                    for (int index = 0; index < metadata.Length; index++)
+                    VanillaAnimationDocument metadataDocument = new()
                     {
-                        AnimationMetaData editable = CloneAnimationMetaData(metadata[index]);
-                        VanillaShapeAnimationEntry? linkedShape = ResolveShapeAnimation(editable.Animation);
-                        metadataDocument.MetadataEntries.Add(new(metadataDocument, index, editable, linkedShape, GetNestedArrayElement(entitySourceJson, ["client", "animations"], index)));
+                        Kind = VanillaDocumentKind.EntityMetadata,
+                        Domain = entityAssetLocation?.Domain ?? entityType.Code?.Domain ?? "game",
+                        AssetPath = entityAssetLocation?.Path ?? $"entities/{entityType.Code?.Path ?? entityCode}.json",
+                        DisplayPath = entityCode,
+                        EntityCode = entityCode,
+                        EntityType = entityType,
+                        Shape = shape,
+                        SourceJson = entitySourceJson,
+                        GroupLabel = groupLabel,
+                        RuntimeTargetEntities = metadataTargets.Targets,
+                        RuntimeSkippedMembers = metadataTargets.Skipped,
+                        RuntimeGroupKind = option.GroupKind
+                    };
+
+                    if (metadata != null)
+                    {
+                        for (int index = 0; index < metadata.Length; index++)
+                        {
+                            AnimationMetaData editable = CloneAnimationMetaData(metadata[index]);
+                            VanillaShapeAnimationEntry? linkedShape = ResolveShapeAnimation(editable.Animation);
+                            metadataDocument.MetadataEntries.Add(new(metadataDocument, index, editable, linkedShape, GetNestedArrayElement(entitySourceJson, ["client", "animations"], index)));
+                        }
                     }
+
+                    _documents.Add(metadataDocument);
+                    metadataDocument.MarkClean();
                 }
 
-                _documents.Add(metadataDocument);
-                metadataDocument.MarkClean();
                 RebuildLinks();
 
                 int shapeCount = shapeDocument?.ShapeAnimations.Count ?? 0;
-                int metadataCount = metadataDocument.MetadataEntries.Count;
+                int metadataCount = _documents.Sum(document => document.MetadataEntries.Count);
                 string targetStatus = groupEdit && option.Members.Count > 1
                     ? $" Group edit targets: metadata {metadataTargets.Targets.Count}/{editMembers.Count}, shape {shapeTargets.Targets.Count}/{editMembers.Count}."
                     : "";
-                Status = $"Indexed {entityCode}: {shapeCount} shape animations, {metadataCount} metadata entries.{targetStatus}";
+                string playerModelStatus = playerModel == null
+                    ? ""
+                    : $" Playermodelib model shape uses animations from {playerModel.AnimationSourceCode} ({playerModel.MatchedElementCount} matched elements).";
+                Status = $"Indexed {entityCode}: {shapeCount} shape animations, {metadataCount} metadata entries.{targetStatus}{playerModelStatus}";
             }
             catch (Exception exception)
             {
@@ -6906,6 +7244,7 @@ public sealed partial class DebugWindowManager
         public EntityProperties? EntityType { get; init; }
         public Shape? Shape { get; init; }
         public JObject? SourceJson { get; init; }
+        public VanillaPlayerModelSource? PlayerModelSource { get; init; }
         public string GroupLabel { get; init; } = "";
         public IReadOnlyList<EntityProperties> RuntimeTargetEntities { get; init; } = [];
         public int RuntimeSkippedMembers { get; init; }
@@ -7859,6 +8198,14 @@ public sealed partial class DebugWindowManager
 
         private static CompositeShape? GetCompositeShape(VanillaBrowserRow row)
         {
+            if (row.Document.PlayerModelSource != null ||
+                row.ShapeAnimation?.Document.PlayerModelSource != null ||
+                row.MetadataEntry?.Document.PlayerModelSource != null ||
+                row.MetadataEntry?.LinkedShape?.Document.PlayerModelSource != null)
+            {
+                return null;
+            }
+
             EntityClientProperties? client = row.Document.EntityType?.Client
                 ?? row.ShapeAnimation?.Document.EntityType?.Client
                 ?? row.MetadataEntry?.Document.EntityType?.Client
