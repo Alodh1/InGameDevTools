@@ -147,6 +147,7 @@ public sealed partial class DebugWindowManager
     private bool _worldgenPreviewShowOracleDiff = true;
     private double _worldgenPreview3DDrawAverageMs;
     private string _worldgenPreview3DDrawProfileStatus = "3D draw profile not sampled yet.";
+    private string _worldgenPreviewSaveIntegrityStatus = "Save-integrity audit not run.";
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -1204,8 +1205,19 @@ public sealed partial class DebugWindowManager
             ClearWorldgenLoadedWorldOracle("No loaded-world comparison yet.");
         }
 
+        ImGui.SameLine();
+        if (ImGui.Button("Run safety audit##worldgen-save-integrity-audit"))
+        {
+            RunWorldgenSaveIntegrityAudit("manual audit");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Checks for active preview peeks, forces restore if needed, and verifies generation flags against the last captured peek state.");
+        }
+
         ImGui.Checkbox("Show diff overlay##worldgen-show-oracle-diff", ref _worldgenPreviewShowOracleDiff);
         ImGui.TextDisabled(_worldgenPreviewOracleStatus);
+        ImGui.TextDisabled(_worldgenPreviewSaveIntegrityStatus);
 
         ImGui.TextDisabled(_worldgenPreviewPeekStatus);
         if (_worldgenPreviewPeekProfile is { } profile)
@@ -3093,6 +3105,7 @@ public sealed partial class DebugWindowManager
         _worldgenPreviewPeekPending = false;
         _worldgenPreviewPeekDirty = false;
         _worldgenPreviewAutoPeekStatus = $"Auto 3D refresh stopped: {reason}.";
+        UpdateWorldgenSaveIntegrityStatus(activePeek, cleanup, reason);
         return $"{restoreStatus}; {cleanup.Summary}";
     }
 
@@ -3121,7 +3134,105 @@ public sealed partial class DebugWindowManager
 
         restoreStatus = activePeek.RestoreLiveState();
         cleanup = activePeek.CleanupPreviewColumns();
+        UpdateWorldgenSaveIntegrityStatus(activePeek, cleanup, "peek completed");
         return true;
+    }
+
+    private void RunWorldgenSaveIntegrityAudit(string reason)
+    {
+        string restoreSummary = RestoreActiveWorldgenPeek(reason);
+        if (!string.Equals(restoreSummary, "No active real terrain peek.", StringComparison.Ordinal))
+        {
+            _worldgenPreviewPeekStatus = $"Safety audit restored an active real terrain peek: {restoreSummary}";
+            return;
+        }
+
+        if (_worldgenPreviewServerApi == null)
+        {
+            RefreshWorldgenServerApi();
+        }
+
+        IWorldManagerAPI? worldManager = _worldgenPreviewServerApi?.WorldManager;
+        if (worldManager == null)
+        {
+            _worldgenPreviewSaveIntegrityStatus = "Save-integrity audit INCOMPLETE: integrated singleplayer WorldManager unavailable.";
+            return;
+        }
+
+        List<string> parts = ["no active real terrain peek"];
+        if (TryGetWorldgenAutoGenerateChunks(worldManager, out bool autoGenerate))
+        {
+            parts.Add($"AutoGenerateChunks={autoGenerate}");
+        }
+        else
+        {
+            parts.Add("AutoGenerateChunks unreadable");
+        }
+
+        if (TryGetWorldgenSendChunks(worldManager, out bool sendChunks))
+        {
+            parts.Add($"SendChunks={sendChunks}");
+        }
+        else
+        {
+            parts.Add("SendChunks unreadable");
+        }
+
+        string? cleanupStatus = _worldgenPreviewPeekProfile?.CleanupSummary;
+        if (!string.IsNullOrWhiteSpace(cleanupStatus))
+        {
+            parts.Add(cleanupStatus);
+        }
+
+        _worldgenPreviewSaveIntegrityStatus = "Save-integrity audit READY: " + string.Join("; ", parts) + ". Full byte-identical save validation still requires an external save snapshot.";
+    }
+
+    private void UpdateWorldgenSaveIntegrityStatus(WorldgenActivePeek activePeek, WorldgenPeekCleanupResult cleanup, string reason)
+    {
+        IWorldManagerAPI worldManager = activePeek.WorldManager;
+        List<string> failures = [];
+        List<string> parts = [$"restored after {reason}", cleanup.Summary];
+
+        if (activePeek.AutoGenerateChanged)
+        {
+            if (TryGetWorldgenAutoGenerateChunks(worldManager, out bool autoGenerate))
+            {
+                parts.Add($"AutoGenerateChunks={autoGenerate}");
+                if (autoGenerate != activePeek.ExpectedAutoGenerate)
+                {
+                    failures.Add($"AutoGenerateChunks expected {activePeek.ExpectedAutoGenerate} but is {autoGenerate}");
+                }
+            }
+            else
+            {
+                failures.Add("AutoGenerateChunks unreadable after restore");
+            }
+        }
+
+        if (activePeek.SendChunksChanged)
+        {
+            if (TryGetWorldgenSendChunks(worldManager, out bool sendChunks))
+            {
+                parts.Add($"SendChunks={sendChunks}");
+                if (sendChunks != activePeek.ExpectedSendChunks)
+                {
+                    failures.Add($"SendChunks expected {activePeek.ExpectedSendChunks} but is {sendChunks}");
+                }
+            }
+            else
+            {
+                failures.Add("SendChunks unreadable after restore");
+            }
+        }
+
+        if (cleanup.FailedColumns > 0)
+        {
+            failures.Add($"{cleanup.FailedColumns} preview column cleanup failure(s)");
+        }
+
+        _worldgenPreviewSaveIntegrityStatus = failures.Count == 0
+            ? "Save-integrity audit PASS: " + string.Join("; ", parts) + "."
+            : "Save-integrity audit DIFF: " + string.Join("; ", failures) + "; " + string.Join("; ", parts) + ".";
     }
 
     private bool IsActiveWorldgenPeek(WorldgenActivePeek activePeek)
@@ -6073,6 +6184,11 @@ public sealed partial class DebugWindowManager
         public long Id { get; }
         public DateTime StartedUtc { get; }
         public string Label { get; }
+        public IWorldManagerAPI WorldManager => _worldManager;
+        public bool AutoGenerateChanged => _autoGenerateChanged;
+        public bool ExpectedAutoGenerate => _restoreAutoGenerate;
+        public bool SendChunksChanged => _sendChunksChanged;
+        public bool ExpectedSendChunks => _restoreSendChunks;
         public bool DraftApplied => _draftScope.Applied;
         public string DraftStatus => _draftScope.Status;
         public string DraftFallbackStatus { get; }
