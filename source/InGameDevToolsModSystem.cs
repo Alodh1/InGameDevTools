@@ -29,6 +29,8 @@ public sealed class InGameDevToolsModSystem : ModSystem
     private long _ensureBehaviorsListener = -1;
     private static bool _fontRegistrationAttempted;
 
+    public static string? BundledOpenDyslexicFontPath { get; private set; }
+
     public override bool ShouldLoad(EnumAppSide forSide) => forSide == EnumAppSide.Client;
 
     public override void StartPre(ICoreAPI api)
@@ -178,6 +180,7 @@ public sealed class InGameDevToolsModSystem : ModSystem
         {
             string? fontPath = ExtractEmbeddedFont(api, "InGameDevTools.Fonts.OpenDyslexic-Regular.otf", "OpenDyslexic-Regular.otf");
             if (string.IsNullOrWhiteSpace(fontPath)) return;
+            BundledOpenDyslexicFontPath = fontPath;
 
             FontManager.BeforeFontsLoaded += (fonts, sizes) =>
             {

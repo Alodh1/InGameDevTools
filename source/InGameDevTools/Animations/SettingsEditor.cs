@@ -1,8 +1,9 @@
 using ImGuiNET;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using System.Globalization;
+using System.Collections;
 using System.Numerics;
+using System.Reflection;
 using VSImGui;
 using VSImGui.API;
 using NVector2 = System.Numerics.Vector2;
@@ -13,6 +14,7 @@ namespace InGameDevTools.Animations;
 public sealed partial class DebugWindowManager
 {
     private const string SettingsPresetVintageBrown = DevToolsConfig.PresetVintageBrown;
+    private const string SettingsPresetClassicDark = "Classic Dark";
     private const string SettingsPresetHighContrastDark = "High Contrast Dark";
     private const string SettingsPresetHighContrastLight = "High Contrast Light";
     private const string SettingsPresetLowContrastNeutral = "Low Contrast Neutral";
@@ -24,6 +26,7 @@ public sealed partial class DebugWindowManager
     private static readonly string[] SettingsThemePresets =
     [
         SettingsPresetVintageBrown,
+        SettingsPresetClassicDark,
         SettingsPresetHighContrastDark,
         SettingsPresetHighContrastLight,
         SettingsPresetLowContrastNeutral,
@@ -37,6 +40,9 @@ public sealed partial class DebugWindowManager
     private double _devToolsConfigSaveAfter;
     private string _settingsStatus = "Settings ready.";
     private string _settingsImportJson = "";
+    private bool _settingsOpenDyslexicLoadQueued;
+    private string _settingsFontRuntimeStatus = "";
+    private readonly HashSet<string> _settingsFailedRuntimeFontLoads = new(StringComparer.OrdinalIgnoreCase);
 
     private void ApplyDevToolsConfigToRuntime()
     {
@@ -163,6 +169,7 @@ public sealed partial class DebugWindowManager
         if (ImGui.Combo("Font##settings-font", ref fontIndex, fontOptions.ToArray(), fontOptions.Count))
         {
             _devToolsConfig.FontName = fontOptions[fontIndex];
+            QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName, _devToolsConfig.FontSize);
             changed = true;
         }
 
@@ -171,10 +178,16 @@ public sealed partial class DebugWindowManager
         if (ImGui.SliderInt("Font size##settings-font-size", ref fontSize, 12, 28))
         {
             _devToolsConfig.FontSize = fontSize;
+            QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName, _devToolsConfig.FontSize);
             changed = true;
         }
 
+        QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName, _devToolsConfig.FontSize);
         ImGui.TextDisabled(GetSettingsFontStatus(fontOptions));
+        if (!string.IsNullOrWhiteSpace(_settingsFontRuntimeStatus))
+        {
+            ImGui.TextDisabled(_settingsFontRuntimeStatus);
+        }
     }
 
     private void DrawSettingsAccessibilityControls(ref bool changed)
@@ -262,28 +275,59 @@ public sealed partial class DebugWindowManager
             changed = true;
         }
 
-        ImGui.BeginChild("##settings-color-list", new NVector2(-float.Epsilon, 360f * Math.Max(0.75f, _devToolsUiScale)), true);
+        ImGui.TextDisabled("Click a swatch to edit. Rows stay compact so every color slot remains readable.");
+        float height = 420f * Math.Max(0.75f, _devToolsUiScale);
+        ImGuiTableFlags flags =
+            ImGuiTableFlags.RowBg |
+            ImGuiTableFlags.BordersInnerV |
+            ImGuiTableFlags.BordersOuter |
+            ImGuiTableFlags.ScrollY |
+            ImGuiTableFlags.Resizable |
+            ImGuiTableFlags.SizingStretchProp;
+        if (!ImGui.BeginTable("##settings-color-table", 4, flags, new NVector2(-float.Epsilon, height))) return;
+
+        ImGui.TableSetupColumn("Color", ImGuiTableColumnFlags.WidthFixed, 58f);
+        ImGui.TableSetupColumn("Slot", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn("RGBA", ImGuiTableColumnFlags.WidthFixed, 190f);
+        ImGui.TableSetupColumn("Reset", ImGuiTableColumnFlags.WidthFixed, 58f);
+        ImGui.TableHeadersRow();
+
         foreach (ImGuiCol colorSlot in Enum.GetValues<ImGuiCol>())
         {
             if (colorSlot == ImGuiCol.COUNT) continue;
 
             string name = colorSlot.ToString();
-            NVector4 edit = GetCurrentStyleColor(colorSlot);
+            NVector4 color = GetCurrentStyleColor(colorSlot);
             ImGui.PushID($"settings-color-{name}");
-            ImGui.SetNextItemWidth(Math.Max(180f, ImGui.GetContentRegionAvail().X - 96f));
-            if (ImGui.ColorEdit4(name, ref edit, ImGuiColorEditFlags.AlphaBar))
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0);
+            if (ImGui.ColorButton("##swatch", color, ImGuiColorEditFlags.AlphaPreviewHalf, new NVector2(34f, 20f)))
             {
-                _devToolsConfig.AdvancedColorOverrides[name] =
-                [
-                    Math.Clamp(edit.X, 0f, 1f),
-                    Math.Clamp(edit.Y, 0f, 1f),
-                    Math.Clamp(edit.Z, 0f, 1f),
-                    Math.Clamp(edit.W, 0f, 1f)
-                ];
-                _devToolsConfig.ThemePreset = SettingsPresetCustom;
-                changed = true;
+                ImGui.OpenPopup("picker");
             }
-            ImGui.SameLine();
+            if (ImGui.BeginPopup("picker"))
+            {
+                NVector4 edit = color;
+                if (ImGui.ColorPicker4("##picker", ref edit, ImGuiColorEditFlags.AlphaBar | ImGuiColorEditFlags.AlphaPreviewHalf))
+                {
+                    SetSettingsColorOverride(name, edit);
+                    changed = true;
+                }
+                if (ImGui.Button("Reset color##settings-popup-reset"))
+                {
+                    _devToolsConfig.AdvancedColorOverrides.Remove(name);
+                    _devToolsConfig.ThemePreset = SettingsPresetCustom;
+                    changed = true;
+                    ImGui.CloseCurrentPopup();
+                }
+                ImGui.EndPopup();
+            }
+
+            ImGui.TableSetColumnIndex(1);
+            ImGui.TextUnformatted(name);
+            ImGui.TableSetColumnIndex(2);
+            ImGui.TextDisabled($"{ColorByte(color.X),3}, {ColorByte(color.Y),3}, {ColorByte(color.Z),3}, {ColorByte(color.W),3}");
+            ImGui.TableSetColumnIndex(3);
             bool hasOverride = _devToolsConfig.AdvancedColorOverrides.ContainsKey(name);
             if (!hasOverride) ImGui.BeginDisabled();
             if (ImGui.SmallButton("Reset"))
@@ -295,7 +339,7 @@ public sealed partial class DebugWindowManager
             if (!hasOverride) ImGui.EndDisabled();
             ImGui.PopID();
         }
-        ImGui.EndChild();
+        ImGui.EndTable();
     }
 
     private void DrawSettingsImportExport(ref bool changed)
@@ -351,6 +395,23 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void SetSettingsColorOverride(string name, NVector4 value)
+    {
+        _devToolsConfig.AdvancedColorOverrides[name] =
+        [
+            Math.Clamp(value.X, 0f, 1f),
+            Math.Clamp(value.Y, 0f, 1f),
+            Math.Clamp(value.Z, 0f, 1f),
+            Math.Clamp(value.W, 0f, 1f)
+        ];
+        _devToolsConfig.ThemePreset = SettingsPresetCustom;
+    }
+
+    private static int ColorByte(float value)
+    {
+        return (int)MathF.Round(Math.Clamp(value, 0f, 1f) * 255f);
+    }
+
     private List<string> GetSettingsFontOptions()
     {
         SortedSet<string> fonts = new(StringComparer.OrdinalIgnoreCase)
@@ -388,7 +449,7 @@ public sealed partial class DebugWindowManager
         bool loaded = TryResolveSettingsFontName(_devToolsConfig.FontName, _devToolsConfig.FontSize, out _);
         return loaded
             ? $"Loaded: {_devToolsConfig.FontName} {_devToolsConfig.FontSize}px."
-            : $"{_devToolsConfig.FontName} is registered for startup; restart the game if it is not already loaded.";
+            : $"{_devToolsConfig.FontName} is not loaded yet.";
     }
 
     private static bool TryResolveSettingsFontName(string fontName, int size, out string resolvedName)
@@ -415,6 +476,124 @@ public sealed partial class DebugWindowManager
         return false;
     }
 
+    private void QueueSettingsFontRuntimeLoadIfNeeded(string fontName, int size)
+    {
+        if (!fontName.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase)) return;
+        if (TryResolveSettingsFontName(fontName, size, out _)) return;
+        if (_settingsOpenDyslexicLoadQueued) return;
+
+        string loadKey = $"{fontName}:{size}";
+        if (_settingsFailedRuntimeFontLoads.Contains(loadKey)) return;
+
+        _settingsOpenDyslexicLoadQueued = true;
+        _settingsFontRuntimeStatus = $"Loading {SettingsFontOpenDyslexic} {size}px...";
+        _api.Event.EnqueueMainThreadTask(() =>
+        {
+            _settingsOpenDyslexicLoadQueued = false;
+            _settingsFontRuntimeStatus = TryLoadOpenDyslexicRuntime(size);
+            if (!TryResolveSettingsFontName(fontName, size, out _))
+            {
+                _settingsFailedRuntimeFontLoads.Add(loadKey);
+            }
+        }, "ingamedevtools-load-opendyslexic-font");
+    }
+
+    private string TryLoadOpenDyslexicRuntime(int size)
+    {
+        try
+        {
+            if (TryResolveSettingsFontName(SettingsFontOpenDyslexic, size, out _))
+            {
+                return $"{SettingsFontOpenDyslexic} {size}px is loaded.";
+            }
+
+            string? path = InGameDevToolsModSystem.BundledOpenDyslexicFontPath;
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return "OpenDyslexic font file was not extracted; restart may be required.";
+            }
+
+            ImFontPtr font = ImGui.GetIO().Fonts.AddFontFromFileTTF(path, size);
+            RegisterRuntimeFontWithVSImGui(path, size, font);
+            bool refreshed = RefreshVSImGuiFontTexture();
+            return refreshed
+                ? $"Loaded {SettingsFontOpenDyslexic} {size}px at runtime."
+                : $"Loaded {SettingsFontOpenDyslexic} {size}px; texture refresh may require reopening the ImGui window.";
+        }
+        catch (Exception exception)
+        {
+            _api.Logger.Warning("[InGameDevTools] OpenDyslexic runtime load failed: {0}", exception);
+            return $"OpenDyslexic runtime load failed: {exception.Message}";
+        }
+    }
+
+    private static void RegisterRuntimeFontWithVSImGui(string path, int size, ImFontPtr font)
+    {
+        AddToFontManagerSet("Fonts", path);
+        AddToFontManagerSet("Sizes", size);
+
+        object? loaded = typeof(FontManager).GetProperty("Loaded", BindingFlags.Static | BindingFlags.NonPublic)?.GetValue(null);
+        if (loaded == null) return;
+
+        object key = ValueTuple.Create(Path.GetFileNameWithoutExtension(path), size);
+        PropertyInfo? indexer = loaded.GetType().GetProperty("Item");
+        indexer?.SetValue(loaded, font, [key]);
+    }
+
+    private static void AddToFontManagerSet(string propertyName, object value)
+    {
+        object? set = typeof(FontManager).GetProperty(propertyName, BindingFlags.Static | BindingFlags.NonPublic)?.GetValue(null);
+        set?.GetType().GetMethod("Add")?.Invoke(set, [value]);
+    }
+
+    private bool RefreshVSImGuiFontTexture()
+    {
+        try
+        {
+            object? controller = GetFieldRecursive(_imguiModSystem, "_controller")?.GetValue(_imguiModSystem);
+            if (controller == null) return false;
+
+            object? mainWindow = GetFieldRecursive(controller, "mMainWindow")?.GetValue(controller);
+            if (mainWindow == null) return false;
+
+            mainWindow.GetType().GetMethod("ContextMakeCurrent", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.Invoke(mainWindow, null);
+            object? renderer = mainWindow.GetType().GetProperty("ImGuiRenderer", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(mainWindow);
+            if (renderer == null) return false;
+
+            MethodInfo? recreate = GetMethodRecursive(renderer.GetType(), "RecreateFontDeviceTexture");
+            recreate?.Invoke(renderer, null);
+            return recreate != null;
+        }
+        catch (Exception exception)
+        {
+            _api.Logger.Warning("[InGameDevTools] Could not refresh VSImGui font texture: {0}", exception);
+            return false;
+        }
+    }
+
+    private static FieldInfo? GetFieldRecursive(object? instance, string name)
+    {
+        if (instance == null) return null;
+        for (Type? type = instance.GetType(); type != null; type = type.BaseType)
+        {
+            FieldInfo? field = type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (field != null) return field;
+        }
+
+        return null;
+    }
+
+    private static MethodInfo? GetMethodRecursive(Type? type, string name)
+    {
+        for (; type != null; type = type.BaseType)
+        {
+            MethodInfo? method = type.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (method != null) return method;
+        }
+
+        return null;
+    }
+
     private void ApplyPresetToConfig(string preset)
     {
         _devToolsConfig.ThemePreset = preset;
@@ -438,6 +617,9 @@ public sealed partial class DebugWindowManager
     {
         switch (preset)
         {
+            case SettingsPresetClassicDark:
+                ApplyStylePalette(style, new NVector4(0.09f, 0.09f, 0.10f, 1f), new NVector4(0.90f, 0.90f, 0.86f, 1f), new NVector4(0.66f, 0.48f, 0.25f, 1f), new NVector4(0.18f, 0.18f, 0.19f, 1f));
+                break;
             case SettingsPresetHighContrastDark:
                 ApplyStylePalette(style, new NVector4(0.02f, 0.02f, 0.02f, 1f), new NVector4(0.95f, 0.95f, 0.90f, 1f), new NVector4(0.95f, 0.72f, 0.12f, 1f), new NVector4(0.10f, 0.26f, 0.44f, 1f));
                 break;
