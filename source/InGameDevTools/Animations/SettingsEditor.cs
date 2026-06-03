@@ -52,6 +52,9 @@ public sealed partial class DebugWindowManager
         _showEditorDiagnostics = _devToolsConfig.ShowDiagnostics;
         _liveApplyManager.AutoApply = _devToolsConfig.AutoRuntimeApply;
         _liveApplyManager.WriteBackups = _devToolsConfig.WriteLiveBackups;
+        _vanillaIkMode = ParseVanillaIkChainMode(_devToolsConfig.AnimationIkMode);
+        _vanillaIkPreserveDraggedPartRotation = _devToolsConfig.AnimationIkPreserveDraggedPartRotation;
+        _vanillaIkLockMoveToDragAxis = _devToolsConfig.AnimationIkLockMoveToDragAxis;
     }
 
     private DevToolsStyleScope BeginDevToolsStyleScope()

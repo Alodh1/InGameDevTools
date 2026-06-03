@@ -969,12 +969,9 @@ public sealed partial class DebugWindowManager
         drawList.PopClipRect();
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(min + new NVector2(12f, 10f), text, $"{asset.Label} / {slot.DisplayName}");
-        drawList.AddText(min + new NVector2(12f, 30f), text, guiPreview
-            ? "2D GUI preview. RMB or MMB pans. Mouse wheel zooms."
-            : "RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms.");
         if (!string.IsNullOrWhiteSpace(_transformPreviewPlacementStatus))
         {
-            drawList.AddText(min + new NVector2(12f, 50f), text, _transformPreviewPlacementStatus);
+            drawList.AddText(min + new NVector2(12f, 30f), text, _transformPreviewPlacementStatus);
         }
     }
 

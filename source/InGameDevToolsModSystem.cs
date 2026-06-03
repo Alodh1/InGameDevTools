@@ -226,6 +226,10 @@ public sealed class DevToolsConfig
     public bool ApplyStyleGlobally { get; set; }
     public string FontName { get; set; } = FontDefault;
     public int FontSize { get; set; } = 16;
+    public string AnimationIkMode { get; set; } = "AutoConservative";
+    public bool AnimationIkPreserveDraggedPartRotation { get; set; } = true;
+    public bool AnimationIkLockMoveToDragAxis { get; set; } = true;
+    public Dictionary<string, string[]> AnimationIkAnchors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, float[]> AdvancedColorOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public float FramePaddingX { get; set; } = -1f;
     public float FramePaddingY { get; set; } = -1f;
@@ -242,6 +246,19 @@ public sealed class DevToolsConfig
         FontSize = Math.Clamp(FontSize <= 0 ? 16 : FontSize, 12, 28);
         ThemePreset = string.IsNullOrWhiteSpace(ThemePreset) ? PresetVintageBrown : ThemePreset.Trim();
         FontName = string.IsNullOrWhiteSpace(FontName) ? FontDefault : FontName.Trim();
+        AnimationIkMode = NormalizeAnimationIkMode(AnimationIkMode);
+        AnimationIkAnchors ??= new(StringComparer.OrdinalIgnoreCase);
+        AnimationIkAnchors = AnimationIkAnchors
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value != null)
+            .ToDictionary(
+                pair => pair.Key.Trim(),
+                pair => pair.Value
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => value.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                StringComparer.OrdinalIgnoreCase);
         AdvancedColorOverrides ??= new(StringComparer.OrdinalIgnoreCase);
         AdvancedColorOverrides = AdvancedColorOverrides
             .Where(pair => pair.Value is { Length: >= 4 })
@@ -276,6 +293,13 @@ public sealed class DevToolsConfig
     {
         if (float.IsNaN(value) || float.IsInfinity(value)) return fallback;
         return Math.Clamp(value, min, max);
+    }
+
+    private static string NormalizeAnimationIkMode(string? value)
+    {
+        if (string.Equals(value, "AutoExtended", StringComparison.OrdinalIgnoreCase)) return "AutoExtended";
+        if (string.Equals(value, "ManualOverride", StringComparison.OrdinalIgnoreCase)) return "ManualOverride";
+        return "AutoConservative";
     }
 }
 

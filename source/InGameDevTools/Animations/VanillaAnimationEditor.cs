@@ -115,8 +115,9 @@ public sealed partial class DebugWindowManager
     private bool _vanillaOnionSkinNext = true;
     private float _vanillaOnionSkinOpacity = 0.22f;
     private bool _vanillaIkFollowMove;
+    private bool _vanillaIkPreserveDraggedPartRotation = true;
     private bool _vanillaIkLockMoveToDragAxis = true;
-    private VanillaIkChainMode _vanillaIkMode = VanillaIkChainMode.AutoLimb;
+    private VanillaIkChainMode _vanillaIkMode = VanillaIkChainMode.AutoConservative;
     private readonly List<string> _vanillaIkChainElementNames = [];
     private bool _vanillaIkHasTarget;
     private float _vanillaIkTargetX;
@@ -343,30 +344,43 @@ public sealed partial class DebugWindowManager
             InvalidateVanillaBrowserFilter();
         }
 
-        ImGui.Checkbox("Overwrite exports##vanilla", ref _vanillaOverwriteExport);
+        ImGui.TextDisabled($"Showing {rows.Count} / {_vanillaBrowserAllRows.Count} indexed animations");
 
-        if (ImGui.Button("Export selected##vanilla", new NVector2(-1, 0)))
+        if (ImGui.CollapsingHeader("Actions##vanilla-browser-actions"))
         {
-            ExportSelectedVanillaDocument();
-        }
+            if (_vanillaIndex.HasSelectedEntity && ImGui.Button("Reload selected entity##vanilla", new NVector2(-1, 0)))
+            {
+                CommitPendingVanillaHistory();
+                _vanillaIndex.ReloadSelectedEntity(_api, ShouldVanillaUseGroupEdit(_vanillaIndex.SelectedEntityOption));
+                ResetVanillaEntitySelectionState();
+            }
 
-        if (ImGui.Button("Export all dirty##vanilla", new NVector2(-1, 0)))
-        {
-            ExportDirtyVanillaDocuments();
+            ImGui.Checkbox("Overwrite exports##vanilla", ref _vanillaOverwriteExport);
+
+            if (ImGui.Button("Export selected##vanilla", new NVector2(-1, 0)))
+            {
+                ExportSelectedVanillaDocument();
+            }
+
+            if (ImGui.Button("Export all dirty##vanilla", new NVector2(-1, 0)))
+            {
+                ExportDirtyVanillaDocuments();
+            }
         }
 
         DrawVanillaNewAnimationControls();
 
-        ImGui.SeparatorText("Index");
-        ImGui.TextWrapped(_vanillaIndex.Status);
-        if (!string.IsNullOrWhiteSpace(_vanillaStatus))
+        if (ImGui.CollapsingHeader("Index / diagnostics##vanilla-browser-index"))
         {
-            ImGui.TextWrapped(_vanillaStatus);
+            ImGui.TextWrapped(_vanillaIndex.Status);
+            if (!string.IsNullOrWhiteSpace(_vanillaStatus))
+            {
+                ImGui.TextWrapped(_vanillaStatus);
+            }
+            _animationDiagnostics.Draw("vanilla-browser", _showEditorDiagnostics);
         }
-        _animationDiagnostics.Draw("vanilla-browser", _showEditorDiagnostics);
 
         ImGui.Separator();
-        ImGui.TextDisabled($"Showing {rows.Count} / {_vanillaBrowserAllRows.Count} indexed animations");
         ImGui.BeginChild("##vanilla-browser-list", new NVector2(0, 0), false);
         DrawClippedVanillaBrowserRows(rows);
         ImGui.EndChild();
@@ -639,47 +653,6 @@ public sealed partial class DebugWindowManager
     {
         ImGui.SeparatorText("Entity");
 
-        bool grouped = _vanillaEntitySelectorMode == VanillaEntitySelectorMode.Grouped;
-        if (ImGui.RadioButton("Grouped##vanilla-entity-mode", grouped))
-        {
-            CommitPendingVanillaHistory();
-            _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Grouped;
-            _vanillaSingleVariantEdit = false;
-            _vanillaIndex.ClearSelection();
-            ResetVanillaEntitySelectionState();
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Collapse variants using source assets and animation compatibility.");
-        }
-
-        ImGui.SameLine();
-        if (ImGui.RadioButton("Exact##vanilla-entity-mode", !grouped))
-        {
-            CommitPendingVanillaHistory();
-            _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Exact;
-            _vanillaSingleVariantEdit = true;
-            _vanillaIndex.ClearSelection();
-            ResetVanillaEntitySelectionState();
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Show one row per loaded runtime entity type.");
-        }
-
-        bool showHidden = _vanillaShowHiddenEntities;
-        if (ImGui.Checkbox("Show hidden/helper##vanilla-show-hidden-entities", ref showHidden))
-        {
-            CommitPendingVanillaHistory();
-            _vanillaShowHiddenEntities = showHidden;
-            _vanillaIndex.ClearSelection();
-            ResetVanillaEntitySelectionState();
-        }
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Include entities marked by their source metadata as hidden, helper, debug, test, internal, technical, or bot-like.");
-        }
-
         ImGui.InputTextWithHint("##vanilla-entity-filter", "filter entities", ref _vanillaEntityFilter, 240);
 
         IReadOnlyList<VanillaEntityOption> options = _vanillaIndex.GetEntityOptions(_vanillaEntitySelectorMode, _vanillaShowHiddenEntities);
@@ -758,11 +731,48 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        if (_vanillaIndex.HasSelectedEntity && ImGui.Button("Reload selected entity##vanilla", new NVector2(-1, 0)))
+        if (ImGui.CollapsingHeader("Entity options##vanilla-entity-options"))
         {
-            CommitPendingVanillaHistory();
-            _vanillaIndex.ReloadSelectedEntity(_api, ShouldVanillaUseGroupEdit(_vanillaIndex.SelectedEntityOption));
-            ResetVanillaEntitySelectionState();
+            bool grouped = _vanillaEntitySelectorMode == VanillaEntitySelectorMode.Grouped;
+            if (ImGui.RadioButton("Grouped##vanilla-entity-mode", grouped))
+            {
+                CommitPendingVanillaHistory();
+                _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Grouped;
+                _vanillaSingleVariantEdit = false;
+                _vanillaIndex.ClearSelection();
+                ResetVanillaEntitySelectionState();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Collapse variants using source assets and animation compatibility.");
+            }
+
+            ImGui.SameLine();
+            if (ImGui.RadioButton("Exact##vanilla-entity-mode", !grouped))
+            {
+                CommitPendingVanillaHistory();
+                _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Exact;
+                _vanillaSingleVariantEdit = true;
+                _vanillaIndex.ClearSelection();
+                ResetVanillaEntitySelectionState();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Show one row per loaded runtime entity type.");
+            }
+
+            bool showHidden = _vanillaShowHiddenEntities;
+            if (ImGui.Checkbox("Show hidden/helper##vanilla-show-hidden-entities", ref showHidden))
+            {
+                CommitPendingVanillaHistory();
+                _vanillaShowHiddenEntities = showHidden;
+                _vanillaIndex.ClearSelection();
+                ResetVanillaEntitySelectionState();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Include entities marked by their source metadata as hidden, helper, debug, test, internal, technical, or bot-like.");
+            }
         }
     }
 
@@ -1307,13 +1317,12 @@ public sealed partial class DebugWindowManager
 
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"Preview: {scene.DisplayName}");
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), text, GetVanillaViewportHelpText(effectiveMode, scene));
         if (!string.IsNullOrWhiteSpace(ghostOverlayStatus))
         {
             uint ghostText = ImGui.ColorConvertFloat4ToU32(ghosts.Length > 0
                 ? new NVector4(0.54f, 0.86f, 1f, 1f)
                 : new NVector4(0.95f, 0.72f, 0.43f, 1f));
-            drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), ghostText, ghostOverlayStatus);
+            drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), ghostText, ghostOverlayStatus);
         }
 
         if (effectiveMode == VanillaPreviewMode.Orbit)
@@ -1559,18 +1568,6 @@ public sealed partial class DebugWindowManager
             VanillaPreviewMode.ImmersiveFirstPerson when scene.ImmersiveFirstPersonAvailable => VanillaPreviewMode.ImmersiveFirstPerson,
             _ => VanillaPreviewMode.Orbit
         };
-    }
-
-    private static string GetVanillaViewportHelpText(VanillaPreviewMode mode, VanillaAnimationPreviewScene scene)
-    {
-        if (!scene.FirstPersonAvailable && mode != VanillaPreviewMode.Orbit)
-        {
-            return "First-person preview is only available for player-style meshes. RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms.";
-        }
-
-        return mode == VanillaPreviewMode.Orbit
-            ? "LMB picks body parts. RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms."
-            : "First person: RMB adjusts preview yaw/pitch. MMB or Shift+RMB offsets. Mouse wheel changes hand FOV.";
     }
 
     private bool DrawVanillaViewportGizmo(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, ImDrawListPtr drawList, NVector2 min, NVector2 max, bool hovered)
@@ -2061,8 +2058,6 @@ public sealed partial class DebugWindowManager
         {
             TransformGizmoIncrement = Math.Max(0.001f, increment);
         }
-
-        ImGui.TextDisabled("Drag the colored viewport handles to edit the selected element.");
     }
 
     private bool TryGetVanillaViewportGizmoTarget(VanillaBrowserRow row, out VanillaShapeAnimationEntry entry, out VanillaAnimation animation, out AnimationKeyFrame keyFrame, out AnimationKeyFrameElement element)
@@ -3597,12 +3592,14 @@ public sealed partial class DebugWindowManager
 
         PruneVanillaIkChainElements(allElements);
 
-        if (ImGui.RadioButton("Auto limb##vanilla-ik-mode", _vanillaIkMode == VanillaIkChainMode.AutoLimb))
+        if (ImGui.RadioButton("Auto chain##vanilla-ik-mode", _vanillaIkMode != VanillaIkChainMode.ManualOverride))
         {
-            _vanillaIkMode = VanillaIkChainMode.AutoLimb;
+            _vanillaIkMode = _vanillaIkMode == VanillaIkChainMode.AutoExtended
+                ? VanillaIkChainMode.AutoExtended
+                : VanillaIkChainMode.AutoConservative;
             _vanillaIkHasTarget = false;
             ClearVanillaViewportGizmoDrag();
-            _vanillaStatus = "IK mode: auto limb. Select any element; the chain is detected from the shape hierarchy.";
+            SaveVanillaIkSettings("IK mode: auto chain. Select an element; the chain is detected from the shape hierarchy and anchors.");
         }
 
         ImGui.SameLine();
@@ -3611,7 +3608,27 @@ public sealed partial class DebugWindowManager
             _vanillaIkMode = VanillaIkChainMode.ManualOverride;
             _vanillaIkHasTarget = false;
             ClearVanillaViewportGizmoDrag();
-            _vanillaStatus = "IK mode: manual override. Click body parts or Ctrl+Click elements to edit the chain.";
+            SaveVanillaIkSettings("IK mode: manual override. Click body parts or Ctrl+Click elements to edit the chain.");
+        }
+
+        if (_vanillaIkMode != VanillaIkChainMode.ManualOverride)
+        {
+            int profile = _vanillaIkMode == VanillaIkChainMode.AutoExtended ? 1 : 0;
+            string[] profiles = ["Conservative", "Extended"];
+            ImGui.SetNextItemWidth(180f);
+            if (ImGui.Combo("Auto profile##vanilla-ik-profile", ref profile, profiles, profiles.Length))
+            {
+                _vanillaIkMode = profile == 1 ? VanillaIkChainMode.AutoExtended : VanillaIkChainMode.AutoConservative;
+                _vanillaIkHasTarget = false;
+                ClearVanillaViewportGizmoDrag();
+                SaveVanillaIkSettings(_vanillaIkMode == VanillaIkChainMode.AutoExtended
+                    ? "Auto IK profile: extended topology."
+                    : "Auto IK profile: conservative topology.");
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Conservative favors short chains that stop at anchors and body hubs. Extended allows longer linear appendages such as tails, necks, wings, and tentacles.");
+            }
         }
 
         bool hasChain = TryGetActiveVanillaIkChain(document, entry.Animation, keyFrame, selectedElementName, out VanillaIkManualChain chain, out string chainError, out string chainWarning);
@@ -3629,14 +3646,29 @@ public sealed partial class DebugWindowManager
             if (ImGui.Checkbox("Lock IK to drag axis##vanilla-ik-lock-drag-axis", ref lockToDragAxis))
             {
                 _vanillaIkLockMoveToDragAxis = lockToDragAxis;
-                _vanillaStatus = _vanillaIkLockMoveToDragAxis
+                SaveVanillaIkSettings(_vanillaIkLockMoveToDragAxis
                     ? "IK Move target locked to the active Move gizmo axis."
-                    : "IK Move target is free.";
+                    : "IK Move target is free.");
             }
             if (ImGui.IsItemHovered())
             {
                 ImGui.SetTooltip("When enabled, dragging a Move gizmo axis constrains the IK target to that same world/local axis instead of rebuilding the target from all offset channels.");
             }
+        }
+
+        bool preserveHandle = _vanillaIkPreserveDraggedPartRotation;
+        if (ImGui.Checkbox("Preserve dragged part rotation##vanilla-ik-preserve-handle", ref preserveHandle))
+        {
+            _vanillaIkPreserveDraggedPartRotation = preserveHandle;
+            _vanillaIkHasTarget = false;
+            ClearVanillaViewportGizmoDrag();
+            SaveVanillaIkSettings(_vanillaIkPreserveDraggedPartRotation
+                ? "IK handle rotation lock enabled."
+                : "IK handle rotation lock disabled.");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("On keeps the dragged body part's world orientation locked and solves the parent chain around it. Off allows the handle itself to rotate.");
         }
 
         if (_vanillaIkMode == VanillaIkChainMode.ManualOverride && ImGui.Button("Clear IK chain##vanilla-ik-clear"))
@@ -3647,9 +3679,11 @@ public sealed partial class DebugWindowManager
             _vanillaStatus = "IK chain cleared.";
         }
 
+        DrawVanillaIkAnchorControls(document, selectedElementName, allElements);
+
         if (hasChain)
         {
-            ImGui.TextDisabled(_vanillaIkMode == VanillaIkChainMode.AutoLimb
+            ImGui.TextDisabled(_vanillaIkMode != VanillaIkChainMode.ManualOverride
                 ? $"Auto chain: {chain.DisplayName} -> distal end of {chain.EndElementName}"
                 : $"Manual chain: {chain.DisplayName} -> distal end of {chain.EndElementName}");
             if (!string.IsNullOrWhiteSpace(chainWarning))
@@ -3662,7 +3696,7 @@ public sealed partial class DebugWindowManager
                 ImGui.TextDisabled($"IK Move handle: {chain.EndElementName}.");
             }
             ImGui.TextDisabled($"End effector: distal end of {chain.EndElementName}.");
-            if (_vanillaIkMode == VanillaIkChainMode.AutoLimb)
+            if (_vanillaIkMode != VanillaIkChainMode.ManualOverride)
             {
                 DrawVanillaAutoIkChainAdjusters(selectedElementName);
             }
@@ -3702,9 +3736,9 @@ public sealed partial class DebugWindowManager
             ImGui.TextDisabled("Set a target from the current end or edit target coordinates.");
         }
 
-        ImGui.TextDisabled(_vanillaIkMode == VanillaIkChainMode.AutoLimb
-            ? "Orbit viewport: click body parts to select them. IK detects limb chains structurally and stops before body hubs."
-            : "Manual override: click body parts or Ctrl+Click elements to add/remove IK chain bones.");
+        ImGui.TextDisabled(_vanillaIkMode != VanillaIkChainMode.ManualOverride
+            ? "Auto IK uses topology, anchors, and body hubs to choose the driver chain."
+            : "Manual override edits the exact chain from viewport clicks or Ctrl+Click rows.");
     }
 
     private void DrawVanillaAutoIkChainAdjusters(string selectedElementName)
@@ -3751,6 +3785,144 @@ public sealed partial class DebugWindowManager
             : $"Auto IK end extension: {value} extra bone(s).";
     }
 
+    private void DrawVanillaIkAnchorControls(VanillaAnimationDocument document, string selectedElementName, string[] allElements)
+    {
+        PruneVanillaIkAnchors(document, allElements);
+
+        bool hasSelection = !string.IsNullOrWhiteSpace(selectedElementName);
+        bool selectedPinned = hasSelection && ContainsVanillaIkAnchor(document, selectedElementName);
+        if (!hasSelection) ImGui.BeginDisabled();
+        if (ImGui.SmallButton(selectedPinned ? "Unpin IK anchor##vanilla-ik-anchor-toggle" : "Pin IK anchor##vanilla-ik-anchor-toggle"))
+        {
+            ToggleVanillaIkAnchor(document, selectedElementName);
+        }
+        if (!hasSelection) ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Pinned body parts stop automatic IK chains and are never rotated by auto IK. Manual override can still include them explicitly.");
+        }
+
+        string[] anchors = GetVanillaIkAnchors(document);
+        if (anchors.Length > 0)
+        {
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Clear anchors##vanilla-ik-anchor-clear"))
+            {
+                ClearVanillaIkAnchors(document);
+            }
+
+            ImGui.TextDisabled($"Anchors: {string.Join(", ", anchors)}");
+        }
+    }
+
+    private void SaveVanillaIkSettings(string status)
+    {
+        _devToolsConfig.AnimationIkMode = FormatVanillaIkChainMode(_vanillaIkMode);
+        _devToolsConfig.AnimationIkPreserveDraggedPartRotation = _vanillaIkPreserveDraggedPartRotation;
+        _devToolsConfig.AnimationIkLockMoveToDragAxis = _vanillaIkLockMoveToDragAxis;
+        _vanillaStatus = status;
+        QueueDevToolsConfigSave(status);
+    }
+
+    private static VanillaIkChainMode ParseVanillaIkChainMode(string? value)
+    {
+        if (string.Equals(value, "AutoExtended", StringComparison.OrdinalIgnoreCase)) return VanillaIkChainMode.AutoExtended;
+        if (string.Equals(value, "ManualOverride", StringComparison.OrdinalIgnoreCase)) return VanillaIkChainMode.ManualOverride;
+        return VanillaIkChainMode.AutoConservative;
+    }
+
+    private static string FormatVanillaIkChainMode(VanillaIkChainMode mode)
+    {
+        return mode switch
+        {
+            VanillaIkChainMode.AutoExtended => "AutoExtended",
+            VanillaIkChainMode.ManualOverride => "ManualOverride",
+            _ => "AutoConservative"
+        };
+    }
+
+    private static string GetVanillaIkAnchorKey(VanillaAnimationDocument document)
+    {
+        return document.HistoryKey;
+    }
+
+    private string[] GetVanillaIkAnchors(VanillaAnimationDocument document)
+    {
+        string key = GetVanillaIkAnchorKey(document);
+        if (!_devToolsConfig.AnimationIkAnchors.TryGetValue(key, out string[]? anchors) || anchors == null) return [];
+
+        return anchors
+            .Where(anchor => !string.IsNullOrWhiteSpace(anchor))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(anchor => anchor, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private bool ContainsVanillaIkAnchor(VanillaAnimationDocument document, string elementName)
+    {
+        return GetVanillaIkAnchors(document).Any(anchor => string.Equals(anchor, elementName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void ToggleVanillaIkAnchor(VanillaAnimationDocument document, string elementName)
+    {
+        if (string.IsNullOrWhiteSpace(elementName)) return;
+
+        string key = GetVanillaIkAnchorKey(document);
+        List<string> anchors = GetVanillaIkAnchors(document).ToList();
+        int index = anchors.FindIndex(anchor => string.Equals(anchor, elementName, StringComparison.OrdinalIgnoreCase));
+        if (index >= 0)
+        {
+            anchors.RemoveAt(index);
+            _vanillaStatus = $"IK anchor removed: {elementName}.";
+        }
+        else
+        {
+            anchors.Add(elementName.Trim());
+            _vanillaStatus = $"IK anchor pinned: {elementName}.";
+        }
+
+        if (anchors.Count == 0)
+        {
+            _devToolsConfig.AnimationIkAnchors.Remove(key);
+        }
+        else
+        {
+            _devToolsConfig.AnimationIkAnchors[key] = anchors
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(anchor => anchor, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        _vanillaIkHasTarget = false;
+        ClearVanillaViewportGizmoDrag();
+        SaveVanillaIkSettings(_vanillaStatus);
+    }
+
+    private void ClearVanillaIkAnchors(VanillaAnimationDocument document)
+    {
+        _devToolsConfig.AnimationIkAnchors.Remove(GetVanillaIkAnchorKey(document));
+        _vanillaIkHasTarget = false;
+        ClearVanillaViewportGizmoDrag();
+        SaveVanillaIkSettings("IK anchors cleared.");
+    }
+
+    private void PruneVanillaIkAnchors(VanillaAnimationDocument document, string[] allElements)
+    {
+        string key = GetVanillaIkAnchorKey(document);
+        if (!_devToolsConfig.AnimationIkAnchors.TryGetValue(key, out string[]? anchors) || anchors == null) return;
+
+        string[] pruned = anchors
+            .Where(anchor => ContainsElementName(allElements, anchor))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(anchor => anchor, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (pruned.Length == anchors.Length && pruned.SequenceEqual(anchors, StringComparer.OrdinalIgnoreCase)) return;
+
+        if (pruned.Length == 0) _devToolsConfig.AnimationIkAnchors.Remove(key);
+        else _devToolsConfig.AnimationIkAnchors[key] = pruned;
+        QueueDevToolsConfigSave("IK anchors pruned.");
+    }
+
     private void PruneVanillaIkChainElements(string[] allElements)
     {
         for (int index = _vanillaIkChainElementNames.Count - 1; index >= 0; index--)
@@ -3774,10 +3946,10 @@ public sealed partial class DebugWindowManager
     {
         return _vanillaIkMode == VanillaIkChainMode.ManualOverride
             ? TryGetManualVanillaIkChain(document.Shape, out chain, out error, out warning)
-            : TryGetAutoVanillaIkLimbChain(document, animation, keyFrame, selectedElementName, out chain, out error, out warning);
+            : TryGetAutoVanillaIkChain(document, animation, keyFrame, selectedElementName, out chain, out error, out warning);
     }
 
-    private bool TryGetAutoVanillaIkLimbChain(
+    private bool TryGetAutoVanillaIkChain(
         VanillaAnimationDocument document,
         VanillaAnimation animation,
         AnimationKeyFrame keyFrame,
@@ -3814,12 +3986,25 @@ public sealed partial class DebugWindowManager
         ShapeElement selected = path[^1];
         string resolvedSelectedName = string.IsNullOrWhiteSpace(selected.Name) ? selectedElementName.Trim() : selected.Name!;
         int selectedIndex = path.Count - 1;
+
+        if (ContainsVanillaIkAnchor(document, resolvedSelectedName))
+        {
+            error = $"{resolvedSelectedName} is pinned as an IK anchor. Select a downstream handle, unpin it, or use Manual override.";
+            return false;
+        }
+
         if (IsVanillaIkStructuralHub(selected, selectedIndex == 0, out string selectedHubReason))
         {
+            if (_vanillaIkMode != VanillaIkChainMode.AutoExtended)
+            {
+                error = $"{resolvedSelectedName} is {selectedHubReason}. Select an appendage, switch to Extended, or use Manual override.";
+                return false;
+            }
+
             if (TryGetVanillaIkLongestChildPath(selected, GetVanillaIkAutoMaxChainLength(), out List<ShapeElement> childPath, out string childNote) &&
                 TryBuildVanillaIkChainNames(childPath, out string[] childNames))
             {
-                warning = $"Selected {resolvedSelectedName} is {selectedHubReason}; auto uses child limb {childNames[0]}.";
+                warning = $"Selected {resolvedSelectedName} is {selectedHubReason}; Extended auto uses child chain {childNames[0]}.";
                 if (!string.IsNullOrWhiteSpace(childNote)) warning += $" {childNote}";
                 chain = new VanillaIkManualChain(childNames, childNames[^1], string.Join(" -> ", childNames));
                 return true;
@@ -3830,17 +4015,19 @@ public sealed partial class DebugWindowManager
             return true;
         }
 
-        int detectedStartIndex = FindVanillaIkStructuralChainStart(path, selectedIndex, out string stopReason);
-        int startIndex = Math.Max(0, detectedStartIndex - _vanillaIkAutoRootExtraBones);
+        int detectedStartIndex = FindVanillaIkAutoChainStart(document, path, selectedIndex, out string stopReason);
+        int hardAnchorStartIndex = FindVanillaIkHardAnchorStart(document, path, selectedIndex);
+        int startIndex = Math.Max(hardAnchorStartIndex, detectedStartIndex - _vanillaIkAutoRootExtraBones);
         int maxChainLength = GetVanillaIkAutoMaxChainLength();
         if (selectedIndex - startIndex + 1 > maxChainLength)
         {
-            startIndex = Math.Max(0, selectedIndex - maxChainLength + 1);
+            startIndex = Math.Max(hardAnchorStartIndex, selectedIndex - maxChainLength + 1);
         }
 
         var chainElements = path.Skip(startIndex).Take(selectedIndex - startIndex + 1).ToList();
         int remaining = Math.Max(0, maxChainLength - chainElements.Count);
         AppendVanillaIkLongestDescendantPath(chainElements, selected, remaining, out string extensionNote);
+        TrimVanillaIkChainAtAnchors(document, chainElements);
 
         if (!TryBuildVanillaIkChainNames(chainElements, out string[] orderedNames))
         {
@@ -3851,6 +4038,13 @@ public sealed partial class DebugWindowManager
         if (orderedNames.Length == 0)
         {
             error = $"IK element {selectedElementName} has no usable named chain.";
+            return false;
+        }
+
+        if (_vanillaIkMode == VanillaIkChainMode.AutoConservative &&
+            !IsVanillaIkConservativeChainAllowed(document, animation, keyFrame, path, startIndex, selectedIndex, orderedNames))
+        {
+            error = "Conservative auto IK could not prove a paired or clear linear appendage. Switch to Extended, pin anchors, or use Manual override.";
             return false;
         }
 
@@ -3883,17 +4077,27 @@ public sealed partial class DebugWindowManager
 
     private int GetVanillaIkAutoMaxChainLength()
     {
+        int baseLength = _vanillaIkMode == VanillaIkChainMode.AutoExtended
+            ? VanillaIkAutoAbsoluteMaxChainLength
+            : VanillaIkAutoMaxChainLength;
         return Math.Clamp(
-            VanillaIkAutoMaxChainLength + _vanillaIkAutoRootExtraBones + _vanillaIkAutoEndExtraBones,
+            baseLength + _vanillaIkAutoRootExtraBones + _vanillaIkAutoEndExtraBones,
             1,
             VanillaIkAutoAbsoluteMaxChainLength);
     }
 
-    private static int FindVanillaIkStructuralChainStart(IReadOnlyList<ShapeElement> path, int selectedIndex, out string stopReason)
+    private int FindVanillaIkAutoChainStart(VanillaAnimationDocument document, IReadOnlyList<ShapeElement> path, int selectedIndex, out string stopReason)
     {
         stopReason = "";
         for (int index = selectedIndex - 1; index >= 0; index--)
         {
+            string elementName = path[index].Name ?? "";
+            if (!string.IsNullOrWhiteSpace(elementName) && ContainsVanillaIkAnchor(document, elementName))
+            {
+                stopReason = $"{elementName} (pinned anchor)";
+                return Math.Min(selectedIndex, index + 1);
+            }
+
             if (!IsVanillaIkStructuralHub(path[index], index == 0, out string reason)) continue;
 
             string name = string.IsNullOrWhiteSpace(path[index].Name) ? "unnamed hub" : path[index].Name!;
@@ -3902,6 +4106,76 @@ public sealed partial class DebugWindowManager
         }
 
         return Math.Max(0, selectedIndex - 1);
+    }
+
+    private int FindVanillaIkHardAnchorStart(VanillaAnimationDocument document, IReadOnlyList<ShapeElement> path, int selectedIndex)
+    {
+        for (int index = selectedIndex - 1; index >= 0; index--)
+        {
+            string elementName = path[index].Name ?? "";
+            if (!string.IsNullOrWhiteSpace(elementName) && ContainsVanillaIkAnchor(document, elementName))
+            {
+                return Math.Min(selectedIndex, index + 1);
+            }
+        }
+
+        return 0;
+    }
+
+    private bool IsVanillaIkConservativeChainAllowed(
+        VanillaAnimationDocument document,
+        VanillaAnimation animation,
+        AnimationKeyFrame keyFrame,
+        IReadOnlyList<ShapeElement> path,
+        int startIndex,
+        int selectedIndex,
+        IReadOnlyList<string> orderedNames)
+    {
+        if (orderedNames.Count <= 2) return true;
+        if (IsVanillaIkClearLinearPath(path, startIndex, selectedIndex)) return true;
+
+        string[] allElements = BuildVanillaSymmetryElementUniverse(document, animation, keyFrame);
+        foreach (string elementName in orderedNames)
+        {
+            if (TryResolveVanillaSymmetryPair(document, elementName, allElements, out _, out VanillaSymmetrySide sourceSide, out _) &&
+                sourceSide != VanillaSymmetrySide.Unknown)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsVanillaIkClearLinearPath(IReadOnlyList<ShapeElement> path, int startIndex, int selectedIndex)
+    {
+        for (int index = Math.Max(0, startIndex); index < selectedIndex; index++)
+        {
+            ShapeElement current = path[index];
+            ShapeElement next = path[index + 1];
+            ShapeElement[] children = current.Children ?? [];
+            ShapeElement[] namedChildren = children
+                .Where(child => !string.IsNullOrWhiteSpace(child.Name))
+                .ToArray();
+            if (namedChildren.Length <= 1) continue;
+
+            int nextMatches = namedChildren.Count(child => string.Equals(child.Name, next.Name, StringComparison.OrdinalIgnoreCase));
+            if (nextMatches != 1) return false;
+        }
+
+        return true;
+    }
+
+    private void TrimVanillaIkChainAtAnchors(VanillaAnimationDocument document, List<ShapeElement> chainElements)
+    {
+        for (int index = 0; index < chainElements.Count; index++)
+        {
+            string elementName = chainElements[index].Name ?? "";
+            if (string.IsNullOrWhiteSpace(elementName) || !ContainsVanillaIkAnchor(document, elementName)) continue;
+
+            chainElements.RemoveRange(index, chainElements.Count - index);
+            return;
+        }
     }
 
     private static bool IsVanillaIkStructuralHub(ShapeElement element, bool isRoot, out string reason)
@@ -4155,7 +4429,7 @@ public sealed partial class DebugWindowManager
         }
 
         Vec3d target = new(_vanillaIkTargetX, _vanillaIkTargetY, _vanillaIkTargetZ);
-        if (!TrySolveVanillaIkCcdToTarget(cache, target, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
+        if (!TrySolveVanillaIkCcdToTarget(cache, target, _vanillaIkPreserveDraggedPartRotation, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
             return;
@@ -4499,7 +4773,7 @@ public sealed partial class DebugWindowManager
         Vec3d target = _vanillaIkLockMoveToDragAxis && dragModelDelta.LengthSquared() > 0.000001f
             ? Add(_vanillaIkDragCache.EndOrigin, new Vec3d(dragModelDelta.X, dragModelDelta.Y, dragModelDelta.Z))
             : GetVanillaIkDesiredEndTarget(_vanillaIkDragCache, desiredElement);
-        if (!TrySolveVanillaIkCcdToTarget(_vanillaIkDragCache, target, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
+        if (!TrySolveVanillaIkCcdToTarget(_vanillaIkDragCache, target, _vanillaIkPreserveDraggedPartRotation, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
             return false;
@@ -4508,9 +4782,10 @@ public sealed partial class DebugWindowManager
         ApplyVanillaIkSolvedElements(keyFrame, chain, solvedElements);
         ApplyVanillaElementEdit(row, entry, keyFrame, chain.ElementNames.ToArray());
         string targetMode = _vanillaIkLockMoveToDragAxis ? " on drag axis" : "";
+        string handleMode = _vanillaIkPreserveDraggedPartRotation ? " with locked handle" : "";
         _vanillaStatus = finalDistance <= VanillaIkSolveTolerance
-            ? $"IK Move solved {chain.ElementNames.Count} element(s){targetMode}."
-            : $"IK Move solved best effort{targetMode}; remaining distance {finalDistance:0.###}.";
+            ? $"IK Move solved {chain.ElementNames.Count} element(s){targetMode}{handleMode}."
+            : $"IK Move solved best effort{targetMode}{handleMode}; remaining distance {finalDistance:0.###}.";
         return true;
     }
 
@@ -4598,7 +4873,7 @@ public sealed partial class DebugWindowManager
         return Add(cache.EndOrigin, Add(Add(Scale(cache.SelectedAxes.X, dx), Scale(cache.SelectedAxes.Y, dy)), Scale(cache.SelectedAxes.Z, dz)));
     }
 
-    private static bool TrySolveVanillaIkCcdToTarget(VanillaIkCcdCache cache, Vec3d requestedTarget, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string error)
+    private static bool TrySolveVanillaIkCcdToTarget(VanillaIkCcdCache cache, Vec3d requestedTarget, bool preserveHandleRotation, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string error)
     {
         solvedElements = cache.StartElements.Select(CloneElement).ToArray();
         finalDistance = Distance(cache.EndOrigin, requestedTarget);
@@ -4611,15 +4886,25 @@ public sealed partial class DebugWindowManager
             return false;
         }
 
+        if (preserveHandleRotation && count == 1)
+        {
+            error = "Locked handle needs a parent chain; disable handle rotation lock or add driver bones.";
+            return false;
+        }
+
         Vec3d[] joints = cache.JointPositions.Select(point => new Vec3d(point.X, point.Y, point.Z)).ToArray();
         RigIkMatrix3[] rotations = cache.BoneInfos.Select(info => info.WorldRotation).ToArray();
+        int driverCount = preserveHandleRotation ? count - 1 : count;
+        Vec3d lockedHandleEndpointOffset = preserveHandleRotation
+            ? Sub(cache.EndOrigin, cache.JointPositions[count - 1])
+            : new Vec3d();
         double initialDistance = Distance(joints[^1], requestedTarget);
 
         const int maxIterations = 24;
         const double vectorEpsilon = 0.000001;
         for (int iteration = 0; iteration < maxIterations; iteration++)
         {
-            for (int boneIndex = count - 1; boneIndex >= 0; boneIndex--)
+            for (int boneIndex = driverCount - 1; boneIndex >= 0; boneIndex--)
             {
                 Vec3d origin = joints[boneIndex];
                 Vec3d currentVector = Sub(joints[^1], origin);
@@ -4632,9 +4917,14 @@ public sealed partial class DebugWindowManager
                     joints[jointIndex] = Add(origin, delta.TransformDirection(Sub(joints[jointIndex], origin)));
                 }
 
-                for (int rotationIndex = boneIndex; rotationIndex < rotations.Length; rotationIndex++)
+                for (int rotationIndex = boneIndex; rotationIndex < (preserveHandleRotation ? driverCount : rotations.Length); rotationIndex++)
                 {
                     rotations[rotationIndex] = delta.Mul(rotations[rotationIndex]).Orthonormalized();
+                }
+
+                if (preserveHandleRotation)
+                {
+                    joints[^1] = Add(joints[count - 1], lockedHandleEndpointOffset);
                 }
 
                 if (Distance(joints[^1], requestedTarget) <= VanillaIkSolveTolerance) break;
@@ -4653,7 +4943,10 @@ public sealed partial class DebugWindowManager
         for (int index = 0; index < count; index++)
         {
             RigIkMatrix3 parentWorld = index > 0 ? rotations[index - 1] : cache.BoneInfos[index].ParentWorldRotation;
-            RigIkMatrix3 local = parentWorld.Inverted().Mul(rotations[index]).Orthonormalized();
+            RigIkMatrix3 world = preserveHandleRotation && index == count - 1
+                ? cache.BoneInfos[index].WorldRotation
+                : rotations[index];
+            RigIkMatrix3 local = parentWorld.Inverted().Mul(world).Orthonormalized();
             Vec3d euler = Sub(local.ToEulerDegrees(), cache.BoneInfos[index].BaseRotationDegrees);
             solvedElements[index] = WithVanillaIkRotation(cache.StartElements[index], euler);
         }
@@ -5727,7 +6020,8 @@ public sealed partial class DebugWindowManager
 
     private enum VanillaIkChainMode
     {
-        AutoLimb,
+        AutoConservative,
+        AutoExtended,
         ManualOverride
     }
 

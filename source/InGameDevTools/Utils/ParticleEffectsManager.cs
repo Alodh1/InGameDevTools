@@ -1981,16 +1981,15 @@ public class ParticleEffectsManager
         drawList.PopClipRect();
 
         drawList.AddText(min + new System.Numerics.Vector2(12f, 10f), text, $"{previewRenderer.ParticleCount} engine preview particles");
-        drawList.AddText(min + new System.Numerics.Vector2(12f, 30f), text, "RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms.");
         string referenceText = referenceModel == null
             ? "Reference model: none"
             : $"Reference model: {referenceModel.Label}";
-        drawList.AddText(min + new System.Numerics.Vector2(12f, 50f), text, referenceText);
-        drawList.AddText(min + new System.Numerics.Vector2(12f, 70f), text, _previewWindEnabled ? "Game wind enabled" : "Game wind disabled");
+        drawList.AddText(min + new System.Numerics.Vector2(12f, 30f), text, referenceText);
+        drawList.AddText(min + new System.Numerics.Vector2(12f, 50f), text, _previewWindEnabled ? "Game wind enabled" : "Game wind disabled");
         string previewStatus = string.IsNullOrWhiteSpace(_previewStatus)
             ? "Environment: current client world ParticlePhysics"
             : _previewStatus;
-        drawList.AddText(min + new System.Numerics.Vector2(12f, 90f), text, previewStatus);
+        drawList.AddText(min + new System.Numerics.Vector2(12f, 70f), text, previewStatus);
     }
 
     private DevToolsPreviewCamera BuildPreviewCamera(System.Numerics.Vector2 min, System.Numerics.Vector2 max)

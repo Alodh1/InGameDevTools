@@ -1672,7 +1672,6 @@ public sealed partial class DebugWindowManager : IDisposable
         drawList.AddRectFilled(min, max, background, 4f);
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"Preview: {animationCode}");
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), text, "RMB rotates. MMB or Shift+RMB pans. Mouse wheel zooms.");
 
         _imguiAnimationViewportRenderer?.SetViewport(
             min.X,

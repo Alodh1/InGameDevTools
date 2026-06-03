@@ -953,25 +953,15 @@ public sealed partial class DebugWindowManager
                                 ? $"{modeLabel}: draft landform surface"
                                 : $"{modeLabel}: real peeked region"
                 : $"{modeLabel}: viewport host";
-        string inputStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
-            ? "RMB/MMB pans. Mouse wheel zooms. Sampling live MapLayerBase.GenLayer."
-            : _worldgenPreviewMode == WorldgenPreviewModeBlockPatch
-                ? "RMB/MMB pans. Mouse wheel zooms. Evaluating draft climate/forest constraints."
-                    : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
-                        ? "RMB/MMB pans. Mouse wheel zooms. Evaluating selected landform draft shape."
-                        : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
-                            ? "LMB orbits. RMB/MMB pans. Mouse wheel zooms. Peek renders the selected engine pass when available."
-                : "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.";
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, inputStatus);
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), muted, $"Cursor block: X {hoverX}, Z {hoverZ}");
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 70f), muted, _worldgenPreviewConfigStatus);
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 90f), muted, serverRequired ? _worldgenPreviewServerStatus : "Singleplayer server API: not required for this mode.");
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, $"Cursor block: X {hoverX}, Z {hoverZ}");
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), muted, _worldgenPreviewConfigStatus);
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 70f), muted, serverRequired ? _worldgenPreviewServerStatus : "Singleplayer server API: not required for this mode.");
         if (!string.IsNullOrWhiteSpace(hoverDetails))
         {
-            drawList.AddText(new NVector2(min.X + 12f, min.Y + 110f), muted, hoverDetails);
+            drawList.AddText(new NVector2(min.X + 12f, min.Y + 90f), muted, hoverDetails);
         }
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 130f), muted, _worldgenPreviewRasterStatus);
+        drawList.AddText(new NVector2(min.X + 12f, min.Y + 110f), muted, _worldgenPreviewRasterStatus);
         if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
         {
             drawList.AddText(new NVector2(min.X + 12f, min.Y + 150f), muted, _worldgenPreviewPeekStatus);

@@ -89,15 +89,11 @@ internal sealed class DetachedEditorCamera : IRenderer
             float distance = (float)_distance;
             ImGui.SetNextItemWidth(140);
             if (ImGui.SliderFloat($"Distance##{id}", ref distance, 0.75f, 12f)) _distance = distance;
-
-            ImGui.TextDisabled("RMB orbits. MMB or Shift+RMB pans. Mouse wheel zooms.");
         }
         else
         {
             ImGui.SetNextItemWidth(140);
             ImGui.SliderFloat($"Move speed##{id}", ref _moveSpeed, 0.25f, 12f);
-
-            ImGui.TextDisabled("RMB drag looks around. WASD moves the camera, Q/E moves down/up. Shift speeds up.");
         }
     }
 
