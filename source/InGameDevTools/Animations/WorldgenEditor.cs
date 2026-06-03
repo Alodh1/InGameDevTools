@@ -911,16 +911,18 @@ public sealed partial class DebugWindowManager
                     : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
                         ? $"{modeLabel}: selected draft landform"
                         : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
-                            ? $"{modeLabel}: draft landform surface"
+                            ? _worldgenPreviewPeekProfile == null
+                                ? $"{modeLabel}: draft landform surface"
+                                : $"{modeLabel}: real peeked terrain column"
                 : $"{modeLabel}: viewport host";
         string inputStatus = WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
             ? "RMB/MMB pans. Mouse wheel zooms. Sampling live MapLayerBase.GenLayer."
             : _worldgenPreviewMode == WorldgenPreviewModeBlockPatch
                 ? "RMB/MMB pans. Mouse wheel zooms. Evaluating draft climate/forest constraints."
-                : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
-                    ? "RMB/MMB pans. Mouse wheel zooms. Evaluating selected landform draft shape."
-                    : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
-                        ? "LMB orbits. RMB/MMB pans. Mouse wheel zooms. Draft surface only."
+                    : _worldgenPreviewMode == WorldgenPreviewModeTerrainShape
+                        ? "RMB/MMB pans. Mouse wheel zooms. Evaluating selected landform draft shape."
+                        : _worldgenPreviewMode == WorldgenPreviewModeRegion3D
+                            ? "LMB orbits. RMB/MMB pans. Mouse wheel zooms. Peek renders real Terrain pass when available."
                 : "RMB/MMB pans. Mouse wheel zooms. Simulation layers are deferred.";
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, inputStatus);
@@ -999,7 +1001,9 @@ public sealed partial class DebugWindowManager
         {
             string label = GetWorldgenRowLabel(WorldgenAssetKind.Landforms, row, _worldgenRowIndex);
             ImGui.TextDisabled($"3D draft surface: {label}.");
-            ImGui.TextDisabled("Uses the selected landform height field. Real terrain peek is an explicit W4 probe.");
+            ImGui.TextDisabled(_worldgenPreviewPeekProfile == null
+                ? "Uses the selected landform height field until a real terrain column is peeked."
+                : "Rendering the last real Terrain-pass chunk column returned by PeekChunkColumn.");
         }
         else
         {
@@ -1874,6 +1878,7 @@ public sealed partial class DebugWindowManager
         if (chunks == null || chunks.Length == 0) return null;
 
         int[] heights = new int[chunkSize * chunkSize];
+        int[] topBlockIds = new int[chunkSize * chunkSize];
         int minHeight = int.MaxValue;
         int maxHeight = int.MinValue;
         long totalHeight = 0;
@@ -1883,8 +1888,9 @@ public sealed partial class DebugWindowManager
         {
             for (int x = 0; x < chunkSize; x++)
             {
-                int height = FindWorldgenPeekColumnHeight(chunks, x, z, chunkSize);
+                int height = FindWorldgenPeekColumnHeight(chunks, x, z, chunkSize, out int topBlockId);
                 heights[z * chunkSize + x] = height;
+                topBlockIds[z * chunkSize + x] = topBlockId;
                 if (height < 0) continue;
 
                 minHeight = Math.Min(minHeight, height);
@@ -1909,11 +1915,15 @@ public sealed partial class DebugWindowManager
             minHeight,
             maxHeight,
             averageHeight,
-            BuildWorldgenPeekSampleSummary(heights, chunkSize));
+            BuildWorldgenPeekSampleSummary(heights, chunkSize),
+            chunkSize,
+            heights,
+            topBlockIds);
     }
 
-    private static int FindWorldgenPeekColumnHeight(IServerChunk[] chunks, int localX, int localZ, int chunkSize)
+    private static int FindWorldgenPeekColumnHeight(IServerChunk[] chunks, int localX, int localZ, int chunkSize, out int topBlockId)
     {
+        topBlockId = 0;
         for (int chunkY = chunks.Length - 1; chunkY >= 0; chunkY--)
         {
             IServerChunk? chunk = chunks[chunkY];
@@ -1923,8 +1933,10 @@ public sealed partial class DebugWindowManager
             for (int localY = chunkSize - 1; localY >= 0; localY--)
             {
                 int index = MapUtil.Index3d(localX, localY, localZ, chunkSize, chunkSize);
-                if (data[index] != 0)
+                int blockId = data[index];
+                if (blockId != 0)
                 {
+                    topBlockId = blockId;
                     return chunkY * chunkSize + localY;
                 }
             }
@@ -2197,6 +2209,12 @@ public sealed partial class DebugWindowManager
         uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.018f, 0.017f, 0.015f, 1f));
         drawList.AddRectFilled(min, max, background, 4f);
 
+        if (_worldgenPreviewPeekProfile is { } peekProfile)
+        {
+            DrawWorldgenPeekColumnPreview(drawList, min, max, peekProfile);
+            return;
+        }
+
         if (!TryGetSelectedWorldgenLandformRow(out JObject? row) || row == null)
         {
             DrawWorldgenPreviewUnavailable(
@@ -2305,6 +2323,157 @@ public sealed partial class DebugWindowManager
         drawList.AddLine(origin, zAxis, axisZ, 2f);
 
         _worldgenPreviewRasterStatus = $"3D draft surface: {grid}x{grid}; height {minHeight:0.000}-{maxHeight:0.000}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
+    }
+
+    private void DrawWorldgenPeekColumnPreview(ImDrawListPtr drawList, NVector2 min, NVector2 max, WorldgenPeekColumnProfile profile)
+    {
+        int chunkSize = profile.ChunkSize;
+        if (chunkSize <= 0 || profile.Heights.Length < chunkSize * chunkSize || profile.TopBlockIds.Length < chunkSize * chunkSize)
+        {
+            DrawWorldgenPreviewUnavailable(drawList, min, max, "Peeked terrain column data is incomplete.", "Press Peek terrain column again.");
+            return;
+        }
+
+        float width = max.X - min.X;
+        float height = max.Y - min.Y;
+        float viewportMinDimension = Math.Max(1f, Math.Min(width, height));
+        float screenScale = viewportMinDimension * 0.66f / Math.Max(1, chunkSize);
+        int baseHeight = profile.MinHeight < 0 ? 0 : Math.Max(0, profile.MinHeight - Math.Max(4, (profile.MaxHeight - profile.MinHeight) / 8));
+        float heightSpan = Math.Max(8f, profile.MaxHeight - baseHeight + 2f);
+        float heightScale = viewportMinDimension * 0.44f / heightSpan;
+        float cosYaw = MathF.Cos(_worldgenPreview3DYaw);
+        float sinYaw = MathF.Sin(_worldgenPreview3DYaw);
+        float pitch = MathF.Sin(_worldgenPreview3DPitch);
+        NVector2 center = new(min.X + width * 0.5f, min.Y + height * 0.68f);
+
+        List<WorldgenVoxelFace> faces = new(chunkSize * chunkSize * 3);
+        for (int z = 0; z < chunkSize; z++)
+        {
+            for (int x = 0; x < chunkSize; x++)
+            {
+                int index = z * chunkSize + x;
+                int topY = profile.Heights[index];
+                if (topY < 0) continue;
+
+                int topBlockId = profile.TopBlockIds[index];
+                float yTop = topY + 1f;
+                float localX = x - chunkSize * 0.5f;
+                float localZ = z - chunkSize * 0.5f;
+                float heightNorm = profile.MaxHeight <= profile.MinHeight
+                    ? 0.5f
+                    : (topY - profile.MinHeight) / (float)Math.Max(1, profile.MaxHeight - profile.MinHeight);
+
+                AddWorldgenPeekTopFace(faces, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, BuildWorldgenPeekBlockColor(topBlockId, heightNorm, 1.00f));
+                TryAddWorldgenPeekSideFace(faces, profile, x, z, x - 1, z, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, topBlockId, heightNorm, WorldgenPeekFaceSide.West);
+                TryAddWorldgenPeekSideFace(faces, profile, x, z, x + 1, z, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, topBlockId, heightNorm, WorldgenPeekFaceSide.East);
+                TryAddWorldgenPeekSideFace(faces, profile, x, z, x, z - 1, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, topBlockId, heightNorm, WorldgenPeekFaceSide.North);
+                TryAddWorldgenPeekSideFace(faces, profile, x, z, x, z + 1, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, topBlockId, heightNorm, WorldgenPeekFaceSide.South);
+            }
+        }
+
+        faces.Sort(static (left, right) => left.Depth.CompareTo(right.Depth));
+        foreach (WorldgenVoxelFace face in faces)
+        {
+            drawList.AddQuadFilled(face.A, face.B, face.C, face.D, face.Color);
+        }
+
+        uint axisX = ImGui.ColorConvertFloat4ToU32(new NVector4(0.78f, 0.22f, 0.15f, 0.90f));
+        uint axisZ = ImGui.ColorConvertFloat4ToU32(new NVector4(0.22f, 0.38f, 0.92f, 0.90f));
+        NVector2 origin = ProjectWorldgenVoxelPoint(-chunkSize * 0.5f, -chunkSize * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 xAxis = ProjectWorldgenVoxelPoint(chunkSize * 0.5f, -chunkSize * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 zAxis = ProjectWorldgenVoxelPoint(-chunkSize * 0.5f, chunkSize * 0.5f, baseHeight, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        drawList.AddLine(origin, xAxis, axisX, 2f);
+        drawList.AddLine(origin, zAxis, axisZ, 2f);
+
+        _worldgenPreviewRasterStatus = $"3D real Terrain column: chunk {profile.ChunkX},{profile.ChunkZ}; {faces.Count} visible face(s); height {profile.MinHeight}-{profile.MaxHeight}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
+    }
+
+    private void AddWorldgenPeekTopFace(
+        List<WorldgenVoxelFace> faces,
+        float localX,
+        float localZ,
+        float yTop,
+        int baseHeight,
+        NVector2 center,
+        float screenScale,
+        float heightScale,
+        float cosYaw,
+        float sinYaw,
+        float pitch,
+        uint color)
+    {
+        NVector2 a = ProjectWorldgenVoxelPoint(localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 b = ProjectWorldgenVoxelPoint(localX + 1f, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 c = ProjectWorldgenVoxelPoint(localX + 1f, localZ + 1f, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 d = ProjectWorldgenVoxelPoint(localX, localZ + 1f, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        float depth = AverageWorldgenVoxelDepth(localX, localZ, localX + 1f, localZ + 1f, cosYaw, sinYaw);
+        faces.Add(new WorldgenVoxelFace(a, b, c, d, depth, color));
+    }
+
+    private void TryAddWorldgenPeekSideFace(
+        List<WorldgenVoxelFace> faces,
+        WorldgenPeekColumnProfile profile,
+        int x,
+        int z,
+        int neighborX,
+        int neighborZ,
+        float localX,
+        float localZ,
+        float yTop,
+        int baseHeight,
+        NVector2 center,
+        float screenScale,
+        float heightScale,
+        float cosYaw,
+        float sinYaw,
+        float pitch,
+        int topBlockId,
+        float heightNorm,
+        WorldgenPeekFaceSide side)
+    {
+        int neighborHeight = GetWorldgenPeekHeight(profile, neighborX, neighborZ);
+        float yBottom = neighborHeight < 0 ? baseHeight : Math.Max(baseHeight, neighborHeight + 1);
+        if (yBottom >= yTop - 0.001f) return;
+
+        NVector2 a;
+        NVector2 b;
+        NVector2 c;
+        NVector2 d;
+        float depth;
+        switch (side)
+        {
+            case WorldgenPeekFaceSide.West:
+                a = ProjectWorldgenVoxelPoint(localX, localZ + 1f, yBottom, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                b = ProjectWorldgenVoxelPoint(localX, localZ + 1f, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                c = ProjectWorldgenVoxelPoint(localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                d = ProjectWorldgenVoxelPoint(localX, localZ, yBottom, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                depth = AverageWorldgenVoxelDepth(localX, localZ, localX, localZ + 1f, cosYaw, sinYaw);
+                break;
+            case WorldgenPeekFaceSide.East:
+                a = ProjectWorldgenVoxelPoint(localX + 1f, localZ, yBottom, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                b = ProjectWorldgenVoxelPoint(localX + 1f, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                c = ProjectWorldgenVoxelPoint(localX + 1f, localZ + 1f, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                d = ProjectWorldgenVoxelPoint(localX + 1f, localZ + 1f, yBottom, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                depth = AverageWorldgenVoxelDepth(localX + 1f, localZ, localX + 1f, localZ + 1f, cosYaw, sinYaw);
+                break;
+            case WorldgenPeekFaceSide.North:
+                a = ProjectWorldgenVoxelPoint(localX, localZ, yBottom, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                b = ProjectWorldgenVoxelPoint(localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                c = ProjectWorldgenVoxelPoint(localX + 1f, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                d = ProjectWorldgenVoxelPoint(localX + 1f, localZ, yBottom, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                depth = AverageWorldgenVoxelDepth(localX, localZ, localX + 1f, localZ, cosYaw, sinYaw);
+                break;
+            default:
+                a = ProjectWorldgenVoxelPoint(localX + 1f, localZ + 1f, yBottom, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                b = ProjectWorldgenVoxelPoint(localX + 1f, localZ + 1f, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                c = ProjectWorldgenVoxelPoint(localX, localZ + 1f, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                d = ProjectWorldgenVoxelPoint(localX, localZ + 1f, yBottom, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+                depth = AverageWorldgenVoxelDepth(localX, localZ + 1f, localX + 1f, localZ + 1f, cosYaw, sinYaw);
+                break;
+        }
+
+        float shade = side is WorldgenPeekFaceSide.West or WorldgenPeekFaceSide.East ? 0.68f : 0.78f;
+        faces.Add(new WorldgenVoxelFace(a, b, c, d, depth, BuildWorldgenPeekBlockColor(topBlockId, heightNorm, shade)));
     }
 
     private bool TryGetWorldgenPreviewRasterColors(
@@ -2800,6 +2969,92 @@ public sealed partial class DebugWindowManager
         return new NVector2(
             center.X + rx * screenScale,
             center.Y + rz * screenScale * pitch - (height - 0.45f) * heightScale);
+    }
+
+    private static NVector2 ProjectWorldgenVoxelPoint(
+        float localX,
+        float localZ,
+        float y,
+        int baseHeight,
+        NVector2 center,
+        float screenScale,
+        float heightScale,
+        float cosYaw,
+        float sinYaw,
+        float pitch)
+    {
+        float rx = localX * cosYaw - localZ * sinYaw;
+        float rz = localX * sinYaw + localZ * cosYaw;
+        return new NVector2(
+            center.X + rx * screenScale,
+            center.Y + rz * screenScale * pitch - (y - baseHeight) * heightScale);
+    }
+
+    private static float AverageWorldgenVoxelDepth(float ax, float az, float bx, float bz, float cosYaw, float sinYaw)
+    {
+        float depthA = ax * sinYaw + az * cosYaw;
+        float depthB = bx * sinYaw + bz * cosYaw;
+        return (depthA + depthB) * 0.5f;
+    }
+
+    private static int GetWorldgenPeekHeight(WorldgenPeekColumnProfile profile, int x, int z)
+    {
+        if (x < 0 || z < 0 || x >= profile.ChunkSize || z >= profile.ChunkSize) return -1;
+        int index = z * profile.ChunkSize + x;
+        return index < profile.Heights.Length ? profile.Heights[index] : -1;
+    }
+
+    private uint BuildWorldgenPeekBlockColor(int blockId, float heightNorm, float shade)
+    {
+        string material = "";
+        string path = "";
+        try
+        {
+            Block block = _api.World.GetBlock(blockId);
+            material = block.BlockMaterial.ToString().ToLowerInvariant();
+            path = block.Code?.Path?.ToLowerInvariant() ?? "";
+        }
+        catch
+        {
+            // Fall through to hash-based fallback.
+        }
+
+        NVector4 color;
+        if (material.Contains("liquid", StringComparison.Ordinal) || path.Contains("water", StringComparison.Ordinal))
+        {
+            color = new NVector4(0.10f, 0.28f, 0.58f, 1f);
+        }
+        else if (path.Contains("snow", StringComparison.Ordinal) || material.Contains("ice", StringComparison.Ordinal))
+        {
+            color = new NVector4(0.78f, 0.80f, 0.76f, 1f);
+        }
+        else if (material.Contains("stone", StringComparison.Ordinal) || material.Contains("ore", StringComparison.Ordinal))
+        {
+            color = new NVector4(0.34f, 0.33f, 0.30f, 1f);
+        }
+        else if (material.Contains("soil", StringComparison.Ordinal) || material.Contains("sand", StringComparison.Ordinal) || material.Contains("gravel", StringComparison.Ordinal))
+        {
+            color = new NVector4(0.36f, 0.30f, 0.18f, 1f);
+        }
+        else if (material.Contains("plant", StringComparison.Ordinal) || material.Contains("leaves", StringComparison.Ordinal) || path.Contains("grass", StringComparison.Ordinal))
+        {
+            color = new NVector4(0.22f, 0.42f, 0.18f, 1f);
+        }
+        else if (material.Contains("wood", StringComparison.Ordinal))
+        {
+            color = new NVector4(0.34f, 0.22f, 0.12f, 1f);
+        }
+        else
+        {
+            float hash = ((blockId * 1103515245u + 12345u) & 0xffffu) / 65535f;
+            color = new NVector4(0.22f + hash * 0.18f, 0.24f + hash * 0.16f, 0.20f + hash * 0.12f, 1f);
+        }
+
+        color = LerpColor(color, new NVector4(0.64f, 0.60f, 0.50f, 1f), Math.Clamp(heightNorm * 0.18f, 0f, 0.18f));
+        color.X = Math.Clamp(color.X * shade, 0f, 1f);
+        color.Y = Math.Clamp(color.Y * shade, 0f, 1f);
+        color.Z = Math.Clamp(color.Z * shade, 0f, 1f);
+        return ImGui.ColorConvertFloat4ToU32(color);
     }
 
     private static int FloorDiv(int value, int divisor)
@@ -3390,6 +3645,16 @@ public sealed partial class DebugWindowManager
 
     private readonly record struct WorldgenSurfaceCell(int X, int Z, float Depth);
 
+    private readonly record struct WorldgenVoxelFace(NVector2 A, NVector2 B, NVector2 C, NVector2 D, float Depth, uint Color);
+
+    private enum WorldgenPeekFaceSide
+    {
+        West,
+        East,
+        North,
+        South
+    }
+
     private sealed record WorldgenPeekColumnProfile(
         int ChunkX,
         int ChunkZ,
@@ -3398,7 +3663,10 @@ public sealed partial class DebugWindowManager
         int MinHeight,
         int MaxHeight,
         float AverageHeight,
-        string SampleSummary);
+        string SampleSummary,
+        int ChunkSize,
+        int[] Heights,
+        int[] TopBlockIds);
 
     private readonly record struct WorldgenClimateSample(float TemperatureCelsius, float Rain, float Forest, float Fertility, bool HasFertility = false);
 
