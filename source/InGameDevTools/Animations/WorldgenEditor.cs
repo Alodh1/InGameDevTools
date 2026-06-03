@@ -2990,9 +2990,27 @@ public sealed partial class DebugWindowManager
         }
 
         float averageAbsDelta = comparedCells == 0 ? 0f : totalAbsHeightDelta / (float)comparedCells;
+        string verdict;
+        if (comparedCells == 0)
+        {
+            verdict = "INCOMPLETE";
+        }
+        else if (heightMismatchCells == 0 && topBlockMismatchCells == 0 && missingColumns == 0 && partialColumns == 0)
+        {
+            verdict = "PASS";
+        }
+        else if (heightMismatchCells == 0 && topBlockMismatchCells == 0)
+        {
+            verdict = "PASS for loaded cells, incomplete columns";
+        }
+        else
+        {
+            verdict = "DIFF";
+        }
+
         string summary = comparedCells == 0
-            ? $"Loaded-world compare: no loaded columns in {peekProfile.OriginChunkX},{peekProfile.OriginChunkZ} size {peekProfile.RegionSizeChunks}x{peekProfile.RegionSizeChunks}; no chunks were loaded."
-            : $"Loaded-world compare: {heightMismatchCells}/{comparedCells} height diff(s), {topBlockMismatchCells} top-block diff(s), max |dy| {maxAbsHeightDelta}, avg |dy| {averageAbsDelta:0.00}; loaded {loadedColumns}/{expectedColumns} column(s), missing {missingColumns}, partial {partialColumns}.";
+            ? $"Loaded-world oracle {verdict}: no loaded columns in {peekProfile.OriginChunkX},{peekProfile.OriginChunkZ} size {peekProfile.RegionSizeChunks}x{peekProfile.RegionSizeChunks}; no chunks were loaded."
+            : $"Loaded-world oracle {verdict}: {heightMismatchCells}/{comparedCells} height diff(s), {topBlockMismatchCells} top-block diff(s), max |dy| {maxAbsHeightDelta}, avg |dy| {averageAbsDelta:0.00}; loaded {loadedColumns}/{expectedColumns} column(s), missing {missingColumns}, partial {partialColumns}.";
 
         return new WorldgenLoadedWorldOracleProfile(
             peekProfile.OriginChunkX,
