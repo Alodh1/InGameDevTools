@@ -127,6 +127,9 @@ public sealed partial class DebugWindowManager
     private string _worldgenPreviewAutoPeekStatus = "Auto 3D refresh waits for draft edits.";
     private WorldgenPeekRegionCacheKey? _worldgenPreviewPeekCacheKey;
     private WorldgenPeekRegionProfile? _worldgenPreviewPeekProfile;
+    private WorldgenLoadedWorldOracleProfile? _worldgenPreviewOracleProfile;
+    private string _worldgenPreviewOracleStatus = "No loaded-world comparison yet.";
+    private bool _worldgenPreviewShowOracleDiff = true;
 
     private void WorldgenEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -966,6 +969,10 @@ public sealed partial class DebugWindowManager
         if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
         {
             drawList.AddText(new NVector2(min.X + 12f, min.Y + 150f), muted, _worldgenPreviewPeekStatus);
+            if (_worldgenPreviewOracleProfile != null || !string.Equals(_worldgenPreviewOracleStatus, "No loaded-world comparison yet.", StringComparison.Ordinal))
+            {
+                drawList.AddText(new NVector2(min.X + 12f, min.Y + 170f), muted, _worldgenPreviewOracleStatus);
+            }
         }
 
         ImGui.EndChild();
@@ -1094,6 +1101,27 @@ public sealed partial class DebugWindowManager
         {
             ClearWorldgenPeekProfile("No real chunk peek requested yet.");
         }
+
+        bool canCompare = _worldgenPreviewPeekProfile != null && _worldgenPreviewServerApi != null && !_worldgenPreviewPeekPending;
+        if (!canCompare) ImGui.BeginDisabled();
+        if (ImGui.Button("Compare loaded world##worldgen-compare-loaded-world"))
+        {
+            CompareWorldgenLoadedWorldOracle();
+        }
+        if (!canCompare) ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Compares the current peek against already-loaded world columns at the same coordinates. Missing columns are skipped instead of loaded.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Clear compare##worldgen-clear-compare"))
+        {
+            ClearWorldgenLoadedWorldOracle("No loaded-world comparison yet.");
+        }
+
+        ImGui.Checkbox("Show diff overlay##worldgen-show-oracle-diff", ref _worldgenPreviewShowOracleDiff);
+        ImGui.TextDisabled(_worldgenPreviewOracleStatus);
 
         ImGui.TextDisabled(_worldgenPreviewPeekStatus);
         if (_worldgenPreviewPeekProfile is { } profile)
@@ -2640,6 +2668,162 @@ public sealed partial class DebugWindowManager
         _worldgenPreviewPeekProfile = null;
         _worldgenPreviewPeekCacheKey = null;
         _worldgenPreviewPeekStatus = status;
+        ClearWorldgenLoadedWorldOracle("No loaded-world comparison yet.");
+    }
+
+    private void ClearWorldgenLoadedWorldOracle(string status)
+    {
+        _worldgenPreviewOracleProfile = null;
+        _worldgenPreviewOracleStatus = status;
+    }
+
+    private void CompareWorldgenLoadedWorldOracle()
+    {
+        if (_worldgenPreviewPeekProfile == null)
+        {
+            ClearWorldgenLoadedWorldOracle("Compare requires a real peeked region first.");
+            return;
+        }
+
+        ICoreServerAPI? serverApi = _worldgenPreviewServerApi;
+        if (serverApi == null)
+        {
+            RefreshWorldgenServerApi();
+            serverApi = _worldgenPreviewServerApi;
+        }
+
+        IWorldManagerAPI? worldManager = serverApi?.WorldManager;
+        if (worldManager == null)
+        {
+            ClearWorldgenLoadedWorldOracle("Compare requires an integrated singleplayer server.");
+            return;
+        }
+
+        try
+        {
+            _worldgenPreviewOracleProfile = BuildWorldgenLoadedWorldOracleProfile(worldManager, _worldgenPreviewPeekProfile);
+            _worldgenPreviewOracleStatus = _worldgenPreviewOracleProfile.Summary;
+        }
+        catch (Exception exception)
+        {
+            ClearWorldgenLoadedWorldOracle($"Loaded-world compare failed: {exception.Message}");
+            _worldgenDiagnostics.Exception("Worldgen loaded-world compare failed", exception);
+        }
+    }
+
+    private static WorldgenLoadedWorldOracleProfile BuildWorldgenLoadedWorldOracleProfile(IWorldManagerAPI worldManager, WorldgenPeekRegionProfile peekProfile)
+    {
+        int chunkSize = Math.Max(1, peekProfile.ChunkSize);
+        int chunkCountY = Math.Max(1, (int)Math.Ceiling(worldManager.MapSizeY / (double)chunkSize));
+        int expectedColumns = peekProfile.RegionSizeChunks * peekProfile.RegionSizeChunks;
+        int[] loadedHeights = new int[peekProfile.Width * peekProfile.Depth];
+        int[] loadedTopBlockIds = new int[peekProfile.Width * peekProfile.Depth];
+        int[] heightDeltas = new int[peekProfile.Width * peekProfile.Depth];
+        bool[] compared = new bool[peekProfile.Width * peekProfile.Depth];
+        bool[] topBlockMatches = new bool[peekProfile.Width * peekProfile.Depth];
+        Array.Fill(loadedHeights, -1);
+        Array.Fill(heightDeltas, int.MinValue);
+
+        int loadedColumns = 0;
+        int partialColumns = 0;
+        int missingColumns = 0;
+        int comparedCells = 0;
+        int missingCells = 0;
+        int heightMismatchCells = 0;
+        int topBlockMismatchCells = 0;
+        int maxAbsHeightDelta = 0;
+        long totalAbsHeightDelta = 0;
+
+        for (int dz = 0; dz < peekProfile.RegionSizeChunks; dz++)
+        {
+            for (int dx = 0; dx < peekProfile.RegionSizeChunks; dx++)
+            {
+                IServerChunk[] chunks = new IServerChunk[chunkCountY];
+                int verticalLoaded = 0;
+                for (int chunkY = 0; chunkY < chunkCountY; chunkY++)
+                {
+                    IServerChunk? chunk = worldManager.GetChunk(peekProfile.OriginChunkX + dx, chunkY, peekProfile.OriginChunkZ + dz);
+                    if (chunk == null) continue;
+
+                    chunks[chunkY] = chunk;
+                    verticalLoaded++;
+                }
+
+                if (verticalLoaded == 0)
+                {
+                    missingColumns++;
+                    missingCells += chunkSize * chunkSize;
+                    continue;
+                }
+
+                loadedColumns++;
+                if (verticalLoaded < chunkCountY) partialColumns++;
+
+                for (int z = 0; z < chunkSize; z++)
+                {
+                    for (int x = 0; x < chunkSize; x++)
+                    {
+                        int loadedHeight = FindWorldgenPeekColumnHeight(chunks, x, z, chunkSize, out int loadedTopBlockId);
+                        int globalX = dx * chunkSize + x;
+                        int globalZ = dz * chunkSize + z;
+                        int index = globalZ * peekProfile.Width + globalX;
+                        if (index < 0 || index >= loadedHeights.Length || index >= peekProfile.Heights.Length || index >= peekProfile.TopBlockIds.Length) continue;
+
+                        loadedHeights[index] = loadedHeight;
+                        loadedTopBlockIds[index] = loadedTopBlockId;
+                        int peekHeight = peekProfile.Heights[index];
+                        if (loadedHeight < 0 || peekHeight < 0)
+                        {
+                            missingCells++;
+                            continue;
+                        }
+
+                        int delta = loadedHeight - peekHeight;
+                        heightDeltas[index] = delta;
+                        compared[index] = true;
+                        comparedCells++;
+
+                        int absDelta = Math.Abs(delta);
+                        if (absDelta > 0) heightMismatchCells++;
+                        maxAbsHeightDelta = Math.Max(maxAbsHeightDelta, absDelta);
+                        totalAbsHeightDelta += absDelta;
+
+                        bool blockMatches = loadedTopBlockId == peekProfile.TopBlockIds[index];
+                        topBlockMatches[index] = blockMatches;
+                        if (!blockMatches) topBlockMismatchCells++;
+                    }
+                }
+            }
+        }
+
+        float averageAbsDelta = comparedCells == 0 ? 0f : totalAbsHeightDelta / (float)comparedCells;
+        string summary = comparedCells == 0
+            ? $"Loaded-world compare: no loaded columns in {peekProfile.OriginChunkX},{peekProfile.OriginChunkZ} size {peekProfile.RegionSizeChunks}x{peekProfile.RegionSizeChunks}; no chunks were loaded."
+            : $"Loaded-world compare: {heightMismatchCells}/{comparedCells} height diff(s), {topBlockMismatchCells} top-block diff(s), max |dy| {maxAbsHeightDelta}, avg |dy| {averageAbsDelta:0.00}; loaded {loadedColumns}/{expectedColumns} column(s), missing {missingColumns}, partial {partialColumns}.";
+
+        return new WorldgenLoadedWorldOracleProfile(
+            peekProfile.OriginChunkX,
+            peekProfile.OriginChunkZ,
+            peekProfile.RegionSizeChunks,
+            peekProfile.ChunkSize,
+            peekProfile.Width,
+            peekProfile.Depth,
+            loadedColumns,
+            missingColumns,
+            partialColumns,
+            comparedCells,
+            missingCells,
+            heightMismatchCells,
+            topBlockMismatchCells,
+            maxAbsHeightDelta,
+            averageAbsDelta,
+            summary,
+            BuildWorldgenPeekSampleSummary(loadedHeights, peekProfile.Width, peekProfile.Depth),
+            loadedHeights,
+            loadedTopBlockIds,
+            heightDeltas,
+            compared,
+            topBlockMatches);
     }
 
     private EnumWorldGenPass GetSelectedWorldgenPeekPass()
@@ -2705,6 +2889,7 @@ public sealed partial class DebugWindowManager
         _worldgenPreviewPeekProfile = null;
         _worldgenPreviewPeekCacheKey = null;
         _worldgenPreviewPeekStatus = $"Requesting real {passLabel} peek for {regionSize}x{regionSize} chunks at {originChunkX},{originChunkZ} ({reason})...";
+        ClearWorldgenLoadedWorldOracle("No loaded-world comparison yet.");
         WorldgenPeekDraftScope draftScope = CreateWorldgenPeekDraftScope(serverApi, out string draftScopeStatus);
 
         bool restoreAutoGenerate = TryGetWorldgenAutoGenerateChunks(worldManager, out bool previousAutoGenerate)
@@ -3499,6 +3684,9 @@ public sealed partial class DebugWindowManager
         float sinYaw = MathF.Sin(_worldgenPreview3DYaw);
         float pitch = MathF.Sin(_worldgenPreview3DPitch);
         NVector2 center = new(min.X + width * 0.5f, min.Y + height * 0.68f);
+        WorldgenLoadedWorldOracleProfile? oracleProfile = _worldgenPreviewShowOracleDiff && IsWorldgenOracleProfileFor(profile, _worldgenPreviewOracleProfile)
+            ? _worldgenPreviewOracleProfile
+            : null;
 
         List<WorldgenVoxelFace> faces = new(widthBlocks * depthBlocks * 3);
         for (int z = 0; z < depthBlocks; z++)
@@ -3517,7 +3705,10 @@ public sealed partial class DebugWindowManager
                     ? 0.5f
                     : (topY - profile.MinHeight) / (float)Math.Max(1, profile.MaxHeight - profile.MinHeight);
 
-                AddWorldgenPeekTopFace(faces, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, BuildWorldgenPeekBlockColor(topBlockId, heightNorm, 1.00f));
+                uint topColor = oracleProfile == null
+                    ? BuildWorldgenPeekBlockColor(topBlockId, heightNorm, 1.00f)
+                    : BuildWorldgenOracleDiffColor(oracleProfile, index, 1.00f);
+                AddWorldgenPeekTopFace(faces, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, topColor);
                 TryAddWorldgenPeekSideFace(faces, profile, x, z, x - 1, z, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, topBlockId, heightNorm, WorldgenPeekFaceSide.West);
                 TryAddWorldgenPeekSideFace(faces, profile, x, z, x + 1, z, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, topBlockId, heightNorm, WorldgenPeekFaceSide.East);
                 TryAddWorldgenPeekSideFace(faces, profile, x, z, x, z - 1, localX, localZ, yTop, baseHeight, center, screenScale, heightScale, cosYaw, sinYaw, pitch, topBlockId, heightNorm, WorldgenPeekFaceSide.North);
@@ -3539,7 +3730,8 @@ public sealed partial class DebugWindowManager
         drawList.AddLine(origin, xAxis, axisX, 2f);
         drawList.AddLine(origin, zAxis, axisZ, 2f);
 
-        _worldgenPreviewRasterStatus = $"3D real {profile.PassLabel} region: chunks {profile.OriginChunkX},{profile.OriginChunkZ} size {profile.RegionSizeChunks}x{profile.RegionSizeChunks}; {faces.Count} visible face(s); height {profile.MinHeight}-{profile.MaxHeight}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
+        string oracleSuffix = oracleProfile == null ? "" : $"; oracle diff {oracleProfile.HeightMismatchCells}/{oracleProfile.ComparedCells} height, {oracleProfile.TopBlockMismatchCells} block";
+        _worldgenPreviewRasterStatus = $"3D real {profile.PassLabel} region: chunks {profile.OriginChunkX},{profile.OriginChunkZ} size {profile.RegionSizeChunks}x{profile.RegionSizeChunks}; {faces.Count} visible face(s); height {profile.MinHeight}-{profile.MaxHeight}{oracleSuffix}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
     }
 
     private void AddWorldgenPeekTopFace(
@@ -4156,6 +4348,54 @@ public sealed partial class DebugWindowManager
         if (x < 0 || z < 0 || x >= profile.Width || z >= profile.Depth) return -1;
         int index = z * profile.Width + x;
         return index < profile.Heights.Length ? profile.Heights[index] : -1;
+    }
+
+    private static bool IsWorldgenOracleProfileFor(WorldgenPeekRegionProfile profile, WorldgenLoadedWorldOracleProfile? oracleProfile)
+    {
+        return oracleProfile != null &&
+            oracleProfile.OriginChunkX == profile.OriginChunkX &&
+            oracleProfile.OriginChunkZ == profile.OriginChunkZ &&
+            oracleProfile.RegionSizeChunks == profile.RegionSizeChunks &&
+            oracleProfile.ChunkSize == profile.ChunkSize &&
+            oracleProfile.Width == profile.Width &&
+            oracleProfile.Depth == profile.Depth;
+    }
+
+    private uint BuildWorldgenOracleDiffColor(WorldgenLoadedWorldOracleProfile oracleProfile, int index, float shade)
+    {
+        NVector4 color;
+        if (index < 0 || index >= oracleProfile.Compared.Length || !oracleProfile.Compared[index])
+        {
+            color = new NVector4(0.10f, 0.10f, 0.10f, 1f);
+        }
+        else
+        {
+            int delta = index < oracleProfile.HeightDeltas.Length ? oracleProfile.HeightDeltas[index] : 0;
+            bool topBlockMatches = index < oracleProfile.TopBlockMatches.Length && oracleProfile.TopBlockMatches[index];
+            if (delta == 0 && topBlockMatches)
+            {
+                color = new NVector4(0.16f, 0.48f, 0.22f, 1f);
+            }
+            else if (delta == 0)
+            {
+                color = new NVector4(0.86f, 0.66f, 0.18f, 1f);
+            }
+            else if (delta > 0)
+            {
+                float strength = Math.Clamp(Math.Abs(delta) / 12f, 0.25f, 1f);
+                color = new NVector4(0.16f, 0.30f + 0.22f * strength, 0.66f + 0.24f * strength, 1f);
+            }
+            else
+            {
+                float strength = Math.Clamp(Math.Abs(delta) / 12f, 0.25f, 1f);
+                color = new NVector4(0.66f + 0.24f * strength, 0.18f, 0.12f, 1f);
+            }
+        }
+
+        color.X *= shade;
+        color.Y *= shade;
+        color.Z *= shade;
+        return ImGui.ColorConvertFloat4ToU32(color);
     }
 
     private uint BuildWorldgenPeekBlockColor(int blockId, float heightNorm, float shade)
@@ -4876,6 +5116,30 @@ public sealed partial class DebugWindowManager
     {
         public string CleanupSummary { get; init; } = "";
     }
+
+    private sealed record WorldgenLoadedWorldOracleProfile(
+        int OriginChunkX,
+        int OriginChunkZ,
+        int RegionSizeChunks,
+        int ChunkSize,
+        int Width,
+        int Depth,
+        int LoadedColumns,
+        int MissingColumns,
+        int PartialColumns,
+        int ComparedCells,
+        int MissingCells,
+        int HeightMismatchCells,
+        int TopBlockMismatchCells,
+        int MaxAbsHeightDelta,
+        float AverageAbsHeightDelta,
+        string Summary,
+        string SampleSummary,
+        int[] LoadedHeights,
+        int[] LoadedTopBlockIds,
+        int[] HeightDeltas,
+        bool[] Compared,
+        bool[] TopBlockMatches);
 
     private readonly record struct WorldgenPeekCleanupResult(
         int UnloadedColumns,
