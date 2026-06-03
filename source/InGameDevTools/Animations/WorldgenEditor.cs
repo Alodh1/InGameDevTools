@@ -1075,8 +1075,7 @@ public sealed partial class DebugWindowManager
         {
             string label = GetWorldgenRowLabel(WorldgenAssetKind.Landforms, row, _worldgenRowIndex);
             ImGui.TextDisabled($"Using selected draft landform: {label}.");
-            ImGui.TextDisabled("Heightmap uses terrainOctaves, terrainOctaveThresholds, terrainYKeyPositions, and terrainYKeyThresholds.");
-            ImGui.TextDisabled("This is a Speed-1 draft shape visualization; exact ColumnNoise/GenTerra wiring remains for the next fidelity pass.");
+            ImGui.TextDisabled("Uses live GenTerra ColumnNoise when a singleplayer server is available; otherwise falls back to the draft-only approximation.");
         }
         else
         {
@@ -3887,6 +3886,8 @@ public sealed partial class DebugWindowManager
             return;
         }
 
+        WorldgenTerrainShapeSampler sampler = CreateWorldgenTerrainShapeSampler(row, draft, out string samplerStatus);
+
         float width = max.X - min.X;
         float height = max.Y - min.Y;
         float viewportMinDimension = Math.Max(1f, Math.Min(width, height));
@@ -3912,7 +3913,7 @@ public sealed partial class DebugWindowManager
                 float localX = ((x / (float)(grid - 1)) - 0.5f) * spanBlocks;
                 float worldX = centerX + localX;
                 float worldZ = centerZ + localZ;
-                float h = draft.SampleHeight(seed, worldX, worldZ);
+                float h = sampler.SampleHeight(seed, worldX, worldZ);
                 float rx = localX * cosYaw - localZ * sinYaw;
                 float rz = localX * sinYaw + localZ * cosYaw;
                 projected[x, z] = new NVector2(
@@ -3959,13 +3960,13 @@ public sealed partial class DebugWindowManager
 
         uint axisX = ImGui.ColorConvertFloat4ToU32(new NVector4(0.78f, 0.22f, 0.15f, 0.90f));
         uint axisZ = ImGui.ColorConvertFloat4ToU32(new NVector4(0.22f, 0.38f, 0.92f, 0.90f));
-        NVector2 origin = ProjectWorldgenSurfacePoint(0f, 0f, draft.SampleHeight(seed, centerX, centerZ), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
-        NVector2 xAxis = ProjectWorldgenSurfacePoint(spanBlocks * 0.16f, 0f, draft.SampleHeight(seed, centerX + spanBlocks * 0.16f, centerZ), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
-        NVector2 zAxis = ProjectWorldgenSurfacePoint(0f, spanBlocks * 0.16f, draft.SampleHeight(seed, centerX, centerZ + spanBlocks * 0.16f), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 origin = ProjectWorldgenSurfacePoint(0f, 0f, sampler.SampleHeight(seed, centerX, centerZ), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 xAxis = ProjectWorldgenSurfacePoint(spanBlocks * 0.16f, 0f, sampler.SampleHeight(seed, centerX + spanBlocks * 0.16f, centerZ), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
+        NVector2 zAxis = ProjectWorldgenSurfacePoint(0f, spanBlocks * 0.16f, sampler.SampleHeight(seed, centerX, centerZ + spanBlocks * 0.16f), center, screenScale, heightScale, cosYaw, sinYaw, pitch);
         drawList.AddLine(origin, xAxis, axisX, 2f);
         drawList.AddLine(origin, zAxis, axisZ, 2f);
 
-        _worldgenPreviewRasterStatus = $"3D draft surface: {grid}x{grid}; height {minHeight:0.000}-{maxHeight:0.000}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
+        _worldgenPreviewRasterStatus = $"3D draft surface: {grid}x{grid}; height {minHeight:0.000}-{maxHeight:0.000}; {samplerStatus}; yaw {_worldgenPreview3DYaw:0.00}, pitch {_worldgenPreview3DPitch:0.00}";
     }
 
     private void DrawWorldgenPeekRegionPreview(ImDrawListPtr drawList, NVector2 min, NVector2 max, WorldgenPeekRegionProfile profile)
@@ -4344,6 +4345,7 @@ public sealed partial class DebugWindowManager
                 return false;
             }
 
+            WorldgenTerrainShapeSampler sampler = CreateWorldgenTerrainShapeSampler(row, draft, out string samplerStatus);
             float minHeight = float.PositiveInfinity;
             float maxHeight = float.NegativeInfinity;
             for (int z = 0; z < cellsZ; z++)
@@ -4352,16 +4354,16 @@ public sealed partial class DebugWindowManager
                 for (int x = 0; x < cellsX; x++)
                 {
                     float worldX = centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX);
-                    float height = draft.SampleHeight(seed, worldX, worldZ);
-                    float east = draft.SampleHeight(seed, worldX + 8f, worldZ);
-                    float south = draft.SampleHeight(seed, worldX, worldZ + 8f);
+                    float height = sampler.SampleHeight(seed, worldX, worldZ);
+                    float east = sampler.SampleHeight(seed, worldX + 8f, worldZ);
+                    float south = sampler.SampleHeight(seed, worldX, worldZ + 8f);
                     minHeight = Math.Min(minHeight, height);
                     maxHeight = Math.Max(maxHeight, height);
                     colors[z * cellsX + x] = BuildWorldgenTerrainShapePreviewColor(height, east, south, draft);
                 }
             }
 
-            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; landform height {minHeight:0.000}-{maxHeight:0.000}";
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; landform height {minHeight:0.000}-{maxHeight:0.000}; {samplerStatus}";
             error = "";
             return true;
         }
@@ -4371,6 +4373,107 @@ public sealed partial class DebugWindowManager
             error = $"Terrain shape render failed: {exception.Message}";
             return false;
         }
+    }
+
+    private WorldgenTerrainShapeSampler CreateWorldgenTerrainShapeSampler(JObject row, WorldgenLandformDraft fallbackDraft, out string status)
+    {
+        try
+        {
+            if (TryCreateEngineWorldgenTerrainShapeSampler(row, fallbackDraft, out WorldgenTerrainShapeSampler? sampler, out status) && sampler != null)
+            {
+                return sampler;
+            }
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen terrain shape engine sampler failed", exception);
+            status = $"approximate draft sampler; engine ColumnNoise failed: {exception.Message}";
+        }
+
+        return new WorldgenTerrainShapeSampler(fallbackDraft, status);
+    }
+
+    private bool TryCreateEngineWorldgenTerrainShapeSampler(JObject row, WorldgenLandformDraft fallbackDraft, out WorldgenTerrainShapeSampler? sampler, out string status)
+    {
+        sampler = null;
+        ICoreServerAPI? serverApi = _worldgenPreviewServerApi;
+        if (serverApi == null)
+        {
+            RefreshWorldgenServerApi();
+            serverApi = _worldgenPreviewServerApi;
+        }
+
+        if (serverApi?.WorldManager == null)
+        {
+            status = "approximate draft sampler; singleplayer server API unavailable";
+            return false;
+        }
+
+        GenTerra? genTerra = serverApi.ModLoader.GetModSystem<GenTerra>();
+        if (genTerra == null)
+        {
+            status = "approximate draft sampler; GenTerra unavailable";
+            return false;
+        }
+
+        if (TryGetReflectedMember(genTerra, "terrainNoise") is not NewNormalizedSimplexFractalNoise terrainNoise)
+        {
+            status = "approximate draft sampler; GenTerra terrainNoise unavailable";
+            return false;
+        }
+
+        if (TryGetReflectedMember(genTerra, "distort2dx") is not SimplexNoise distortX ||
+            TryGetReflectedMember(genTerra, "distort2dz") is not SimplexNoise distortZ)
+        {
+            status = "approximate draft sampler; GenTerra distortion noise unavailable";
+            return false;
+        }
+
+        int mapSizeY = serverApi.WorldManager.MapSizeY;
+        if (mapSizeY < 8)
+        {
+            status = "approximate draft sampler; invalid server map height";
+            return false;
+        }
+
+        LandformVariant variant = CreateWorldgenPreviewLandformVariantForSampling(genTerra, row, _worldgenRowIndex, serverApi.WorldManager);
+        if (variant.TerrainOctaves == null || variant.TerrainOctaves.Length == 0 || variant.TerrainOctaveThresholds == null || variant.TerrainYThresholds == null || variant.TerrainYThresholds.Length < mapSizeY)
+        {
+            status = "approximate draft sampler; initialized landform thresholds unavailable";
+            return false;
+        }
+
+        double verticalFrequency = 0.5 / TerraGenConfig.terrainNoiseVerticalScale;
+        sampler = new WorldgenTerrainShapeSampler(
+            fallbackDraft,
+            terrainNoise,
+            distortX,
+            distortZ,
+            variant.TerrainOctaves,
+            variant.TerrainOctaveThresholds,
+            variant.TerrainYThresholds,
+            mapSizeY,
+            verticalFrequency,
+            "engine ColumnNoise sampler");
+        status = "engine ColumnNoise sampler";
+        return true;
+    }
+
+    private static LandformVariant CreateWorldgenPreviewLandformVariantForSampling(GenTerra genTerra, JObject row, int selectedRowIndex, IWorldManagerAPI worldManager)
+    {
+        LandformVariant variant = new();
+        if (TryGetReflectedMember(genTerra, "landforms") is LandformsWorldProperty landforms)
+        {
+            int index = FindWorldgenLandformVariantIndex(landforms, row, selectedRowIndex);
+            if (index >= 0 && landforms.Variants != null && index < landforms.Variants.Length)
+            {
+                variant = CloneWorldgenLandformVariant(landforms.Variants[index]);
+            }
+        }
+
+        ApplyWorldgenLandformDraftRow(variant, row);
+        variant.Init(worldManager, Math.Max(0, variant.index));
+        return variant;
     }
 
     private bool TryBuildWorldgenMapLayerRaster(
@@ -4445,7 +4548,7 @@ public sealed partial class DebugWindowManager
             WorldgenPreviewModeOre => GetSelectedWorldgenRowContext(WorldgenAssetKind.Deposits),
             WorldgenPreviewModeBlockPatch => GetSelectedWorldgenRowContext(WorldgenAssetKind.BlockPatches),
             WorldgenPreviewModeLandform => GetSelectedWorldgenRowContext(WorldgenAssetKind.Landforms),
-            WorldgenPreviewModeTerrainShape => GetSelectedWorldgenRowContext(WorldgenAssetKind.RockStrata),
+            WorldgenPreviewModeTerrainShape => SelectedWorldgenEntry?.Root?.ToString(Formatting.None) + ":" + _worldgenRowIndex + ":" + _worldgenCurrentText,
             _ => ""
         };
     }
@@ -5617,6 +5720,144 @@ public sealed partial class DebugWindowManager
 
             _disposed = true;
             _restore?.Invoke();
+        }
+    }
+
+    private sealed class WorldgenTerrainShapeSampler
+    {
+        private readonly WorldgenLandformDraft _fallbackDraft;
+        private readonly NewNormalizedSimplexFractalNoise? _terrainNoise;
+        private readonly SimplexNoise? _distortX;
+        private readonly SimplexNoise? _distortZ;
+        private readonly double[] _terrainOctaves;
+        private readonly double[] _terrainOctaveThresholds;
+        private readonly float[] _terrainYThresholds;
+        private readonly int _mapSizeY;
+        private readonly double _verticalFrequency;
+
+        public WorldgenTerrainShapeSampler(WorldgenLandformDraft fallbackDraft, string status)
+        {
+            _fallbackDraft = fallbackDraft;
+            _terrainOctaves = [];
+            _terrainOctaveThresholds = [];
+            _terrainYThresholds = [];
+            Status = status;
+        }
+
+        public WorldgenTerrainShapeSampler(
+            WorldgenLandformDraft fallbackDraft,
+            NewNormalizedSimplexFractalNoise terrainNoise,
+            SimplexNoise distortX,
+            SimplexNoise distortZ,
+            double[] terrainOctaves,
+            double[] terrainOctaveThresholds,
+            float[] terrainYThresholds,
+            int mapSizeY,
+            double verticalFrequency,
+            string status)
+        {
+            _fallbackDraft = fallbackDraft;
+            _terrainNoise = terrainNoise;
+            _distortX = distortX;
+            _distortZ = distortZ;
+            _terrainOctaves = terrainOctaves;
+            _terrainOctaveThresholds = terrainOctaveThresholds;
+            _terrainYThresholds = terrainYThresholds;
+            _mapSizeY = mapSizeY;
+            _verticalFrequency = verticalFrequency;
+            Status = status;
+        }
+
+        public string Status { get; }
+
+        public float SampleHeight(long seed, float worldX, float worldZ)
+        {
+            if (_terrainNoise == null || _distortX == null || _distortZ == null || _terrainYThresholds.Length < _mapSizeY)
+            {
+                return _fallbackDraft.SampleHeight(seed, worldX, worldZ);
+            }
+
+            try
+            {
+                return SampleEngineHeight(worldX, worldZ);
+            }
+            catch
+            {
+                return _fallbackDraft.SampleHeight(seed, worldX, worldZ);
+            }
+        }
+
+        private float SampleEngineHeight(float worldX, float worldZ)
+        {
+            int mapSizeYm2 = Math.Max(1, _mapSizeY - 2);
+            WorldgenVectorXZ distortion = NewDistortionNoise(worldX, worldZ);
+            WorldgenVectorXZ terrainDistortion = ApplyIsotropicDistortionThreshold(distortion * 4.0, 40.0, 763.6753236814714);
+            NewNormalizedSimplexFractalNoise.ColumnNoise column = _terrainNoise!.ForColumn(
+                _verticalFrequency,
+                _terrainOctaves,
+                _terrainOctaveThresholds,
+                worldX + terrainDistortion.X,
+                worldZ + terrainDistortion.Z);
+
+            double boundMin = column.BoundMin;
+            double boundMax = column.BoundMax;
+            int topSolid = 0;
+            for (int y = 1; y <= mapSizeYm2; y++)
+            {
+                double threshold = _terrainYThresholds[y];
+                if (threshold <= boundMin)
+                {
+                    topSolid = y;
+                    continue;
+                }
+
+                if (threshold >= boundMax)
+                {
+                    break;
+                }
+
+                double inverseThreshold = 0.0 - NormalizedSimplexNoise.NoiseValueCurveInverse(threshold);
+                if (column.NoiseSign(y, inverseThreshold) > 0.0)
+                {
+                    topSolid = y;
+                }
+            }
+
+            return Math.Clamp(topSolid / (float)Math.Max(1, mapSizeYm2), 0f, 1f);
+        }
+
+        private WorldgenVectorXZ NewDistortionNoise(double worldX, double worldZ)
+        {
+            double x = 0.0;
+            double z = 0.0;
+            SimplexNoise.NoiseFairWarpVector(_distortX!, _distortZ!, worldX / 400.0, worldZ / 400.0, out x, out z);
+            return new WorldgenVectorXZ(x, z);
+        }
+
+        private static WorldgenVectorXZ ApplyIsotropicDistortionThreshold(WorldgenVectorXZ dist, double threshold, double maximum)
+        {
+            double squaredDistance = dist.X * dist.X + dist.Z * dist.Z;
+            double squaredThreshold = threshold * threshold;
+            if (squaredDistance <= squaredThreshold)
+            {
+                return new WorldgenVectorXZ(0.0, 0.0);
+            }
+
+            double distanceFactor = (squaredDistance - squaredThreshold) / squaredDistance;
+            double squaredMaximum = maximum * maximum;
+            double maximumFactor = squaredMaximum / (squaredMaximum - squaredThreshold);
+            double factor = distanceFactor * maximumFactor;
+            double factorSquared = factor * factor;
+            double range = maximum - threshold;
+            return dist * (factorSquared * (range / maximum));
+        }
+    }
+
+    private readonly record struct WorldgenVectorXZ(double X, double Z)
+    {
+        public static WorldgenVectorXZ operator *(WorldgenVectorXZ vector, double multiplier)
+        {
+            return new WorldgenVectorXZ(vector.X * multiplier, vector.Z * multiplier);
         }
     }
 
