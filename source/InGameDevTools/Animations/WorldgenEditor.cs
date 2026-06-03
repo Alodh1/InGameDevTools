@@ -2986,6 +2986,21 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void EnqueueWorldgenLatePeekCleanup(WorldgenActivePeek activePeek, Dictionary<Vec2i, IServerChunk[]> columns)
+    {
+        if (columns.Count == 0) return;
+
+        Dictionary<Vec2i, IServerChunk[]> returnedColumns = new(columns);
+        _api.Event.EnqueueMainThreadTask(() =>
+        {
+            WorldgenPeekCleanupResult lateCleanup = activePeek.CleanupReturnedColumns(returnedColumns);
+            if (lateCleanup.FailedColumns > 0)
+            {
+                _worldgenDiagnostics.Warning("Worldgen late preview cleanup had failures", lateCleanup.Details);
+            }
+        }, "ingamedevtools-worldgen-late-peek-cleanup");
+    }
+
     private void RequestWorldgenPeekRegion(bool forceRefresh = false, string reason = "manual")
     {
         ICoreServerAPI? serverApi = _worldgenPreviewServerApi;
@@ -3100,18 +3115,12 @@ public sealed partial class DebugWindowManager
             {
                 if (!IsActiveWorldgenPeek(activePeek))
                 {
-                    WorldgenPeekCleanupResult lateCleanup = activePeek.CleanupReturnedColumns(columns);
-                    if (lateCleanup.FailedColumns > 0)
-                    {
-                        _worldgenDiagnostics.Warning("Worldgen late preview cleanup had failures", lateCleanup.Details);
-                    }
+                    EnqueueWorldgenLatePeekCleanup(activePeek, columns);
                     return;
                 }
 
                 WorldgenPeekRegionProfile? profileToDispatch = null;
                 Exception? failureToDispatch = null;
-                WorldgenPeekCleanupResult cleanupToDispatch = WorldgenPeekCleanupResult.Empty;
-                string restoreStatusToDispatch = "";
                 bool shouldDispatch = false;
 
                 lock (gate)
@@ -3160,26 +3169,14 @@ public sealed partial class DebugWindowManager
 
                 if (!shouldDispatch) return;
 
-                if (!TryCompleteActiveWorldgenPeek(activePeek, out restoreStatusToDispatch, out cleanupToDispatch))
-                {
-                    WorldgenPeekCleanupResult lateCleanup = activePeek.CleanupReturnedColumns(columns);
-                    if (lateCleanup.FailedColumns > 0)
-                    {
-                        _worldgenDiagnostics.Warning("Worldgen late preview cleanup had failures", lateCleanup.Details);
-                    }
-                    return;
-                }
-
-                if (profileToDispatch != null)
-                {
-                    string draftSummary = activePeek.DraftApplied
-                        ? $"{cleanupToDispatch.Summary}; {activePeek.DraftStatus}; {restoreStatusToDispatch}"
-                        : $"{cleanupToDispatch.Summary}; {activePeek.DraftFallbackStatus}; {restoreStatusToDispatch}";
-                    profileToDispatch = profileToDispatch with { CleanupSummary = draftSummary };
-                }
-
                 _api.Event.EnqueueMainThreadTask(() =>
                 {
+                    if (!TryCompleteActiveWorldgenPeek(activePeek, out string restoreStatusToDispatch, out WorldgenPeekCleanupResult cleanupToDispatch))
+                    {
+                        EnqueueWorldgenLatePeekCleanup(activePeek, columns);
+                        return;
+                    }
+
                     _worldgenPreviewPeekPending = false;
                     if (cleanupToDispatch.FailedColumns > 0)
                     {
@@ -3191,6 +3188,14 @@ public sealed partial class DebugWindowManager
                         _worldgenPreviewPeekStatus = $"Real {passLabel} region peek failed: {failureToDispatch.Message}";
                         _worldgenDiagnostics.Exception("Worldgen region peek failed", failureToDispatch);
                         return;
+                    }
+
+                    if (profileToDispatch != null)
+                    {
+                        string draftSummary = activePeek.DraftApplied
+                            ? $"{cleanupToDispatch.Summary}; {activePeek.DraftStatus}; {restoreStatusToDispatch}"
+                            : $"{cleanupToDispatch.Summary}; {activePeek.DraftFallbackStatus}; {restoreStatusToDispatch}";
+                        profileToDispatch = profileToDispatch with { CleanupSummary = draftSummary };
                     }
 
                     _worldgenPreviewPeekProfile = profileToDispatch;
