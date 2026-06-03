@@ -13,6 +13,7 @@ using Vintagestory.API.Config;
 using Vintagestory.API.Datastructures;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
+using Vintagestory.API.Util;
 using Vintagestory.ServerMods;
 using Vintagestory.ServerMods.NoObf;
 
@@ -1049,6 +1050,7 @@ public sealed partial class DebugWindowManager
         {
             string generator = TryGetWorldgenPreviewDepositGenerator(variant!) ?? "unknown generator";
             ImGui.TextDisabled($"Using {source}: {code ?? "unnamed"} ({generator}).");
+            ImGui.TextDisabled("Ore map preview generates the selected deposit's region ore map in memory; exact propick still needs a generated block column.");
         }
         else
         {
@@ -1636,8 +1638,11 @@ public sealed partial class DebugWindowManager
             int chunkSize = GetWorldgenPreviewDepositChunkSize(variant!);
             int chunkX = FloorDiv(blockX, chunkSize);
             int chunkZ = FloorDiv(blockZ, chunkSize);
-            float factor = variant!.GetOreMapFactor(chunkX, chunkZ);
-            return $"Ore: {code ?? "unnamed"} {factor.ToString("0.###", CultureInfo.InvariantCulture)} at chunk {chunkX}, {chunkZ} ({source})";
+            Dictionary<WorldgenOreMapRegionCacheKey, IntDataMap2D> oreMapCache = [];
+            float factor = TrySampleWorldgenPreviewOreMapFactor(variant!, chunkX, chunkZ, oreMapCache, out float sampledFactor, out string samplerStatus)
+                ? sampledFactor
+                : variant!.GetOreMapFactor(chunkX, chunkZ);
+            return $"Ore: {code ?? "unnamed"} factor {factor.ToString("0.###", CultureInfo.InvariantCulture)} at chunk {chunkX}, {chunkZ} ({source}); {samplerStatus}. Exact propick needs a generated block column.";
         }
         catch (Exception exception)
         {
@@ -4248,6 +4253,10 @@ public sealed partial class DebugWindowManager
         try
         {
             int chunkSize = GetWorldgenPreviewDepositChunkSize(variant!);
+            Dictionary<WorldgenOreMapRegionCacheKey, IntDataMap2D> oreMapCache = [];
+            string samplerStatus = "";
+            float minFactor = float.PositiveInfinity;
+            float maxFactor = float.NegativeInfinity;
             for (int z = 0; z < cellsZ; z++)
             {
                 int worldZ = (int)MathF.Floor(centerZ - halfHeightBlocks + (z + 0.5f) * (2f * halfHeightBlocks / cellsZ));
@@ -4256,11 +4265,16 @@ public sealed partial class DebugWindowManager
                 {
                     int worldX = (int)MathF.Floor(centerX - halfWidthBlocks + (x + 0.5f) * (2f * halfWidthBlocks / cellsX));
                     int chunkX = FloorDiv(worldX, chunkSize);
-                    float factor = variant!.GetOreMapFactor(chunkX, chunkZ);
+                    float factor = TrySampleWorldgenPreviewOreMapFactor(variant!, chunkX, chunkZ, oreMapCache, out float sampledFactor, out samplerStatus)
+                        ? sampledFactor
+                        : variant!.GetOreMapFactor(chunkX, chunkZ);
+                    minFactor = Math.Min(minFactor, factor);
+                    maxFactor = Math.Max(maxFactor, factor);
                     colors[z * cellsX + x] = BuildWorldgenOrePreviewColor(factor);
                 }
             }
 
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; ore factor {minFactor:0.###}-{maxFactor:0.###}; {samplerStatus}; exact propick still requires 3D column";
             error = "";
             return true;
         }
@@ -4270,6 +4284,87 @@ public sealed partial class DebugWindowManager
             error = $"Ore render failed: {exception.Message}";
             return false;
         }
+    }
+
+    private bool TrySampleWorldgenPreviewOreMapFactor(
+        DepositVariant variant,
+        int chunkX,
+        int chunkZ,
+        Dictionary<WorldgenOreMapRegionCacheKey, IntDataMap2D> oreMapCache,
+        out float factor,
+        out string status)
+    {
+        factor = 0f;
+        status = "ore map sampler unavailable";
+
+        if (!variant.WithOreMap)
+        {
+            factor = 1f;
+            status = "deposit has no ore map; factor is 1";
+            return true;
+        }
+
+        ICoreServerAPI? serverApi = _worldgenPreviewServerApi;
+        if (serverApi == null)
+        {
+            status = "live server unavailable; using deposit fallback";
+            return false;
+        }
+
+        string? code = GetWorldgenPreviewDepositCode(variant);
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            status = "deposit has no ore map code; using deposit fallback";
+            return false;
+        }
+
+        if (variant.OreMapLayer == null)
+        {
+            try
+            {
+                int hash = StringUtil.GetNonRandomizedHashCode(code);
+                NoiseOre oreNoise = new(serverApi.WorldManager.Seed + hash);
+                variant.OreMapLayer = GenMaps.GetOreMap(
+                    serverApi.WorldManager.Seed + hash + 1,
+                    oreNoise,
+                    variant.OreMapScale,
+                    variant.OreMapContrast,
+                    variant.OreMapSub);
+            }
+            catch (Exception exception)
+            {
+                status = $"ore map layer creation failed: {exception.Message}";
+                return false;
+            }
+        }
+
+        int regionSize = Math.Max(1, serverApi.WorldManager.RegionSize);
+        int chunkSize = GetWorldgenPreviewDepositChunkSize(variant);
+        int noiseSizeOre = Math.Max(1, regionSize / Math.Max(1, TerraGenConfig.oreMapScale));
+        int regionX = FloorDiv(chunkX * chunkSize, regionSize);
+        int regionZ = FloorDiv(chunkZ * chunkSize, regionSize);
+        WorldgenOreMapRegionCacheKey key = new(code, regionX, regionZ, noiseSizeOre);
+
+        if (!oreMapCache.TryGetValue(key, out IntDataMap2D? map))
+        {
+            map = new IntDataMap2D
+            {
+                Size = noiseSizeOre + 1,
+                BottomRightPadding = 1,
+                Data = variant.OreMapLayer.GenLayer(regionX * noiseSizeOre, regionZ * noiseSizeOre, noiseSizeOre + 1, noiseSizeOre + 1)
+            };
+            oreMapCache[key] = map;
+        }
+
+        int blockX = chunkX * chunkSize + chunkSize / 2;
+        int blockZ = chunkZ * chunkSize + chunkSize / 2;
+        int localX = GameMath.Mod(blockX, regionSize);
+        int localZ = GameMath.Mod(blockZ, regionSize);
+        float sampleX = GameMath.Clamp((float)localX / regionSize * noiseSizeOre, 0f, noiseSizeOre - 1);
+        float sampleZ = GameMath.Clamp((float)localZ / regionSize * noiseSizeOre, 0f, noiseSizeOre - 1);
+        factor = (map.GetUnpaddedColorLerped(sampleX, sampleZ) & 0xff) / 255f;
+        status = "in-memory OnMapRegionGen ore map sampler";
+        return true;
     }
 
     private bool TryBuildWorldgenBlockPatchRaster(
@@ -5536,6 +5631,8 @@ public sealed partial class DebugWindowManager
         int RegionSizeChunks,
         EnumWorldGenPass UntilPass,
         string DraftFingerprint);
+
+    private readonly record struct WorldgenOreMapRegionCacheKey(string Code, int RegionX, int RegionZ, int NoiseSize);
 
     private sealed record WorldgenPeekRegionProfile(
         int OriginChunkX,
