@@ -3,6 +3,7 @@ using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Globalization;
+using System.Text;
 using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
 using Vintagestory.API.Common;
@@ -1072,6 +1073,10 @@ public sealed partial class DebugWindowManager
         {
             ImGui.TextDisabled($"Last real region: chunks {profile.OriginChunkX},{profile.OriginChunkZ} size {profile.RegionSizeChunks}x{profile.RegionSizeChunks}; pass {profile.PassLabel}; height {profile.MinHeight}-{profile.MaxHeight}; avg {profile.AverageHeight:0.0}.");
             ImGui.TextDisabled($"Sample row: {profile.SampleSummary}");
+            if (!string.IsNullOrWhiteSpace(profile.CleanupSummary))
+            {
+                ImGui.TextDisabled(profile.CleanupSummary);
+            }
         }
     }
 
@@ -1902,15 +1907,45 @@ public sealed partial class DebugWindowManager
         int totalRequests = regionSize * regionSize;
         int remainingRequests = totalRequests;
         object gate = new();
+        List<Vec2i> requestedColumns = new(totalRequests);
+        Dictionary<Vec2i, bool> initiallyLoadedColumns = new();
         Dictionary<Vec2i, IServerChunk[]> regionColumns = new();
         Exception? firstFailure = null;
+        bool restoreSendChunks = true;
+        bool sendChunksChanged = false;
+
+        for (int dz = 0; dz < regionSize; dz++)
+        {
+            for (int dx = 0; dx < regionSize; dx++)
+            {
+                Vec2i key = new(originChunkX + dx, originChunkZ + dz);
+                requestedColumns.Add(key);
+                initiallyLoadedColumns[key] = TryIsWorldgenChunkColumnLoaded(worldManager, key.X, key.Y, chunkSize, out bool wasLoaded, out string? loadStateError)
+                    ? wasLoaded
+                    : true;
+                if (!string.IsNullOrWhiteSpace(loadStateError))
+                {
+                    _worldgenDiagnostics.Warning($"Worldgen peek could not read pre-peek chunk state for {key.X},{key.Y}: {loadStateError}");
+                }
+            }
+        }
 
         try
         {
+            restoreSendChunks = TryGetWorldgenSendChunks(worldManager, out bool previousSendChunks)
+                ? previousSendChunks
+                : true;
+            sendChunksChanged = TrySetWorldgenSendChunks(worldManager, false, out string? sendChunksError);
+            if (!sendChunksChanged && !string.IsNullOrWhiteSpace(sendChunksError))
+            {
+                _worldgenDiagnostics.Warning($"Worldgen peek could not pause SendChunks: {sendChunksError}");
+            }
+
             void OnGenerated(Dictionary<Vec2i, IServerChunk[]> columns)
             {
                 WorldgenPeekRegionProfile? profileToDispatch = null;
                 Exception? failureToDispatch = null;
+                WorldgenPeekCleanupResult cleanupToDispatch = WorldgenPeekCleanupResult.Empty;
                 bool shouldDispatch = false;
 
                 lock (gate)
@@ -1949,6 +1984,12 @@ public sealed partial class DebugWindowManager
                             {
                                 profileToDispatch = BuildWorldgenPeekRegionProfile(regionColumns, originChunkX, originChunkZ, regionSize, chunkSize, untilPass, passLabel);
                             }
+
+                            cleanupToDispatch = CleanupWorldgenPeekColumns(worldManager, requestedColumns, initiallyLoadedColumns);
+                            if (profileToDispatch != null)
+                            {
+                                profileToDispatch = profileToDispatch with { CleanupSummary = cleanupToDispatch.Summary };
+                            }
                         }
                         catch (Exception exception)
                         {
@@ -1963,10 +2004,19 @@ public sealed partial class DebugWindowManager
                 {
                     TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
                 }
+                if (sendChunksChanged)
+                {
+                    TrySetWorldgenSendChunks(worldManager, restoreSendChunks, out _);
+                }
 
                 _api.Event.EnqueueMainThreadTask(() =>
                 {
                     _worldgenPreviewPeekPending = false;
+                    if (cleanupToDispatch.FailedColumns > 0)
+                    {
+                        _worldgenDiagnostics.Warning("Worldgen preview cleanup had failures", cleanupToDispatch.Details);
+                    }
+
                     if (failureToDispatch != null)
                     {
                         _worldgenPreviewPeekStatus = $"Real {passLabel} region peek failed: {failureToDispatch.Message}";
@@ -1978,24 +2028,19 @@ public sealed partial class DebugWindowManager
                     _worldgenPreviewPeekCacheKey = profileToDispatch == null ? null : cacheKey;
                     _worldgenPreviewPeekStatus = profileToDispatch == null
                         ? $"Real {passLabel} region peek returned no chunks at {originChunkX},{originChunkZ}."
-                        : $"Real {passLabel} region peek: {profileToDispatch.ColumnsReturned}/{totalRequests} column(s), {profileToDispatch.ChunksReturned} vertical chunk(s); AutoGenerateChunks paused during peek.";
+                        : $"Real {passLabel} region peek: {profileToDispatch.ColumnsReturned}/{totalRequests} column(s), {profileToDispatch.ChunksReturned} vertical chunk(s); {cleanupToDispatch.Summary}";
                 }, "ingamedevtools-worldgen-peek-region");
             }
 
-            for (int dz = 0; dz < regionSize; dz++)
+            foreach (Vec2i key in requestedColumns)
             {
-                for (int dx = 0; dx < regionSize; dx++)
+                ChunkPeekOptions options = new()
                 {
-                    int requestChunkX = originChunkX + dx;
-                    int requestChunkZ = originChunkZ + dz;
-                    ChunkPeekOptions options = new()
-                    {
-                        UntilPass = untilPass,
-                        OnGenerated = OnGenerated
-                    };
+                    UntilPass = untilPass,
+                    OnGenerated = OnGenerated
+                };
 
-                    worldManager.PeekChunkColumn(requestChunkX, requestChunkZ, options);
-                }
+                worldManager.PeekChunkColumn(key.X, key.Y, options);
             }
         }
         catch (Exception exception)
@@ -2004,10 +2049,72 @@ public sealed partial class DebugWindowManager
             {
                 TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
             }
+            if (sendChunksChanged)
+            {
+                TrySetWorldgenSendChunks(worldManager, restoreSendChunks, out _);
+            }
 
             _worldgenPreviewPeekPending = false;
             _worldgenPreviewPeekStatus = $"Real {passLabel} region peek request failed: {exception.Message}";
             _worldgenDiagnostics.Exception("Worldgen region peek request failed", exception);
+        }
+    }
+
+    private static WorldgenPeekCleanupResult CleanupWorldgenPeekColumns(IWorldManagerAPI worldManager, IReadOnlyList<Vec2i> requestedColumns, IReadOnlyDictionary<Vec2i, bool> initiallyLoadedColumns)
+    {
+        int unloaded = 0;
+        int keptLoaded = 0;
+        int failed = 0;
+        StringBuilder details = new();
+
+        foreach (Vec2i key in requestedColumns)
+        {
+            if (initiallyLoadedColumns.TryGetValue(key, out bool wasLoaded) && wasLoaded)
+            {
+                keptLoaded++;
+                continue;
+            }
+
+            try
+            {
+                worldManager.UnloadChunkColumn(key.X, key.Y);
+                unloaded++;
+            }
+            catch (Exception exception)
+            {
+                failed++;
+                details.AppendLine($"{key.X},{key.Y}: {exception.Message}");
+            }
+        }
+
+        string summary = failed == 0
+            ? $"Cleanup unloaded {unloaded} preview-only column(s), kept {keptLoaded} already-loaded column(s); no delete used."
+            : $"Cleanup unloaded {unloaded} preview-only column(s), kept {keptLoaded} already-loaded column(s), failed {failed}; no delete used.";
+        return new WorldgenPeekCleanupResult(unloaded, keptLoaded, failed, summary, details.ToString());
+    }
+
+    private static bool TryIsWorldgenChunkColumnLoaded(IWorldManagerAPI worldManager, int chunkX, int chunkZ, int chunkSize, out bool loaded, out string? error)
+    {
+        loaded = false;
+        error = null;
+
+        try
+        {
+            int chunkCountY = Math.Max(1, (int)Math.Ceiling(worldManager.MapSizeY / (double)Math.Max(1, chunkSize)));
+            for (int chunkY = 0; chunkY < chunkCountY; chunkY++)
+            {
+                if (worldManager.GetChunk(chunkX, chunkY, chunkZ) == null) continue;
+
+                loaded = true;
+                return true;
+            }
+
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
         }
     }
 
@@ -2031,6 +2138,35 @@ public sealed partial class DebugWindowManager
         try
         {
             enabled = worldManager.AutoGenerateChunks;
+            return true;
+        }
+        catch
+        {
+            enabled = true;
+            return false;
+        }
+    }
+
+    private static bool TrySetWorldgenSendChunks(IWorldManagerAPI worldManager, bool enabled, out string? error)
+    {
+        try
+        {
+            worldManager.SendChunks = enabled;
+            error = null;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+    }
+
+    private static bool TryGetWorldgenSendChunks(IWorldManagerAPI worldManager, out bool enabled)
+    {
+        try
+        {
+            enabled = worldManager.SendChunks;
             return true;
         }
         catch
@@ -3879,7 +4015,20 @@ public sealed partial class DebugWindowManager
         int Width,
         int Depth,
         int[] Heights,
-        int[] TopBlockIds);
+        int[] TopBlockIds)
+    {
+        public string CleanupSummary { get; init; } = "";
+    }
+
+    private readonly record struct WorldgenPeekCleanupResult(
+        int UnloadedColumns,
+        int KeptLoadedColumns,
+        int FailedColumns,
+        string Summary,
+        string Details)
+    {
+        public static WorldgenPeekCleanupResult Empty { get; } = new(0, 0, 0, "Cleanup not run.", "");
+    }
 
     private readonly record struct WorldgenClimateSample(float TemperatureCelsius, float Rain, float Forest, float Fertility, bool HasFertility = false);
 
