@@ -12,6 +12,7 @@ using Vintagestory.API.Datastructures;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
 using Vintagestory.ServerMods;
+using Vintagestory.ServerMods.NoObf;
 
 namespace InGameDevTools.Animations;
 
@@ -1076,7 +1077,7 @@ public sealed partial class DebugWindowManager
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Debounces real PeekChunkColumn refreshes after edits. This currently refreshes live engine output; draft mutation into the real 3D pipeline is the next W4.5 step.");
+            ImGui.SetTooltip("Debounces real PeekChunkColumn refreshes after edits. Landform rows are temporarily injected into the real 3D pipeline for the preview and restored afterward.");
         }
         ImGui.TextDisabled(_worldgenPreviewAutoPeekStatus);
 
@@ -1267,6 +1268,127 @@ public sealed partial class DebugWindowManager
         {
             return null;
         }
+    }
+
+    private static bool TrySetReflectedMember(object? instance, string memberName, object? value, out string error)
+    {
+        error = "";
+        if (instance == null)
+        {
+            error = "instance is null";
+            return false;
+        }
+
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic;
+
+        Type type = instance.GetType();
+        try
+        {
+            System.Reflection.PropertyInfo? property = type.GetProperty(memberName, flags);
+            if (property != null && property.GetIndexParameters().Length == 0 && property.CanWrite)
+            {
+                property.SetValue(instance, value);
+                return true;
+            }
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+
+        try
+        {
+            System.Reflection.FieldInfo? field = type.GetField(memberName, flags);
+            if (field != null)
+            {
+                field.SetValue(instance, value);
+                return true;
+            }
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+
+        error = $"member {memberName} not found";
+        return false;
+    }
+
+    private static object? TryGetReflectedStaticMember(Type type, string memberName)
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Static |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic;
+
+        try
+        {
+            System.Reflection.PropertyInfo? property = type.GetProperty(memberName, flags);
+            if (property != null && property.GetIndexParameters().Length == 0)
+            {
+                return property.GetValue(null);
+            }
+        }
+        catch
+        {
+            // Field fallback below.
+        }
+
+        try
+        {
+            return type.GetField(memberName, flags)?.GetValue(null);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool TrySetReflectedStaticMember(Type type, string memberName, object? value, out string error)
+    {
+        error = "";
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Static |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic;
+
+        try
+        {
+            System.Reflection.PropertyInfo? property = type.GetProperty(memberName, flags);
+            if (property != null && property.GetIndexParameters().Length == 0 && property.CanWrite)
+            {
+                property.SetValue(null, value);
+                return true;
+            }
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+
+        try
+        {
+            System.Reflection.FieldInfo? field = type.GetField(memberName, flags);
+            if (field != null)
+            {
+                field.SetValue(null, value);
+                return true;
+            }
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+
+        error = $"static member {memberName} not found";
+        return false;
     }
 
     private static string FormatInvariant(object? value, string fallback)
@@ -1752,6 +1874,276 @@ public sealed partial class DebugWindowManager
             : null;
     }
 
+    private WorldgenPeekDraftScope CreateWorldgenPeekDraftScope(ICoreServerAPI serverApi, out string status)
+    {
+        status = "live engine config";
+        if (_worldgenPreviewMode != WorldgenPreviewModeRegion3D)
+        {
+            return WorldgenPeekDraftScope.Empty;
+        }
+
+        WorldgenAssetEntry? entry = SelectedWorldgenEntry;
+        if (entry?.Kind != WorldgenAssetKind.Landforms)
+        {
+            status = "live engine config; draft 3D mutation is currently available for landform rows";
+            return WorldgenPeekDraftScope.Empty;
+        }
+
+        if (!TryGetSelectedWorldgenLandformRow(out JObject? row) || row == null)
+        {
+            status = "live engine config; no selected landform draft row";
+            return WorldgenPeekDraftScope.Empty;
+        }
+
+        try
+        {
+            GenTerra? genTerra = serverApi.ModLoader.GetModSystem<GenTerra>();
+            if (genTerra == null)
+            {
+                status = "live engine config; GenTerra unavailable";
+                return WorldgenPeekDraftScope.Empty;
+            }
+
+            if (TryCreateWorldgenLandformDraftScope(genTerra, row, _worldgenRowIndex, out WorldgenPeekDraftScope scope, out status))
+            {
+                return scope;
+            }
+
+            return WorldgenPeekDraftScope.Empty;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen draft 3D landform scope failed", exception);
+            status = $"live engine config; landform draft scope failed: {exception.Message}";
+            return WorldgenPeekDraftScope.Empty;
+        }
+    }
+
+    private bool TryCreateWorldgenLandformDraftScope(GenTerra genTerra, JObject draftRow, int selectedRowIndex, out WorldgenPeekDraftScope scope, out string status)
+    {
+        scope = WorldgenPeekDraftScope.Empty;
+        status = "";
+
+        if (TryGetReflectedMember(genTerra, "landforms") is not LandformsWorldProperty originalLandforms)
+        {
+            status = "live engine config; GenTerra.landforms unavailable";
+            return false;
+        }
+
+        if (originalLandforms.Variants == null || originalLandforms.Variants.Length == 0)
+        {
+            status = "live engine config; GenTerra has no landform variants";
+            return false;
+        }
+
+        int replaceIndex = FindWorldgenLandformVariantIndex(originalLandforms, draftRow, selectedRowIndex);
+        if (replaceIndex < 0 || replaceIndex >= originalLandforms.Variants.Length)
+        {
+            status = "live engine config; selected landform draft was not found in GenTerra";
+            return false;
+        }
+
+        LandformsWorldProperty draftLandforms = CloneWorldgenLandforms(originalLandforms);
+        LandformVariant originalVariant = originalLandforms.Variants[replaceIndex];
+        LandformVariant draftVariant = CloneWorldgenLandformVariant(originalVariant);
+        ApplyWorldgenLandformDraftRow(draftVariant, draftRow);
+        draftVariant.index = originalVariant.index;
+        draftLandforms.Variants[replaceIndex] = draftVariant;
+
+        int landformIndex = originalVariant.index;
+        if (draftLandforms.LandFormsByIndex != null && landformIndex >= 0 && landformIndex < draftLandforms.LandFormsByIndex.Length)
+        {
+            draftLandforms.LandFormsByIndex[landformIndex] = draftVariant;
+        }
+        ReplaceWorldgenLandformsByMatchingCode(draftLandforms.LandFormsByIndex, draftVariant);
+
+        object? originalNoiseLandforms = TryGetReflectedStaticMember(typeof(NoiseLandforms), "landforms");
+        if (!TrySetReflectedMember(genTerra, "landforms", draftLandforms, out string setError))
+        {
+            status = $"live engine config; could not set GenTerra.landforms: {setError}";
+            return false;
+        }
+
+        bool noiseLandformsChanged = TrySetReflectedStaticMember(typeof(NoiseLandforms), "landforms", draftLandforms, out _);
+        ClearWorldgenGenTerraLandformCaches(genTerra);
+
+        string code = draftVariant.Code?.ToString() ?? draftRow["code"]?.ToString() ?? $"row {selectedRowIndex}";
+        scope = new WorldgenPeekDraftScope(
+            applied: true,
+            status: $"landform draft applied to real 3D peek: {code}",
+            restore: () =>
+            {
+                TrySetReflectedMember(genTerra, "landforms", originalLandforms, out _);
+                if (noiseLandformsChanged)
+                {
+                    TrySetReflectedStaticMember(typeof(NoiseLandforms), "landforms", originalNoiseLandforms, out _);
+                }
+                ClearWorldgenGenTerraLandformCaches(genTerra);
+            });
+        status = scope.Status;
+        return true;
+    }
+
+    private static LandformsWorldProperty CloneWorldgenLandforms(LandformsWorldProperty source)
+    {
+        return new LandformsWorldProperty
+        {
+            Code = source.Code,
+            Variants = source.Variants?.Select(CloneWorldgenLandformVariant).ToArray() ?? [],
+            LandFormsByIndex = source.LandFormsByIndex?.Select(CloneWorldgenLandformVariant).ToArray() ?? []
+        };
+    }
+
+    private static LandformVariant CloneWorldgenLandformVariant(LandformVariant source)
+    {
+        return new LandformVariant
+        {
+            Chance = source.Chance,
+            Code = source.Code,
+            ColorInt = source.ColorInt,
+            HexColor = source.HexColor,
+            index = source.index,
+            MaxRain = source.MaxRain,
+            MaxTemp = source.MaxTemp,
+            MaxWindStrength = source.MaxWindStrength,
+            MinRain = source.MinRain,
+            MinTemp = source.MinTemp,
+            MinWindStrength = source.MinWindStrength,
+            Mutations = source.Mutations?.Select(CloneWorldgenLandformVariant).ToArray(),
+            TerrainOctaves = source.TerrainOctaves?.ToArray(),
+            TerrainOctaveThresholds = source.TerrainOctaveThresholds?.ToArray(),
+            TerrainYKeyPositions = source.TerrainYKeyPositions?.ToArray(),
+            TerrainYKeyThresholds = source.TerrainYKeyThresholds?.ToArray(),
+            TerrainYThresholds = source.TerrainYThresholds?.ToArray(),
+            UseClimateMap = source.UseClimateMap,
+            UseWindMap = source.UseWindMap,
+            Weight = source.Weight,
+            WeightTmp = source.WeightTmp
+        };
+    }
+
+    private static int FindWorldgenLandformVariantIndex(LandformsWorldProperty landforms, JObject draftRow, int selectedRowIndex)
+    {
+        string? draftCode = draftRow["code"]?.ToString();
+        if (!string.IsNullOrWhiteSpace(draftCode) && landforms.Variants != null)
+        {
+            for (int index = 0; index < landforms.Variants.Length; index++)
+            {
+                string? code = landforms.Variants[index].Code?.ToString();
+                if (string.Equals(code, draftCode, StringComparison.OrdinalIgnoreCase)) return index;
+            }
+        }
+
+        if (landforms.Variants != null && selectedRowIndex >= 0 && selectedRowIndex < landforms.Variants.Length)
+        {
+            return selectedRowIndex;
+        }
+
+        return -1;
+    }
+
+    private static void ReplaceWorldgenLandformsByMatchingCode(LandformVariant[]? variants, LandformVariant replacement)
+    {
+        if (variants == null || replacement.Code == null) return;
+
+        string code = replacement.Code.ToString();
+        for (int index = 0; index < variants.Length; index++)
+        {
+            if (variants[index].Code != null && string.Equals(variants[index].Code.ToString(), code, StringComparison.OrdinalIgnoreCase))
+            {
+                variants[index] = replacement;
+            }
+        }
+    }
+
+    private static void ApplyWorldgenLandformDraftRow(LandformVariant variant, JObject row)
+    {
+        string? code = row["code"]?.ToString();
+        if (!string.IsNullOrWhiteSpace(code)) variant.Code = new AssetLocation(code);
+
+        variant.Chance = ReadWorldgenFloat(row, "chance", variant.Chance);
+        variant.Weight = ReadWorldgenDouble(row, "weight", variant.Weight);
+        variant.WeightTmp = variant.Weight;
+        variant.HexColor = row["hexcolor"]?.ToString() ?? variant.HexColor;
+        variant.MinTemp = ReadWorldgenFloat(row, "minTemp", variant.MinTemp);
+        variant.MaxTemp = ReadWorldgenFloat(row, "maxTemp", variant.MaxTemp);
+        variant.MinRain = ReadWorldgenInt(row, "minRain", variant.MinRain);
+        variant.MaxRain = ReadWorldgenInt(row, "maxRain", variant.MaxRain);
+        variant.MinWindStrength = ReadWorldgenInt(row, "minWindStrength", variant.MinWindStrength);
+        variant.MaxWindStrength = ReadWorldgenInt(row, "maxWindStrength", variant.MaxWindStrength);
+        variant.UseClimateMap = ReadWorldgenBool(row, "useClimateMap", variant.UseClimateMap);
+        variant.UseWindMap = ReadWorldgenBool(row, "useWindMap", variant.UseWindMap);
+
+        if (row["terrainOctaves"] is JArray terrainOctaves) variant.TerrainOctaves = ReadWorldgenDoubleArray(terrainOctaves);
+        if (row["terrainOctaveThresholds"] is JArray terrainOctaveThresholds) variant.TerrainOctaveThresholds = ReadWorldgenDoubleArray(terrainOctaveThresholds);
+        if (row["terrainYKeyPositions"] is JArray terrainYKeyPositions) variant.TerrainYKeyPositions = ReadWorldgenFloatArray(terrainYKeyPositions);
+        if (row["terrainYKeyThresholds"] is JArray terrainYKeyThresholds) variant.TerrainYKeyThresholds = ReadWorldgenFloatArray(terrainYKeyThresholds);
+        if (row["terrainYThresholds"] is JArray terrainYThresholds) variant.TerrainYThresholds = ReadWorldgenFloatArray(terrainYThresholds);
+
+        if (row["mutations"] is JArray mutations)
+        {
+            variant.Mutations = mutations
+                .OfType<JObject>()
+                .Select(mutation =>
+                {
+                    LandformVariant clone = CloneWorldgenLandformVariant(variant);
+                    ApplyWorldgenLandformDraftRow(clone, mutation);
+                    return clone;
+                })
+                .ToArray();
+        }
+    }
+
+    private static void ClearWorldgenGenTerraLandformCaches(GenTerra genTerra)
+    {
+        if (TryGetReflectedMember(genTerra, "LandformMapByRegion") is System.Collections.IDictionary landformMapByRegion)
+        {
+            landformMapByRegion.Clear();
+        }
+    }
+
+    private static float ReadWorldgenFloat(JObject row, string name, float fallback)
+    {
+        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && token.Type != JTokenType.Null
+            ? token.Value<float>()
+            : fallback;
+    }
+
+    private static double ReadWorldgenDouble(JObject row, string name, double fallback)
+    {
+        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && token.Type != JTokenType.Null
+            ? token.Value<double>()
+            : fallback;
+    }
+
+    private static int ReadWorldgenInt(JObject row, string name, int fallback)
+    {
+        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && token.Type != JTokenType.Null
+            ? token.Value<int>()
+            : fallback;
+    }
+
+    private static bool ReadWorldgenBool(JObject row, string name, bool fallback)
+    {
+        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && token.Type != JTokenType.Null
+            ? token.Value<bool>()
+            : fallback;
+    }
+
+    private static float[] ReadWorldgenFloatArray(JArray array)
+    {
+        return array
+            .Select(token => token.Value<float>())
+            .ToArray();
+    }
+
+    private static double[] ReadWorldgenDoubleArray(JArray array)
+    {
+        return array
+            .Select(token => token.Value<double>())
+            .ToArray();
+    }
+
     private string GetSelectedWorldgenRowContext(WorldgenAssetKind kind)
     {
         return TryGetSelectedWorldgenRow(kind, out JObject? row) && row != null
@@ -1927,6 +2319,7 @@ public sealed partial class DebugWindowManager
         _worldgenPreviewPeekProfile = null;
         _worldgenPreviewPeekCacheKey = null;
         _worldgenPreviewPeekStatus = $"Requesting real {passLabel} peek for {regionSize}x{regionSize} chunks at {originChunkX},{originChunkZ} ({reason})...";
+        WorldgenPeekDraftScope draftScope = CreateWorldgenPeekDraftScope(serverApi, out string draftScopeStatus);
 
         bool restoreAutoGenerate = TryGetWorldgenAutoGenerateChunks(worldManager, out bool previousAutoGenerate)
             ? previousAutoGenerate
@@ -2021,7 +2414,10 @@ public sealed partial class DebugWindowManager
                             cleanupToDispatch = CleanupWorldgenPeekColumns(worldManager, requestedColumns, initiallyLoadedColumns);
                             if (profileToDispatch != null)
                             {
-                                profileToDispatch = profileToDispatch with { CleanupSummary = cleanupToDispatch.Summary };
+                                string draftSummary = draftScope.Applied
+                                    ? $"{cleanupToDispatch.Summary}; {draftScope.Status}"
+                                    : $"{cleanupToDispatch.Summary}; {draftScopeStatus}";
+                                profileToDispatch = profileToDispatch with { CleanupSummary = draftSummary };
                             }
                         }
                         catch (Exception exception)
@@ -2033,6 +2429,7 @@ public sealed partial class DebugWindowManager
 
                 if (!shouldDispatch) return;
 
+                draftScope.Dispose();
                 if (autoGenerateChanged)
                 {
                     TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
@@ -2061,7 +2458,7 @@ public sealed partial class DebugWindowManager
                     _worldgenPreviewPeekCacheKey = profileToDispatch == null ? null : cacheKey;
                     _worldgenPreviewPeekStatus = profileToDispatch == null
                         ? $"Real {passLabel} region peek returned no chunks at {originChunkX},{originChunkZ}."
-                        : $"Real {passLabel} region peek: {profileToDispatch.ColumnsReturned}/{totalRequests} column(s), {profileToDispatch.ChunksReturned} vertical chunk(s); {cleanupToDispatch.Summary}";
+                        : $"Real {passLabel} region peek: {profileToDispatch.ColumnsReturned}/{totalRequests} column(s), {profileToDispatch.ChunksReturned} vertical chunk(s); {profileToDispatch.CleanupSummary}";
                 }, "ingamedevtools-worldgen-peek-region");
             }
 
@@ -2078,6 +2475,7 @@ public sealed partial class DebugWindowManager
         }
         catch (Exception exception)
         {
+            draftScope.Dispose();
             if (autoGenerateChanged)
             {
                 TrySetWorldgenAutoGenerateChunks(worldManager, restoreAutoGenerate, out _);
@@ -3574,7 +3972,7 @@ public sealed partial class DebugWindowManager
         }
 
         _worldgenPreviewPeekDirty = false;
-        _worldgenPreviewAutoPeekStatus = "Auto 3D refresh requested from live engine config.";
+        _worldgenPreviewAutoPeekStatus = "Auto 3D refresh requested from draft-aware real engine preview.";
         RequestWorldgenPeekRegion(forceRefresh: true, reason: "auto");
     }
 
@@ -4101,6 +4499,32 @@ public sealed partial class DebugWindowManager
         string Details)
     {
         public static WorldgenPeekCleanupResult Empty { get; } = new(0, 0, 0, "Cleanup not run.", "");
+    }
+
+    private sealed class WorldgenPeekDraftScope : IDisposable
+    {
+        private readonly Action? _restore;
+        private bool _disposed;
+
+        public WorldgenPeekDraftScope(bool applied, string status, Action? restore)
+        {
+            Applied = applied;
+            Status = status;
+            _restore = restore;
+        }
+
+        public static WorldgenPeekDraftScope Empty { get; } = new(false, "live engine config", null);
+
+        public bool Applied { get; }
+        public string Status { get; }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+
+            _disposed = true;
+            _restore?.Invoke();
+        }
     }
 
     private readonly record struct WorldgenClimateSample(float TemperatureCelsius, float Rain, float Forest, float Fertility, bool HasFertility = false);
