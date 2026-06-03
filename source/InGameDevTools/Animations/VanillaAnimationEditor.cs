@@ -86,6 +86,9 @@ public sealed partial class DebugWindowManager
     private TransformGizmoMode _vanillaViewportGizmoDragMode = TransformGizmoMode.None;
     private NVector2 _vanillaViewportGizmoDragMouseStart;
     private NVector2 _vanillaViewportGizmoDragVector = new(1f, 0f);
+    private NVector3 _vanillaViewportGizmoDragModelDirection = NVector3.UnitX;
+    private float _vanillaViewportGizmoDragScale = 1f;
+    private VanillaGizmoTranslationBasis _vanillaViewportGizmoDragTranslationBasis = VanillaGizmoTranslationBasis.Identity;
     private NVector2 _vanillaViewportGizmoDragCenter;
     private double _vanillaViewportGizmoDragLastAngleRadians;
     private double _vanillaViewportGizmoDragAccumulatedDegrees;
@@ -239,11 +242,13 @@ public sealed partial class DebugWindowManager
             {
                 string code = entry.Animation.Code ?? entry.Animation.Name ?? $"animation-{entry.Index}";
                 string name = entry.Animation.Name ?? "";
-                string label = $"Shape | {document.DisplayPath} | {code}";
-                string search = $"{label} {name} {document.EntityCode} {document.Domain} {document.AssetPath} shape";
+                string label = BuildVanillaAnimationRowLabel(code, name);
+                string fullLabel = $"Shape | {document.DisplayPath} | {code}";
+                string search = $"{label} {fullLabel} {name} {document.EntityCode} {document.Domain} {document.AssetPath} shape";
                 _vanillaBrowserAllRows.Add(new(
                     $"shape:{document.DisplayPath}:{entry.Index}",
                     label,
+                    fullLabel,
                     document,
                     entry,
                     null,
@@ -257,11 +262,16 @@ public sealed partial class DebugWindowManager
                 bool missing = entry.ResolveCurrentShape() == null;
                 string code = entry.Metadata.Code ?? "";
                 string animation = entry.Metadata.Animation ?? "";
-                string label = $"Meta | {document.DisplayPath} | {code} -> {animation}{(missing ? " | unresolved" : "")}";
-                string search = $"{label} {document.EntityCode} {document.Domain} {document.AssetPath} metadata meta {(missing ? "unresolved missing" : "")}";
+                string label = string.IsNullOrWhiteSpace(code)
+                    ? animation
+                    : $"{code} -> {animation}";
+                if (missing) label = $"{label} (unresolved)";
+                string fullLabel = $"Meta | {document.DisplayPath} | {code} -> {animation}{(missing ? " | unresolved" : "")}";
+                string search = $"{label} {fullLabel} {document.EntityCode} {document.Domain} {document.AssetPath} metadata meta {(missing ? "unresolved missing" : "")}";
                 _vanillaBrowserAllRows.Add(new(
                     $"meta:{document.DisplayPath}:{entry.Index}",
                     label,
+                    fullLabel,
                     document,
                     null,
                     entry,
@@ -539,11 +549,13 @@ public sealed partial class DebugWindowManager
     {
         string code = entry.Animation.Code ?? entry.Animation.Name ?? $"animation-{entry.Index}";
         string name = entry.Animation.Name ?? "";
-        string label = $"Shape | {entry.Document.DisplayPath} | {code}";
-        string search = $"{label} {name} {entry.Document.EntityCode} {entry.Document.Domain} {entry.Document.AssetPath} shape";
+        string label = BuildVanillaAnimationRowLabel(code, name);
+        string fullLabel = $"Shape | {entry.Document.DisplayPath} | {code}";
+        string search = $"{label} {fullLabel} {name} {entry.Document.EntityCode} {entry.Document.Domain} {entry.Document.AssetPath} shape";
         return new(
             $"shape:{entry.Document.DisplayPath}:{entry.Index}",
             label,
+            fullLabel,
             entry.Document,
             entry,
             null,
@@ -557,11 +569,16 @@ public sealed partial class DebugWindowManager
         bool missing = entry.ResolveCurrentShape() == null;
         string code = entry.Metadata.Code ?? "";
         string animation = entry.Metadata.Animation ?? "";
-        string label = $"Meta | {entry.Document.DisplayPath} | {code} -> {animation}{(missing ? " | unresolved" : "")}";
-        string search = $"{label} {entry.Document.EntityCode} {entry.Document.Domain} {entry.Document.AssetPath} metadata meta {(missing ? "unresolved missing" : "")}";
+        string label = string.IsNullOrWhiteSpace(code)
+            ? animation
+            : $"{code} -> {animation}";
+        if (missing) label = $"{label} (unresolved)";
+        string fullLabel = $"Meta | {entry.Document.DisplayPath} | {code} -> {animation}{(missing ? " | unresolved" : "")}";
+        string search = $"{label} {fullLabel} {entry.Document.EntityCode} {entry.Document.Domain} {entry.Document.AssetPath} metadata meta {(missing ? "unresolved missing" : "")}";
         return new(
             $"meta:{entry.Document.DisplayPath}:{entry.Index}",
             label,
+            fullLabel,
             entry.Document,
             null,
             entry,
@@ -586,6 +603,13 @@ public sealed partial class DebugWindowManager
         }
 
         return $"{baseCode}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+    }
+
+    private static string BuildVanillaAnimationRowLabel(string code, string name)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return string.IsNullOrWhiteSpace(name) ? "unnamed animation" : name;
+        if (string.IsNullOrWhiteSpace(name) || string.Equals(code, name, StringComparison.OrdinalIgnoreCase)) return code;
+        return $"{code} ({name})";
     }
 
     private static string SanitizeVanillaAnimationCode(string value)
@@ -632,14 +656,14 @@ public sealed partial class DebugWindowManager
             VanillaBrowserRow row = rows[index];
             bool selected = row.Key == _vanillaSelection.RowKey;
             string dirty = row.Document.Dirty ? "* " : "";
-            if (ImGui.Selectable($"{dirty}{ImGuiLayoutHelper.CompactAssetCode(row.Label)}##{row.Key}", selected))
+            if (ImGui.Selectable($"{dirty}{row.Label}##{row.Key}", selected))
             {
                 SelectVanillaRow(row);
             }
 
             if (ImGui.IsItemHovered())
             {
-                ImGui.SetTooltip(row.Label);
+                ImGui.SetTooltip(row.FullLabel);
             }
         }
 
@@ -1588,6 +1612,9 @@ public sealed partial class DebugWindowManager
             _vanillaViewportGizmoDragMode = GizmoMode;
             _vanillaViewportGizmoDragMouseStart = ImGui.GetMousePos();
             _vanillaViewportGizmoDragVector = GetVanillaGizmoDragVector(projection, hoveredAxis, _vanillaViewportGizmoDragMouseStart);
+            _vanillaViewportGizmoDragModelDirection = GetVanillaViewportMoveModelDirection(projection, hoveredAxis);
+            _vanillaViewportGizmoDragScale = Math.Max(1f, projection.Scale);
+            _vanillaViewportGizmoDragTranslationBasis = projection.TranslationBasis;
             _vanillaViewportGizmoDragCenter = projection.Center;
             _vanillaViewportGizmoDragLastAngleRadians = GetVanillaViewportGizmoMouseAngle(projection.Center, _vanillaViewportGizmoDragMouseStart);
             _vanillaViewportGizmoDragAccumulatedDegrees = 0;
@@ -1959,9 +1986,9 @@ public sealed partial class DebugWindowManager
 
     private bool ApplyVanillaViewportMoveGizmoDrag(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, AnimationKeyFrameElement element, TransformGizmoAxis axis, double projected, VanillaGizmoProjection projection)
     {
-        double modelDelta = projected / Math.Max(1f, projection.Scale);
+        double modelDelta = projected / Math.Max(1f, _vanillaViewportGizmoDragScale);
         NVector3 modelDeltaVector = GetVanillaViewportMoveModelDelta(projection, axis, modelDelta);
-        NVector3 offsetDelta = projection.TranslationBasis.ModelToOffsetDelta(modelDeltaVector) * 16f;
+        NVector3 offsetDelta = _vanillaViewportGizmoDragTranslationBasis.ModelToOffsetDelta(modelDeltaVector) * 16f;
         double step = Math.Max(0.001, TransformGizmoIncrement * 16.0);
         double offsetX = SnapVanillaGizmoValue(_vanillaViewportGizmoDragStartOffsetX + offsetDelta.X, step);
         double offsetY = SnapVanillaGizmoValue(_vanillaViewportGizmoDragStartOffsetY + offsetDelta.Y, step);
@@ -1999,6 +2026,15 @@ public sealed partial class DebugWindowManager
 
     private NVector3 GetVanillaViewportMoveModelDelta(VanillaGizmoProjection projection, TransformGizmoAxis axis, double modelDelta)
     {
+        NVector3 direction = _vanillaViewportGizmoDragAxis == axis && _vanillaViewportGizmoDragMode == TransformGizmoMode.Move
+            ? _vanillaViewportGizmoDragModelDirection
+            : GetVanillaViewportMoveModelDirection(projection, axis);
+
+        return direction * (float)modelDelta;
+    }
+
+    private NVector3 GetVanillaViewportMoveModelDirection(VanillaGizmoProjection projection, TransformGizmoAxis axis)
+    {
         NVector3 direction = GizmoSpace == TransformGizmoSpace.World
             ? axis switch
             {
@@ -2015,7 +2051,7 @@ public sealed partial class DebugWindowManager
                 _ => projection.AxisXModel
             };
 
-        return direction * (float)modelDelta;
+        return NormalizeOrDefault(direction, NVector3.UnitX);
     }
 
     private static void SetVanillaGizmoMoveOffsetValues(AnimationKeyFrameElement element, double offsetX, double offsetY, double offsetZ)
@@ -2752,6 +2788,9 @@ public sealed partial class DebugWindowManager
         _vanillaViewportGizmoDragAxis = TransformGizmoAxis.None;
         _vanillaViewportGizmoDragMode = TransformGizmoMode.None;
         _vanillaViewportGizmoDragVector = new NVector2(1f, 0f);
+        _vanillaViewportGizmoDragModelDirection = NVector3.UnitX;
+        _vanillaViewportGizmoDragScale = 1f;
+        _vanillaViewportGizmoDragTranslationBasis = VanillaGizmoTranslationBasis.Identity;
         _vanillaViewportGizmoDragCenter = NVector2.Zero;
         _vanillaViewportGizmoDragLastAngleRadians = 0;
         _vanillaViewportGizmoDragAccumulatedDegrees = 0;
@@ -6146,6 +6185,7 @@ public sealed partial class DebugWindowManager
     private sealed record VanillaBrowserRow(
         string Key,
         string Label,
+        string FullLabel,
         VanillaAnimationDocument Document,
         VanillaShapeAnimationEntry? ShapeAnimation,
         VanillaAnimationMetaEntry? MetadataEntry,
