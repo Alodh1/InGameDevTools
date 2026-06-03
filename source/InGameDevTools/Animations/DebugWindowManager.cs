@@ -23,10 +23,13 @@ public sealed partial class DebugWindowManager : IDisposable
 {
     public static bool PlayAnimationsInThirdPerson { get; set; } = false;
 
-    public DebugWindowManager(ICoreClientAPI api, ParticleEffectsManager particleEffectsManager)
+    public DebugWindowManager(ICoreClientAPI api, ParticleEffectsManager particleEffectsManager, DevToolsConfig config)
     {
         _api = api;
         _particleEffectsManager = particleEffectsManager;
+        _devToolsConfig = config;
+        _devToolsConfig.Normalize();
+        ApplyDevToolsConfigToRuntime();
         _imguiModSystem = api.ModLoader.GetModSystem<ImGuiModSystem>();
         if (_imguiModSystem == null)
         {
@@ -54,6 +57,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
     public void Dispose()
     {
+        FlushDevToolsConfigSave(force: true);
         if (!_drawSubscribed || _imguiModSystem == null) return;
 
         _imguiModSystem.Draw -= DrawEditor;
@@ -617,7 +621,8 @@ public sealed partial class DebugWindowManager : IDisposable
         BlockItemJson,
         LootDrops,
         Worldgen,
-        Patches
+        Patches,
+        Settings
     }
 
     private static readonly bool BlockItemJsonEditorVisible = false;
@@ -753,11 +758,13 @@ public sealed partial class DebugWindowManager : IDisposable
             displaySize = new NVector2(_api.Render.FrameWidth, _api.Render.FrameHeight);
         }
 
+        using DevToolsStyleScope styleScope = BeginDevToolsStyleScope();
         ImGuiWindowFlags windowFlags = ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings;
         if (_devToolsCollapsed)
         {
             DrawCollapsedDevToolsWindow(displaySize, windowFlags);
             _detachedEditorCamera?.Update(deltaSeconds, editorOpen: false);
+            FlushDevToolsConfigSave(force: false);
             return _showAnimationEditor ? CallbackGUIStatus.DontGrabMouse : CallbackGUIStatus.Closed;
         }
 
@@ -848,6 +855,13 @@ public sealed partial class DebugWindowManager : IDisposable
                     PatchCreatorTab(deltaSeconds, _showEditorDiagnostics);
                     ImGui.EndTabItem();
                 }
+                bool settingsTabOpen = true;
+                if (ImGui.BeginTabItem("Settings##tab", ref settingsTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.Settings;
+                    SettingsTab(deltaSeconds);
+                    ImGui.EndTabItem();
+                }
                 ImGui.EndTabBar();
             }
             ImGui.SetWindowFontScale(1f);
@@ -858,6 +872,7 @@ public sealed partial class DebugWindowManager : IDisposable
         DrawVanillaPoppedOutViewport();
 
         _detachedEditorCamera?.Update(deltaSeconds, _showAnimationEditor);
+        FlushDevToolsConfigSave(force: false);
 
         return _showAnimationEditor ? CallbackGUIStatus.GrabMouse : CallbackGUIStatus.Closed;
     }
@@ -871,8 +886,12 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGui.SameLine();
 
         ImGui.SetNextItemWidth(120f);
-        ImGui.SliderFloat("UI scale##devtools-global-scale", ref _devToolsUiScale, 0.75f, 1.75f, "%.2f");
-        _devToolsUiScale = Math.Clamp(_devToolsUiScale, 0.75f, 1.75f);
+        if (ImGui.SliderFloat("UI scale##devtools-global-scale", ref _devToolsUiScale, 0.75f, 1.75f, "%.2f"))
+        {
+            _devToolsUiScale = Math.Clamp(_devToolsUiScale, 0.75f, 1.75f);
+            _devToolsConfig.UiScale = _devToolsUiScale;
+            QueueDevToolsConfigSave("UI scale updated.");
+        }
 
         ImGui.SameLine();
         if (ImGui.Button("Reset layout##devtools-reset-layout"))
@@ -892,6 +911,8 @@ public sealed partial class DebugWindowManager : IDisposable
         {
             bool enabled = autoApply && !_liveApplyManager.AutoApply;
             _liveApplyManager.AutoApply = autoApply;
+            _devToolsConfig.AutoRuntimeApply = autoApply;
+            QueueDevToolsConfigSave("Runtime apply setting updated.");
             if (enabled)
             {
                 ApplyDirtyLiveChangesForActiveTab(force: true);
@@ -902,7 +923,11 @@ public sealed partial class DebugWindowManager : IDisposable
             ImGui.SetTooltip("Automatically applies editor changes to loaded runtime objects for this session.");
         }
         ImGui.SameLine();
-        ImGui.Checkbox("Live backups##devtools-live-backups", ref _liveApplyManager.WriteBackups);
+        if (ImGui.Checkbox("Live backups##devtools-live-backups", ref _liveApplyManager.WriteBackups))
+        {
+            _devToolsConfig.WriteLiveBackups = _liveApplyManager.WriteBackups;
+            QueueDevToolsConfigSave("Live backup setting updated.");
+        }
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Write original runtime state copies before the first live patch.");
@@ -914,7 +939,11 @@ public sealed partial class DebugWindowManager : IDisposable
             ClearLiveApplyState();
         }
         ImGui.SameLine();
-        ImGui.Checkbox("Diagnostics##devtools-diagnostics", ref _showEditorDiagnostics);
+        if (ImGui.Checkbox("Diagnostics##devtools-diagnostics", ref _showEditorDiagnostics))
+        {
+            _devToolsConfig.ShowDiagnostics = _showEditorDiagnostics;
+            QueueDevToolsConfigSave("Diagnostics setting updated.");
+        }
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Show detailed editor diagnostic messages for caught exceptions and skipped previews.");
@@ -986,6 +1015,9 @@ public sealed partial class DebugWindowManager : IDisposable
             case DevToolsTab.Patches:
                 ApplyPatchCreatorRuntime(force);
                 break;
+            case DevToolsTab.Settings:
+                _liveApplyManager.LastStatus = "Settings apply directly to the editor UI.";
+                break;
         }
     }
 
@@ -1004,6 +1036,8 @@ public sealed partial class DebugWindowManager : IDisposable
     private void ResetDevToolsLayout()
     {
         _devToolsUiScale = 1f;
+        _devToolsConfig.UiScale = _devToolsUiScale;
+        QueueDevToolsConfigSave("Layout reset.");
         ResetVanillaLayout();
         _recipeEditor.ResetLayout();
         _particleEffectsManager.ResetLayout();

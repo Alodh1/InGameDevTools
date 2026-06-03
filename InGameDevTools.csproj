@@ -15,6 +15,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Resources\assets\ingamedevtools\fonts\OpenDyslexic-Regular.otf" LogicalName="InGameDevTools.Fonts.OpenDyslexic-Regular.otf" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Dependencies Include="game" Version="*" />
     <Dependencies Include="vsimgui" Version="0.0.6" />
   </ItemGroup>

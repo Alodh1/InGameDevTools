@@ -5,10 +5,13 @@ using InGameDevTools.Utils;
 using HarmonyLib;
 using Newtonsoft.Json.Linq;
 using Vintagestory.API.Client;
+using Vintagestory.API.Config;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Datastructures;
 using VSImGui;
+using VSImGui.API;
+using System.Reflection;
 
 namespace InGameDevTools;
 
@@ -24,12 +27,14 @@ public sealed class InGameDevToolsModSystem : ModSystem
     private AnimationsManager? _animationsManager;
     private DebugWindowManager? _debugWindowManager;
     private long _ensureBehaviorsListener = -1;
+    private static bool _fontRegistrationAttempted;
 
     public override bool ShouldLoad(EnumAppSide forSide) => forSide == EnumAppSide.Client;
 
     public override void StartPre(ICoreAPI api)
     {
         ExtendedElementPose.NameHashCache = new(api, "in-game devtools element pose name hash cache", 500000, 11 * 60 * 1000, threadSafe: true);
+        RegisterBundledFonts(api);
     }
 
     public override void Start(ICoreAPI api)
@@ -46,12 +51,22 @@ public sealed class InGameDevToolsModSystem : ModSystem
     {
         _api = api;
 
-        DevToolsConfig config = api.LoadModConfig<DevToolsConfig>(DevToolsConfig.FileName) ?? new DevToolsConfig();
+        DevToolsConfig config;
+        try
+        {
+            config = api.LoadModConfig<DevToolsConfig>(DevToolsConfig.FileName) ?? new DevToolsConfig();
+        }
+        catch (Exception exception)
+        {
+            LoggerUtil.Warn(api, this, $"Could not load {DevToolsConfig.FileName}; using defaults: {exception.Message}");
+            config = new DevToolsConfig();
+        }
+        config.Normalize();
         api.StoreModConfig(config, DevToolsConfig.FileName);
 
         _particleEffectsManager = new ParticleEffectsManager(api);
         _animationsManager = new AnimationsManager(api, _particleEffectsManager);
-        _debugWindowManager = new DebugWindowManager(api, _particleEffectsManager);
+        _debugWindowManager = new DebugWindowManager(api, _particleEffectsManager, config);
 
         api.Input.RegisterHotKey("ingamedevtools_toggle", "Show In-game devtools", GlKeys.L, ctrlPressed: true, shiftPressed: true);
         api.Input.SetHotKeyHandler("ingamedevtools_toggle", _ =>
@@ -153,13 +168,122 @@ public sealed class InGameDevToolsModSystem : ModSystem
             LoggerUtil.Verbose(api, typeof(InGameDevToolsModSystem), $"Could not register {target}: {exception}");
         }
     }
+
+    private static void RegisterBundledFonts(ICoreAPI api)
+    {
+        if (_fontRegistrationAttempted) return;
+        _fontRegistrationAttempted = true;
+
+        try
+        {
+            string? fontPath = ExtractEmbeddedFont(api, "InGameDevTools.Fonts.OpenDyslexic-Regular.otf", "OpenDyslexic-Regular.otf");
+            if (string.IsNullOrWhiteSpace(fontPath)) return;
+
+            FontManager.BeforeFontsLoaded += (fonts, sizes) =>
+            {
+                fonts.Add(fontPath);
+                for (int size = 12; size <= 28; size++)
+                {
+                    sizes.Add(size);
+                }
+            };
+        }
+        catch (Exception exception)
+        {
+            LoggerUtil.Warn(api, typeof(InGameDevToolsModSystem), $"Could not register bundled OpenDyslexic font: {exception}");
+        }
+    }
+
+    private static string? ExtractEmbeddedFont(ICoreAPI api, string resourceName, string fileName)
+    {
+        Assembly assembly = typeof(InGameDevToolsModSystem).Assembly;
+        using Stream? resource = assembly.GetManifestResourceStream(resourceName);
+        if (resource == null)
+        {
+            LoggerUtil.Warn(api, typeof(InGameDevToolsModSystem), $"Bundled font resource not found: {resourceName}");
+            return null;
+        }
+
+        string directory = Path.Combine(GamePaths.Cache, "ingamedevtools", "fonts");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, fileName);
+        if (File.Exists(path) && new FileInfo(path).Length == resource.Length)
+        {
+            return path;
+        }
+
+        using FileStream output = File.Create(path);
+        resource.CopyTo(output);
+        return path;
+    }
 }
 
 public sealed class DevToolsConfig
 {
     public const string FileName = "ingamedevtools.json";
+    public const string PresetVintageBrown = "Vintage Brown";
+    public const string FontDefault = "Default";
 
     public bool OpenOnStartup { get; set; }
+    public float UiScale { get; set; } = 1f;
+    public bool ShowDiagnostics { get; set; }
+    public bool AutoRuntimeApply { get; set; }
+    public bool WriteLiveBackups { get; set; }
+    public string ThemePreset { get; set; } = PresetVintageBrown;
+    public bool ApplyStyleGlobally { get; set; }
+    public string FontName { get; set; } = FontDefault;
+    public int FontSize { get; set; } = 16;
+    public Dictionary<string, float[]> AdvancedColorOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public float FramePaddingX { get; set; } = -1f;
+    public float FramePaddingY { get; set; } = -1f;
+    public float ItemSpacingX { get; set; } = -1f;
+    public float ItemSpacingY { get; set; } = -1f;
+    public float FrameRounding { get; set; } = -1f;
+    public float WindowRounding { get; set; } = -1f;
+    public float HoverDelayNormal { get; set; } = -1f;
+    public float HoverDelayShort { get; set; } = -1f;
+
+    public void Normalize()
+    {
+        UiScale = ClampOrDefault(UiScale, 0.75f, 1.75f, 1f);
+        FontSize = Math.Clamp(FontSize <= 0 ? 16 : FontSize, 12, 28);
+        ThemePreset = string.IsNullOrWhiteSpace(ThemePreset) ? PresetVintageBrown : ThemePreset.Trim();
+        FontName = string.IsNullOrWhiteSpace(FontName) ? FontDefault : FontName.Trim();
+        AdvancedColorOverrides ??= new(StringComparer.OrdinalIgnoreCase);
+        AdvancedColorOverrides = AdvancedColorOverrides
+            .Where(pair => pair.Value is { Length: >= 4 })
+            .ToDictionary(
+                pair => pair.Key,
+                pair => new[]
+                {
+                    ClampOrDefault(pair.Value[0], 0f, 1f, 1f),
+                    ClampOrDefault(pair.Value[1], 0f, 1f, 1f),
+                    ClampOrDefault(pair.Value[2], 0f, 1f, 1f),
+                    ClampOrDefault(pair.Value[3], 0f, 1f, 1f)
+                },
+                StringComparer.OrdinalIgnoreCase);
+
+        FramePaddingX = NormalizeOptional(FramePaddingX, 0f, 32f);
+        FramePaddingY = NormalizeOptional(FramePaddingY, 0f, 32f);
+        ItemSpacingX = NormalizeOptional(ItemSpacingX, 0f, 48f);
+        ItemSpacingY = NormalizeOptional(ItemSpacingY, 0f, 48f);
+        FrameRounding = NormalizeOptional(FrameRounding, 0f, 16f);
+        WindowRounding = NormalizeOptional(WindowRounding, 0f, 16f);
+        HoverDelayNormal = NormalizeOptional(HoverDelayNormal, 0f, 3f);
+        HoverDelayShort = NormalizeOptional(HoverDelayShort, 0f, 3f);
+    }
+
+    private static float NormalizeOptional(float value, float min, float max)
+    {
+        if (float.IsNaN(value) || float.IsInfinity(value) || value < 0f) return -1f;
+        return Math.Clamp(value, min, max);
+    }
+
+    private static float ClampOrDefault(float value, float min, float max, float fallback)
+    {
+        if (float.IsNaN(value) || float.IsInfinity(value)) return fallback;
+        return Math.Clamp(value, min, max);
+    }
 }
 
 internal static class StandaloneDevtoolsRuntime
