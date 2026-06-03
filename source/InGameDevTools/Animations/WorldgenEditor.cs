@@ -1883,40 +1883,426 @@ public sealed partial class DebugWindowManager
         }
 
         WorldgenAssetEntry? entry = SelectedWorldgenEntry;
-        if (entry?.Kind != WorldgenAssetKind.Landforms)
-        {
-            status = "live engine config; draft 3D mutation is currently available for landform rows";
-            return WorldgenPeekDraftScope.Empty;
-        }
-
-        if (!TryGetSelectedWorldgenLandformRow(out JObject? row) || row == null)
-        {
-            status = "live engine config; no selected landform draft row";
-            return WorldgenPeekDraftScope.Empty;
-        }
-
         try
         {
-            GenTerra? genTerra = serverApi.ModLoader.GetModSystem<GenTerra>();
-            if (genTerra == null)
+            if (entry?.Kind == WorldgenAssetKind.Landforms)
             {
-                status = "live engine config; GenTerra unavailable";
+                if (!TryGetSelectedWorldgenLandformRow(out JObject? landformRow) || landformRow == null)
+                {
+                    status = "live engine config; no selected landform draft row";
+                    return WorldgenPeekDraftScope.Empty;
+                }
+
+                GenTerra? genTerra = serverApi.ModLoader.GetModSystem<GenTerra>();
+                if (genTerra == null)
+                {
+                    status = "live engine config; GenTerra unavailable";
+                    return WorldgenPeekDraftScope.Empty;
+                }
+
+                if (TryCreateWorldgenLandformDraftScope(genTerra, landformRow, _worldgenRowIndex, out WorldgenPeekDraftScope scope, out status))
+                {
+                    return scope;
+                }
+
                 return WorldgenPeekDraftScope.Empty;
             }
 
-            if (TryCreateWorldgenLandformDraftScope(genTerra, row, _worldgenRowIndex, out WorldgenPeekDraftScope scope, out status))
+            if (entry?.Kind == WorldgenAssetKind.Deposits)
             {
-                return scope;
+                if (!TryGetSelectedWorldgenDepositRow(out JObject? depositRow) || depositRow == null)
+                {
+                    status = "live engine config; no selected deposit draft row";
+                    return WorldgenPeekDraftScope.Empty;
+                }
+
+                GenDeposits? genDeposits = serverApi.ModLoader.GetModSystem<GenDeposits>();
+                if (genDeposits == null)
+                {
+                    status = "live engine config; GenDeposits unavailable";
+                    return WorldgenPeekDraftScope.Empty;
+                }
+
+                if (TryCreateWorldgenDepositDraftScope(genDeposits, depositRow, out WorldgenPeekDraftScope scope, out status))
+                {
+                    return scope;
+                }
+
+                return WorldgenPeekDraftScope.Empty;
             }
 
+            if (entry?.Kind == WorldgenAssetKind.BlockPatches)
+            {
+                if (!TryGetSelectedWorldgenBlockPatchRow(out JObject? blockPatchRow) || blockPatchRow == null)
+                {
+                    status = "live engine config; no selected block-patch draft row";
+                    return WorldgenPeekDraftScope.Empty;
+                }
+
+                GenVegetationAndPatches? genVegetation = serverApi.ModLoader.GetModSystem<GenVegetationAndPatches>();
+                if (genVegetation == null)
+                {
+                    status = "live engine config; GenVegetationAndPatches unavailable";
+                    return WorldgenPeekDraftScope.Empty;
+                }
+
+                if (TryCreateWorldgenBlockPatchDraftScope(serverApi, genVegetation, blockPatchRow, _worldgenRowIndex, out WorldgenPeekDraftScope scope, out status))
+                {
+                    return scope;
+                }
+
+                return WorldgenPeekDraftScope.Empty;
+            }
+
+            status = "live engine config; draft 3D mutation is currently available for landform, deposit, and block-patch rows";
             return WorldgenPeekDraftScope.Empty;
         }
         catch (Exception exception)
         {
-            _worldgenDiagnostics.Exception("Worldgen draft 3D landform scope failed", exception);
-            status = $"live engine config; landform draft scope failed: {exception.Message}";
+            _worldgenDiagnostics.Exception("Worldgen draft 3D scope failed", exception);
+            status = $"live engine config; draft scope failed: {exception.Message}";
             return WorldgenPeekDraftScope.Empty;
         }
+    }
+
+    private bool TryCreateWorldgenDepositDraftScope(GenDeposits genDeposits, JObject draftRow, out WorldgenPeekDraftScope scope, out string status)
+    {
+        scope = WorldgenPeekDraftScope.Empty;
+        status = "";
+
+        DepositVariant[]? originalDeposits = genDeposits.Deposits;
+        if (originalDeposits == null || originalDeposits.Length == 0)
+        {
+            status = "live engine config; GenDeposits has no deposit variants";
+            return false;
+        }
+
+        if (!TryBuildWorldgenPreviewDraftDepositVariant(genDeposits, out DepositVariant? draftVariant, out string? draftCode, out string draftStatus) || draftVariant == null)
+        {
+            status = $"live engine config; deposit draft unavailable: {draftStatus}";
+            return false;
+        }
+
+        if (!TryCloneWorldgenDepositVariants(originalDeposits, out DepositVariant[] draftDeposits))
+        {
+            status = "live engine config; could not clone GenDeposits variants safely";
+            return false;
+        }
+
+        string? selectedCode = draftCode ?? draftRow["code"]?.ToString();
+        if (!ReplaceWorldgenDepositByCode(draftDeposits, draftVariant, selectedCode))
+        {
+            status = string.IsNullOrWhiteSpace(selectedCode)
+                ? "live engine config; selected deposit draft has no code to match in GenDeposits"
+                : $"live engine config; deposit draft '{selectedCode}' was not found in GenDeposits";
+            return false;
+        }
+
+        object? originalSubDeposits = TryGetReflectedMember(genDeposits, "subDepositsToPlace");
+        object? previewSubDeposits = TryCreateEmptyCollectionLike(originalSubDeposits);
+
+        genDeposits.Deposits = draftDeposits;
+        bool subDepositsChanged = previewSubDeposits != null && TrySetReflectedMember(genDeposits, "subDepositsToPlace", previewSubDeposits, out _);
+
+        string code = selectedCode ?? GetWorldgenPreviewDepositCode(draftVariant) ?? "unnamed";
+        scope = new WorldgenPeekDraftScope(
+            applied: true,
+            status: $"deposit draft applied to real 3D peek: {code}",
+            restore: () =>
+            {
+                genDeposits.Deposits = originalDeposits;
+                if (subDepositsChanged)
+                {
+                    TrySetReflectedMember(genDeposits, "subDepositsToPlace", originalSubDeposits, out _);
+                }
+            });
+        status = scope.Status;
+        return true;
+    }
+
+    private static bool TryCloneWorldgenDepositVariants(DepositVariant[] source, out DepositVariant[] clones)
+    {
+        clones = new DepositVariant[source.Length];
+        for (int index = 0; index < source.Length; index++)
+        {
+            try
+            {
+                clones[index] = source[index].Clone();
+            }
+            catch
+            {
+                clones = [];
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool ReplaceWorldgenDepositByCode(DepositVariant[] deposits, DepositVariant replacement, string? selectedCode)
+    {
+        if (string.IsNullOrWhiteSpace(selectedCode)) return false;
+
+        for (int index = 0; index < deposits.Length; index++)
+        {
+            DepositVariant deposit = deposits[index];
+            if (string.Equals(GetWorldgenPreviewDepositCode(deposit), selectedCode, StringComparison.OrdinalIgnoreCase))
+            {
+                deposits[index] = replacement;
+                return true;
+            }
+
+            if (deposit.ChildDeposits != null && ReplaceWorldgenDepositByCode(deposit.ChildDeposits, replacement, selectedCode))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static object? TryCreateEmptyCollectionLike(object? collection)
+    {
+        if (collection == null) return null;
+
+        try
+        {
+            return Activator.CreateInstance(collection.GetType());
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool TryCreateWorldgenBlockPatchDraftScope(
+        ICoreServerAPI serverApi,
+        GenVegetationAndPatches genVegetation,
+        JObject draftRow,
+        int selectedRowIndex,
+        out WorldgenPeekDraftScope scope,
+        out string status)
+    {
+        scope = WorldgenPeekDraftScope.Empty;
+        status = "";
+
+        BlockPatchConfig? originalConfig = genVegetation.bpc;
+        if (originalConfig?.Patches == null || originalConfig.Patches.Length == 0)
+        {
+            status = "live engine config; GenVegetationAndPatches has no block patches";
+            return false;
+        }
+
+        int replaceIndex = FindWorldgenBlockPatchIndex(originalConfig.Patches, draftRow, selectedRowIndex);
+        if (replaceIndex < 0 || replaceIndex >= originalConfig.Patches.Length)
+        {
+            status = "live engine config; selected block-patch draft was not found in GenVegetationAndPatches";
+            return false;
+        }
+
+        int originalPatchesHashCode = BlockPatch.PatchesHashCode;
+        BlockPatch originalPatch = originalConfig.Patches[replaceIndex];
+        BlockPatch draftPatch = CloneWorldgenBlockPatch(originalPatch);
+        ApplyWorldgenBlockPatchDraftRow(draftPatch, draftRow);
+        TryInitializeWorldgenBlockPatch(serverApi, genVegetation, draftPatch, replaceIndex);
+
+        BlockPatchConfig draftConfig = CloneWorldgenBlockPatchConfig(originalConfig);
+        draftConfig.Patches[replaceIndex] = draftPatch;
+        ReplaceWorldgenBlockPatchBySignature(draftConfig.PatchesNonTree, originalPatch, draftPatch);
+
+        object? originalMapGens = genVegetation.blockPatchMapGens;
+        object? previewMapGens = TryCreateEmptyCollectionLike(originalMapGens);
+
+        genVegetation.bpc = draftConfig;
+        bool mapGensChanged = previewMapGens != null && TrySetReflectedMember(genVegetation, "blockPatchMapGens", previewMapGens, out _);
+
+        string label = GetWorldgenBlockPatchLabel(draftPatch, draftRow, selectedRowIndex);
+        scope = new WorldgenPeekDraftScope(
+            applied: true,
+            status: $"block-patch draft applied to real 3D peek: {label}",
+            restore: () =>
+            {
+                genVegetation.bpc = originalConfig;
+                BlockPatch.PatchesHashCode = originalPatchesHashCode;
+                if (mapGensChanged)
+                {
+                    TrySetReflectedMember(genVegetation, "blockPatchMapGens", originalMapGens, out _);
+                }
+            });
+        status = scope.Status;
+        return true;
+    }
+
+    private static BlockPatchConfig CloneWorldgenBlockPatchConfig(BlockPatchConfig source)
+    {
+        return new BlockPatchConfig
+        {
+            ChanceMultiplier = source.ChanceMultiplier?.Clone(),
+            Patches = source.Patches?.Select(CloneWorldgenBlockPatch).ToArray() ?? [],
+            PatchesNonTree = source.PatchesNonTree?.Select(CloneWorldgenBlockPatch).ToArray() ?? []
+        };
+    }
+
+    private static BlockPatch CloneWorldgenBlockPatch(BlockPatch source)
+    {
+        return new BlockPatch
+        {
+            Attributes = source.Attributes,
+            Biome = source.Biome,
+            Biomes = source.Biomes?.ToArray(),
+            BlockCodeIndex = source.BlockCodeIndex?.Clone(),
+            blockCodes = source.blockCodes?.ToArray(),
+            Blocks = source.Blocks?.ToArray(),
+            BlocksByRockType = source.BlocksByRockType?.ToDictionary(pair => pair.Key, pair => pair.Value?.ToArray() ?? []),
+            CategoryHashCode = source.CategoryHashCode,
+            Chance = source.Chance,
+            MapCode = source.MapCode,
+            MaxFertility = source.MaxFertility,
+            MaxForest = source.MaxForest,
+            MaxHeightDifferential = source.MaxHeightDifferential,
+            MaxRain = source.MaxRain,
+            MaxShrub = source.MaxShrub,
+            MaxTemp = source.MaxTemp,
+            MaxWaterDepth = source.MaxWaterDepth,
+            MaxWaterDepthP = source.MaxWaterDepthP,
+            MaxY = source.MaxY,
+            MinFertility = source.MinFertility,
+            MinForest = source.MinForest,
+            MinRain = source.MinRain,
+            MinShrub = source.MinShrub,
+            MinTemp = source.MinTemp,
+            MinWaterDepth = source.MinWaterDepth,
+            MinWaterDepthP = source.MinWaterDepthP,
+            MinY = source.MinY,
+            OffsetX = source.OffsetX?.Clone(),
+            OffsetZ = source.OffsetZ?.Clone(),
+            Placement = source.Placement,
+            PostPass = source.PostPass,
+            PrePass = source.PrePass,
+            Quantity = source.Quantity?.Clone(),
+            RandomMapCodePool = source.RandomMapCodePool?.ToArray(),
+            TreeType = source.TreeType
+        };
+    }
+
+    private static int FindWorldgenBlockPatchIndex(BlockPatch[] patches, JObject draftRow, int selectedRowIndex)
+    {
+        string? firstDraftCode = FirstArrayString(draftRow["blockCodes"] as JArray);
+        if (!string.IsNullOrWhiteSpace(firstDraftCode))
+        {
+            for (int index = 0; index < patches.Length; index++)
+            {
+                string? firstPatchCode = patches[index].blockCodes?.FirstOrDefault()?.ToString();
+                if (string.Equals(firstPatchCode, firstDraftCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    return index;
+                }
+            }
+        }
+
+        return selectedRowIndex >= 0 && selectedRowIndex < patches.Length ? selectedRowIndex : -1;
+    }
+
+    private static void ReplaceWorldgenBlockPatchBySignature(BlockPatch[]? patches, BlockPatch originalPatch, BlockPatch draftPatch)
+    {
+        if (patches == null || patches.Length == 0) return;
+
+        string? originalCode = originalPatch.blockCodes?.FirstOrDefault()?.ToString();
+        for (int index = 0; index < patches.Length; index++)
+        {
+            string? patchCode = patches[index].blockCodes?.FirstOrDefault()?.ToString();
+            if (!string.IsNullOrWhiteSpace(originalCode) && string.Equals(patchCode, originalCode, StringComparison.OrdinalIgnoreCase))
+            {
+                patches[index] = draftPatch;
+                return;
+            }
+        }
+    }
+
+    private static void ApplyWorldgenBlockPatchDraftRow(BlockPatch patch, JObject row)
+    {
+        if (row["blockCodes"] is JArray blockCodes)
+        {
+            patch.blockCodes = blockCodes
+                .Select(token => token.ToString())
+                .Where(code => !string.IsNullOrWhiteSpace(code))
+                .Select(code => new AssetLocation(code))
+                .ToArray();
+        }
+
+        patch.Chance = ReadWorldgenFloat(row, "chance", patch.Chance);
+        patch.Quantity = ReadWorldgenNatFloat(row, "quantity", patch.Quantity);
+        patch.OffsetX = ReadWorldgenNatFloat(row, "offsetX", patch.OffsetX);
+        patch.OffsetZ = ReadWorldgenNatFloat(row, "offsetZ", patch.OffsetZ);
+        patch.MinTemp = ReadWorldgenInt(row, "minTemp", patch.MinTemp);
+        patch.MaxTemp = ReadWorldgenInt(row, "maxTemp", patch.MaxTemp);
+        patch.MinRain = ReadWorldgenFloat(row, "minRain", patch.MinRain);
+        patch.MaxRain = ReadWorldgenFloat(row, "maxRain", patch.MaxRain);
+        patch.MinForest = ReadWorldgenFloat(row, "minForest", patch.MinForest);
+        patch.MaxForest = ReadWorldgenFloat(row, "maxForest", patch.MaxForest);
+        patch.MinFertility = ReadWorldgenFloat(row, "minFertility", patch.MinFertility);
+        patch.MaxFertility = ReadWorldgenFloat(row, "maxFertility", patch.MaxFertility);
+        patch.MinY = ReadWorldgenFloat(row, "minY", patch.MinY);
+        patch.MaxY = ReadWorldgenFloat(row, "maxY", patch.MaxY);
+    }
+
+    private static NatFloat? ReadWorldgenNatFloat(JObject row, string name, NatFloat? fallback)
+    {
+        if (!row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) || token.Type == JTokenType.Null)
+        {
+            return fallback?.Clone();
+        }
+
+        try
+        {
+            return token.ToObject<NatFloat>() ?? fallback?.Clone();
+        }
+        catch
+        {
+            return fallback?.Clone();
+        }
+    }
+
+    private static void TryInitializeWorldgenBlockPatch(ICoreServerAPI serverApi, GenVegetationAndPatches genVegetation, BlockPatch patch, int patchIndex)
+    {
+        RockStrataConfig? rockStrata = null;
+        try
+        {
+            GenRockStrataNew? genRockStrata = serverApi.ModLoader.GetModSystem<GenRockStrataNew>();
+            rockStrata = TryGetReflectedMember(genRockStrata, "strata") as RockStrataConfig;
+        }
+        catch
+        {
+            // Direct block-code resolution below still covers non-rock-type patches.
+        }
+
+        try
+        {
+            LCGRandom? rnd = TryGetReflectedMember(genVegetation, "rnd") as LCGRandom;
+            if (rockStrata != null && rnd != null)
+            {
+                patch.Init(serverApi, rockStrata, rnd, patchIndex);
+                return;
+            }
+        }
+        catch
+        {
+            // Fall back to direct resolution.
+        }
+
+        if (patch.blockCodes == null || patch.blockCodes.Length == 0) return;
+
+        patch.Blocks = patch.blockCodes
+            .Select(code => serverApi.World.GetBlock(code))
+            .Where(block => block != null)
+            .ToArray();
+    }
+
+    private static string GetWorldgenBlockPatchLabel(BlockPatch patch, JObject row, int selectedRowIndex)
+    {
+        return patch.blockCodes?.FirstOrDefault()?.ToString()
+            ?? FirstArrayString(row["blockCodes"] as JArray)
+            ?? $"row {selectedRowIndex}";
     }
 
     private bool TryCreateWorldgenLandformDraftScope(GenTerra genTerra, JObject draftRow, int selectedRowIndex, out WorldgenPeekDraftScope scope, out string status)
