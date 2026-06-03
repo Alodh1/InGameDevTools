@@ -1058,7 +1058,7 @@ public sealed partial class DebugWindowManager
         {
             string generator = TryGetWorldgenPreviewDepositGenerator(variant!) ?? "unknown generator";
             ImGui.TextDisabled($"Using {source}: {code ?? "unnamed"} ({generator}).");
-            ImGui.TextDisabled("Ore map preview generates the selected deposit's region ore map in memory; exact propick still needs a generated block column.");
+            ImGui.TextDisabled("Ore map preview generates the selected deposit's region ore map in memory; exact propick appears when a real 3D peek covers the cursor.");
         }
         else
         {
@@ -1684,15 +1684,58 @@ public sealed partial class DebugWindowManager
             int chunkX = FloorDiv(blockX, chunkSize);
             int chunkZ = FloorDiv(blockZ, chunkSize);
             Dictionary<WorldgenOreMapRegionCacheKey, IntDataMap2D> oreMapCache = [];
-            float factor = TrySampleWorldgenPreviewOreMapFactor(variant!, chunkX, chunkZ, oreMapCache, out float sampledFactor, out string samplerStatus)
-                ? sampledFactor
+            bool sampledOreMap = TrySampleWorldgenPreviewOreMapValue(variant!, chunkX, chunkZ, oreMapCache, out int oreMapValue, out string samplerStatus);
+            float factor = sampledOreMap
+                ? (oreMapValue & 0xff) / 255f
                 : variant!.GetOreMapFactor(chunkX, chunkZ);
-            return $"Ore: {code ?? "unnamed"} factor {factor.ToString("0.###", CultureInfo.InvariantCulture)} at chunk {chunkX}, {chunkZ} ({source}); {samplerStatus}. Exact propick needs a generated block column.";
+            string exactStatus = sampledOreMap && TryGetWorldgenExactPropickHoverText(variant!, code, blockX, blockZ, oreMapValue, out string exactText)
+                ? exactText
+                : "Exact propick unavailable; run a real 3D peek covering this cursor.";
+            return $"Ore: {code ?? "unnamed"} factor {factor.ToString("0.###", CultureInfo.InvariantCulture)} at chunk {chunkX}, {chunkZ} ({source}); {samplerStatus}. {exactStatus}";
         }
         catch (Exception exception)
         {
             _worldgenDiagnostics.Exception("Worldgen ore hover sample failed", exception);
             return $"Ore sample failed: {exception.Message}";
+        }
+    }
+
+    private bool TryGetWorldgenExactPropickHoverText(DepositVariant variant, string? code, int blockX, int blockZ, int oreMapValue, out string text)
+    {
+        text = "";
+        if (_worldgenPreviewPeekProfile is not { } profile)
+        {
+            return false;
+        }
+
+        if (!TryGetWorldgenPeekLocalColumn(profile, blockX, blockZ, out int localX, out int localZ))
+        {
+            return false;
+        }
+
+        int height = GetWorldgenPeekHeight(profile, localX, localZ);
+        if (height <= 0)
+        {
+            text = "Exact propick: peeked column has no solid terrain.";
+            return true;
+        }
+
+        if (!TryGetWorldgenPeekBlockColumn(profile, localX, localZ, height, out int[] blockColumn))
+        {
+            return false;
+        }
+
+        try
+        {
+            variant.GetPropickReading(new BlockPos(blockX, height, blockZ), oreMapValue, blockColumn, out double ppt, out double totalFactor);
+            text = $"Exact propick from latest {profile.PassLabel} peek: {code ?? "unnamed"} {ppt:0.###} ppt, total {totalFactor:0.###}, column height {blockColumn.Length}, ore map value {oreMapValue & 0xff}.";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _worldgenDiagnostics.Exception("Worldgen exact propick hover failed", exception);
+            text = $"Exact propick failed against latest peek: {exception.Message}";
+            return true;
         }
     }
 
@@ -3459,6 +3502,8 @@ public sealed partial class DebugWindowManager
         int[] heights = new int[width * depth];
         int[] topBlockIds = new int[width * depth];
         Array.Fill(heights, -1);
+        int mapHeight = Math.Max(0, columns.Values.Where(chunks => chunks != null).Select(chunks => chunks.Length).DefaultIfEmpty(0).Max() * chunkSize);
+        int[] columnBlockIds = mapHeight > 0 ? new int[width * depth * mapHeight] : [];
         int minHeight = int.MaxValue;
         int maxHeight = int.MinValue;
         long totalHeight = 0;
@@ -3483,6 +3528,7 @@ public sealed partial class DebugWindowManager
                         int index = globalZ * width + globalX;
                         heights[index] = height;
                         topBlockIds[index] = topBlockId;
+                        CopyWorldgenPeekColumnBlockIds(chunks, x, z, chunkSize, mapHeight, columnBlockIds, index);
                         if (height < 0) continue;
 
                         minHeight = Math.Min(minHeight, height);
@@ -3516,8 +3562,36 @@ public sealed partial class DebugWindowManager
             chunkSize,
             width,
             depth,
+            mapHeight,
             heights,
-            topBlockIds);
+            topBlockIds,
+            columnBlockIds);
+    }
+
+    private static void CopyWorldgenPeekColumnBlockIds(
+        IServerChunk[] chunks,
+        int localX,
+        int localZ,
+        int chunkSize,
+        int mapHeight,
+        int[] columnBlockIds,
+        int columnIndex)
+    {
+        if (mapHeight <= 0 || columnBlockIds.Length == 0) return;
+
+        int baseIndex = columnIndex * mapHeight;
+        for (int y = 0; y < mapHeight; y++)
+        {
+            int chunkY = y / chunkSize;
+            if (chunkY < 0 || chunkY >= chunks.Length) continue;
+
+            IChunkBlocks? data = chunks[chunkY]?.Data;
+            if (data == null) continue;
+
+            int localY = y - chunkY * chunkSize;
+            int blockIndex = MapUtil.Index3d(localX, localY, localZ, chunkSize, chunkSize);
+            columnBlockIds[baseIndex + y] = data[blockIndex];
+        }
     }
 
     private static int FindWorldgenPeekColumnHeight(IServerChunk[] chunks, int localX, int localZ, int chunkSize, out int topBlockId)
@@ -4363,7 +4437,7 @@ public sealed partial class DebugWindowManager
                 }
             }
 
-            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; ore factor {minFactor:0.###}-{maxFactor:0.###}; {samplerStatus}; exact propick still requires 3D column";
+            _worldgenPreviewRasterStatus = $"Raster cache: {cellsX}x{cellsZ}; ore factor {minFactor:0.###}-{maxFactor:0.###}; {samplerStatus}; exact propick uses the latest matching 3D peek";
             error = "";
             return true;
         }
@@ -4384,11 +4458,29 @@ public sealed partial class DebugWindowManager
         out string status)
     {
         factor = 0f;
+        if (!TrySampleWorldgenPreviewOreMapValue(variant, chunkX, chunkZ, oreMapCache, out int oreMapValue, out status))
+        {
+            return false;
+        }
+
+        factor = (oreMapValue & 0xff) / 255f;
+        return true;
+    }
+
+    private bool TrySampleWorldgenPreviewOreMapValue(
+        DepositVariant variant,
+        int chunkX,
+        int chunkZ,
+        Dictionary<WorldgenOreMapRegionCacheKey, IntDataMap2D> oreMapCache,
+        out int oreMapValue,
+        out string status)
+    {
+        oreMapValue = 0;
         status = "ore map sampler unavailable";
 
         if (!variant.WithOreMap)
         {
-            factor = 1f;
+            oreMapValue = 255;
             status = "deposit has no ore map; factor is 1";
             return true;
         }
@@ -4451,7 +4543,7 @@ public sealed partial class DebugWindowManager
         int localZ = GameMath.Mod(blockZ, regionSize);
         float sampleX = GameMath.Clamp((float)localX / regionSize * noiseSizeOre, 0f, noiseSizeOre - 1);
         float sampleZ = GameMath.Clamp((float)localZ / regionSize * noiseSizeOre, 0f, noiseSizeOre - 1);
-        factor = (map.GetUnpaddedColorLerped(sampleX, sampleZ) & 0xff) / 255f;
+        oreMapValue = map.GetUnpaddedColorLerped(sampleX, sampleZ);
         status = "in-memory OnMapRegionGen ore map sampler";
         return true;
     }
@@ -5068,6 +5160,29 @@ public sealed partial class DebugWindowManager
         if (x < 0 || z < 0 || x >= profile.Width || z >= profile.Depth) return -1;
         int index = z * profile.Width + x;
         return index < profile.Heights.Length ? profile.Heights[index] : -1;
+    }
+
+    private static bool TryGetWorldgenPeekLocalColumn(WorldgenPeekRegionProfile profile, int blockX, int blockZ, out int localX, out int localZ)
+    {
+        localX = blockX - profile.OriginChunkX * profile.ChunkSize;
+        localZ = blockZ - profile.OriginChunkZ * profile.ChunkSize;
+        return localX >= 0 && localZ >= 0 && localX < profile.Width && localZ < profile.Depth;
+    }
+
+    private static bool TryGetWorldgenPeekBlockColumn(WorldgenPeekRegionProfile profile, int localX, int localZ, int topY, out int[] blockColumn)
+    {
+        blockColumn = [];
+        if (profile.MapHeight <= 0 || profile.ColumnBlockIds.Length == 0) return false;
+        if (localX < 0 || localZ < 0 || localX >= profile.Width || localZ >= profile.Depth) return false;
+
+        int length = Math.Clamp(topY + 1, 1, profile.MapHeight);
+        int columnIndex = localZ * profile.Width + localX;
+        int baseIndex = columnIndex * profile.MapHeight;
+        if (baseIndex < 0 || baseIndex + length > profile.ColumnBlockIds.Length) return false;
+
+        blockColumn = new int[length];
+        Array.Copy(profile.ColumnBlockIds, baseIndex, blockColumn, 0, length);
+        return true;
     }
 
     private static bool IsWorldgenOracleProfileFor(WorldgenPeekRegionProfile profile, WorldgenLoadedWorldOracleProfile? oracleProfile)
@@ -5833,8 +5948,10 @@ public sealed partial class DebugWindowManager
         int ChunkSize,
         int Width,
         int Depth,
+        int MapHeight,
         int[] Heights,
-        int[] TopBlockIds)
+        int[] TopBlockIds,
+        int[] ColumnBlockIds)
     {
         public string CleanupSummary { get; init; } = "";
     }
