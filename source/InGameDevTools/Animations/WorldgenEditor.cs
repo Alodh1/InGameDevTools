@@ -2,7 +2,9 @@ using ImGuiNET;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using OpenTK.Graphics.OpenGL4;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
@@ -119,6 +121,10 @@ public sealed partial class DebugWindowManager
     private WorldgenPreviewRasterCacheKey? _worldgenPreviewRasterCacheKey;
     private uint[]? _worldgenPreviewRasterCache;
     private string _worldgenPreviewRasterStatus = "Raster cache empty.";
+    private WorldgenPreviewRasterCacheKey? _worldgenPreviewTextureCacheKey;
+    private int _worldgenPreviewTextureId;
+    private int _worldgenPreviewTextureWidth;
+    private int _worldgenPreviewTextureHeight;
     private bool _worldgenPreviewPeekPending;
     private string _worldgenPreviewPeekStatus = "No real chunk peek requested yet.";
     private readonly object _worldgenActivePeekGate = new();
@@ -3702,6 +3708,18 @@ public sealed partial class DebugWindowManager
         }
         uint[] rasterColors = colors ?? [];
 
+        if (TryEnsureWorldgenPreviewRasterTexture(rasterColors, cellsX, cellsZ, out int textureId, out string textureError))
+        {
+            drawList.AddImage(new IntPtr(textureId), min, max, NVector2.Zero, NVector2.One);
+            return;
+        }
+
+        _worldgenPreviewRasterStatus = $"Raster texture unavailable ({textureError}); drawing {cellsX * cellsZ} cells.";
+        DrawWorldgenPreviewRasterCells(drawList, min, max, rasterColors, cellsX, cellsZ, cellWidth, cellHeight);
+    }
+
+    private static void DrawWorldgenPreviewRasterCells(ImDrawListPtr drawList, NVector2 min, NVector2 max, uint[] rasterColors, int cellsX, int cellsZ, float cellWidth, float cellHeight)
+    {
         for (int z = 0; z < cellsZ; z++)
         {
             for (int x = 0; x < cellsX; x++)
@@ -3711,6 +3729,122 @@ public sealed partial class DebugWindowManager
                 drawList.AddRectFilled(a, b, rasterColors[z * cellsX + x]);
             }
         }
+    }
+
+    private bool TryEnsureWorldgenPreviewRasterTexture(uint[] colors, int width, int height, out int textureId, out string error)
+    {
+        textureId = 0;
+        error = "";
+
+        if (_worldgenPreviewRasterCacheKey is not { } key)
+        {
+            error = "no raster cache key";
+            return false;
+        }
+
+        if (colors.Length < width * height)
+        {
+            error = $"raster buffer too small ({colors.Length} for {width}x{height})";
+            return false;
+        }
+
+        if (_worldgenPreviewTextureId > 0 &&
+            _worldgenPreviewTextureCacheKey == key &&
+            _worldgenPreviewTextureWidth == width &&
+            _worldgenPreviewTextureHeight == height)
+        {
+            textureId = _worldgenPreviewTextureId;
+            return true;
+        }
+
+        int restoreActiveTexture = 0;
+        int restoreTexture2D = 0;
+        int restoreUnpackAlignment = 4;
+        GCHandle pinned = default;
+
+        try
+        {
+            GL.GetInteger(GetPName.ActiveTexture, out restoreActiveTexture);
+            GL.ActiveTexture(TextureUnit.Texture0);
+            GL.GetInteger(GetPName.TextureBinding2D, out restoreTexture2D);
+            GL.GetInteger(GetPName.UnpackAlignment, out restoreUnpackAlignment);
+
+            if (_worldgenPreviewTextureId <= 0)
+            {
+                GL.GenTextures(1, out _worldgenPreviewTextureId);
+                GL.BindTexture(TextureTarget.Texture2D, _worldgenPreviewTextureId);
+                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            }
+            else
+            {
+                GL.BindTexture(TextureTarget.Texture2D, _worldgenPreviewTextureId);
+            }
+
+            GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
+            pinned = GCHandle.Alloc(colors, GCHandleType.Pinned);
+            GL.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                PixelInternalFormat.Rgba8,
+                width,
+                height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                pinned.AddrOfPinnedObject());
+
+            _worldgenPreviewTextureCacheKey = key;
+            _worldgenPreviewTextureWidth = width;
+            _worldgenPreviewTextureHeight = height;
+            _worldgenPreviewRasterStatus = $"Raster texture: {width}x{height}; one ImGui image.";
+            textureId = _worldgenPreviewTextureId;
+            return textureId > 0;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+        finally
+        {
+            if (pinned.IsAllocated)
+            {
+                pinned.Free();
+            }
+
+            try
+            {
+                GL.PixelStore(PixelStoreParameter.UnpackAlignment, restoreUnpackAlignment);
+                GL.BindTexture(TextureTarget.Texture2D, restoreTexture2D);
+                GL.ActiveTexture((TextureUnit)restoreActiveTexture);
+            }
+            catch
+            {
+                // The fallback cell renderer can still draw this frame if GL state restore fails.
+            }
+        }
+    }
+
+    private void DisposeWorldgenPreviewRasterTexture()
+    {
+        if (_worldgenPreviewTextureId <= 0) return;
+
+        try
+        {
+            GL.DeleteTexture(_worldgenPreviewTextureId);
+        }
+        catch
+        {
+            // The GL context may already be gone during game shutdown.
+        }
+
+        _worldgenPreviewTextureId = 0;
+        _worldgenPreviewTextureCacheKey = null;
+        _worldgenPreviewTextureWidth = 0;
+        _worldgenPreviewTextureHeight = 0;
     }
 
     private void DrawWorldgenLandformSurfacePreview(ImDrawListPtr drawList, NVector2 min, NVector2 max, long seed, float centerX, float centerZ, float pixelsPerBlock)
@@ -4300,6 +4434,7 @@ public sealed partial class DebugWindowManager
     {
         _worldgenPreviewRasterCacheKey = null;
         _worldgenPreviewRasterCache = null;
+        _worldgenPreviewTextureCacheKey = null;
         _worldgenPreviewRasterStatus = "Raster cache invalidated.";
     }
 

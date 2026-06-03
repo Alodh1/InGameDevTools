@@ -58,6 +58,7 @@ public sealed partial class DebugWindowManager : IDisposable
     public void Dispose()
     {
         RestoreWorldgenPreviewForEditorTeardown("devtools disposed");
+        DisposeWorldgenPreviewRasterTexture();
         FlushDevToolsConfigSave(force: true);
         if (!_drawSubscribed || _imguiModSystem == null) return;
 
