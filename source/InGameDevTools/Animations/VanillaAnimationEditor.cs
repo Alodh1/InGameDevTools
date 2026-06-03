@@ -1931,6 +1931,7 @@ public sealed partial class DebugWindowManager
                 return ApplyVanillaViewportMoveGizmoDrag(row, entry, keyFrame, element, axis, projected, projection);
             case TransformGizmoMode.Scale:
             {
+                element = GetOrCreateVanillaEditableKeyFrameElement(keyFrame, _vanillaSelection.ElementName, element);
                 double value = _vanillaViewportGizmoDragStartValue;
                 value += projected / Math.Max(1f, projection.Scale) * 16.0;
                 value = SnapVanillaGizmoValue(value, Math.Max(0.001, TransformGizmoIncrement * 16.0));
@@ -1940,6 +1941,7 @@ public sealed partial class DebugWindowManager
             }
             case TransformGizmoMode.Rotate:
             {
+                element = GetOrCreateVanillaEditableKeyFrameElement(keyFrame, _vanillaSelection.ElementName, element);
                 double value = _vanillaViewportGizmoDragStartValue;
                 value += UpdateVanillaViewportGizmoRingDrag();
                 value = NormalizeVanillaDegrees(SnapVanillaGizmoValue(value, Math.Max(0.001, TransformGizmoIncrement)));
@@ -1979,9 +1981,20 @@ public sealed partial class DebugWindowManager
             return true;
         }
 
+        element = GetOrCreateVanillaEditableKeyFrameElement(keyFrame, _vanillaSelection.ElementName, element);
         SetVanillaGizmoMoveOffsetValues(element, offsetX, offsetY, offsetZ);
         ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
         return true;
+    }
+
+    private static AnimationKeyFrameElement GetOrCreateVanillaEditableKeyFrameElement(AnimationKeyFrame keyFrame, string elementName, AnimationKeyFrameElement fallback)
+    {
+        keyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(elementName)) return fallback;
+        if (keyFrame.Elements.TryGetValue(elementName, out AnimationKeyFrameElement? existing) && existing != null) return existing;
+
+        keyFrame.Elements[elementName] = fallback;
+        return fallback;
     }
 
     private NVector3 GetVanillaViewportMoveModelDelta(VanillaGizmoProjection projection, TransformGizmoAxis axis, double modelDelta)
@@ -2074,12 +2087,28 @@ public sealed partial class DebugWindowManager
         animation = selectedEntry.Animation;
         _vanillaSelection.KeyFrameIndex = Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, animation.KeyFrames.Length - 1);
         keyFrame = animation.KeyFrames[_vanillaSelection.KeyFrameIndex];
-        if (keyFrame.Elements == null || keyFrame.Elements.Count == 0) return false;
-        if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName) || !keyFrame.Elements.ContainsKey(_vanillaSelection.ElementName))
+        keyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName))
         {
+            if (keyFrame.Elements.Count == 0) return false;
             _vanillaSelection.ElementName = keyFrame.Elements.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).First();
         }
-        if (!keyFrame.Elements.TryGetValue(_vanillaSelection.ElementName, out AnimationKeyFrameElement? found) || found == null) return false;
+
+        if (keyFrame.Elements.TryGetValue(_vanillaSelection.ElementName, out AnimationKeyFrameElement? found) && found != null)
+        {
+            element = found;
+            return true;
+        }
+
+        if (IsKnownVanillaShapeElement(selectedEntry.Document, _vanillaSelection.ElementName))
+        {
+            element = new AnimationKeyFrameElement();
+            return true;
+        }
+
+        if (keyFrame.Elements.Count == 0) return false;
+        _vanillaSelection.ElementName = keyFrame.Elements.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).First();
+        if (!keyFrame.Elements.TryGetValue(_vanillaSelection.ElementName, out found) || found == null) return false;
         element = found;
         return true;
     }
@@ -3089,6 +3118,7 @@ public sealed partial class DebugWindowManager
     private void ClampVanillaSelection(VanillaBrowserRow row)
     {
         VanillaAnimation? animation = GetVanillaAnimation(row);
+        VanillaAnimationDocument? document = (row.ShapeAnimation ?? row.MetadataEntry?.ResolveCurrentShape())?.Document ?? row.Document;
         if (animation?.KeyFrames == null || animation.KeyFrames.Length == 0)
         {
             _vanillaSelection.KeyFrameIndex = 0;
@@ -3100,11 +3130,21 @@ public sealed partial class DebugWindowManager
         AnimationKeyFrame keyFrame = animation.KeyFrames[_vanillaSelection.KeyFrameIndex];
         if (keyFrame.Elements == null || keyFrame.Elements.Count == 0)
         {
-            _vanillaSelection.ElementName = "";
+            if (!IsKnownVanillaShapeElement(document, _vanillaSelection.ElementName))
+            {
+                _vanillaSelection.ElementName = "";
+            }
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName) || !keyFrame.Elements.ContainsKey(_vanillaSelection.ElementName))
+        if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName))
+        {
+            _vanillaSelection.ElementName = keyFrame.Elements.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).First();
+            return;
+        }
+
+        if (!keyFrame.Elements.ContainsKey(_vanillaSelection.ElementName) &&
+            !IsKnownVanillaShapeElement(document, _vanillaSelection.ElementName))
         {
             _vanillaSelection.ElementName = keyFrame.Elements.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).First();
         }
@@ -3255,30 +3295,50 @@ public sealed partial class DebugWindowManager
         }
 
         string[] elementNames = keyFrame.Elements.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
-        if (elementNames.Length == 0)
+        bool selectedKnownShapeElement = IsKnownVanillaShapeElement(document, _vanillaSelection.ElementName);
+        if (elementNames.Length == 0 && !selectedKnownShapeElement)
         {
             ImGui.TextDisabled("No animated elements in this keyframe.");
             return;
         }
 
-        int selectedElementIndex = Math.Max(0, Array.FindIndex(elementNames, name => string.Equals(name, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase)));
-        if (selectedElementIndex >= elementNames.Length) selectedElementIndex = 0;
-        DrawVanillaElementList(elementNames, selectedElementIndex);
+        if (elementNames.Length > 0)
+        {
+            int selectedElementIndex = Math.Max(0, Array.FindIndex(elementNames, name => string.Equals(name, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase)));
+            if (selectedElementIndex >= elementNames.Length) selectedElementIndex = 0;
+            DrawVanillaElementList(elementNames, selectedElementIndex);
+        }
 
         if (string.IsNullOrWhiteSpace(_vanillaSelection.ElementName) || !keyFrame.Elements.TryGetValue(_vanillaSelection.ElementName, out AnimationKeyFrameElement? element))
         {
-            _vanillaSelection.ElementName = elementNames[selectedElementIndex];
-            element = keyFrame.Elements[_vanillaSelection.ElementName];
+            if (selectedKnownShapeElement)
+            {
+                element = new AnimationKeyFrameElement();
+                ImGui.TextDisabled($"{_vanillaSelection.ElementName} is selected from the shape; it will be added to this keyframe when edited.");
+            }
+            else if (elementNames.Length > 0)
+            {
+                _vanillaSelection.ElementName = elementNames[0];
+                element = keyFrame.Elements[_vanillaSelection.ElementName];
+            }
+            else
+            {
+                return;
+            }
         }
 
+        bool selectedInKeyFrame = keyFrame.Elements.ContainsKey(_vanillaSelection.ElementName);
+        if (!selectedInKeyFrame) ImGui.BeginDisabled();
         if (ImGui.Button("Remove element##vanilla-element"))
         {
             keyFrame.Elements.Remove(_vanillaSelection.ElementName);
             _vanillaSelection.ElementName = "";
             MarkVanillaDirty(document);
             RefreshVanillaPreviewAfterEdit(row);
+            if (!selectedInKeyFrame) ImGui.EndDisabled();
             return;
         }
+        if (!selectedInKeyFrame) ImGui.EndDisabled();
 
         DrawVanillaSymmetryControls(row, entry, keyFrame, _vanillaSelection.ElementName, element);
         DrawVanillaIkControls(row, entry, keyFrame, _vanillaSelection.ElementName);
@@ -3311,6 +3371,7 @@ public sealed partial class DebugWindowManager
 
         if (changed)
         {
+            element = GetOrCreateVanillaEditableKeyFrameElement(keyFrame, _vanillaSelection.ElementName, element);
             CompleteVanillaElementTransformGroups(element);
             ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
         }
@@ -3993,7 +4054,9 @@ public sealed partial class DebugWindowManager
             return false;
         }
 
-        if (IsVanillaIkStructuralHub(selected, selectedIndex == 0, out string selectedHubReason))
+        bool selectedIsStructuralHub = IsVanillaIkStructuralHub(selected, selectedIndex == 0, out string selectedHubReason);
+        bool selectedIsTrunkOrRoot = selectedIndex == 0 || IsVanillaIkTrunkName(NormalizeVanillaIkStructureName(selected.Name));
+        if (selectedIsStructuralHub && selectedIsTrunkOrRoot)
         {
             if (_vanillaIkMode != VanillaIkChainMode.AutoExtended)
             {
@@ -4025,7 +4088,7 @@ public sealed partial class DebugWindowManager
         }
 
         var chainElements = path.Skip(startIndex).Take(selectedIndex - startIndex + 1).ToList();
-        int remaining = Math.Max(0, maxChainLength - chainElements.Count);
+        int remaining = Math.Min(_vanillaIkAutoEndExtraBones, Math.Max(0, maxChainLength - chainElements.Count));
         AppendVanillaIkLongestDescendantPath(chainElements, selected, remaining, out string extensionNote);
         TrimVanillaIkChainAtAnchors(document, chainElements);
 
@@ -4745,12 +4808,6 @@ public sealed partial class DebugWindowManager
         }
 
         string selectedElementName = _vanillaSelection.ElementName;
-        if (!string.Equals(selectedElementName, chain.EndElementName, StringComparison.OrdinalIgnoreCase))
-        {
-            _vanillaStatus = $"IK Move handle is {chain.EndElementName}; select that element before dragging.";
-            return false;
-        }
-
         if (!_vanillaIkDragActive ||
             _vanillaIkDragCache == null ||
             _vanillaIkDragRowKey != row.Key ||
@@ -5478,6 +5535,12 @@ public sealed partial class DebugWindowManager
         Shape? shape = document.Shape;
         if (shape?.Elements == null) return [];
         return shape.Elements.SelectMany(GetShapeElementNamesRecursive);
+    }
+
+    private static bool IsKnownVanillaShapeElement(VanillaAnimationDocument? document, string? elementName)
+    {
+        if (document?.Shape == null || string.IsNullOrWhiteSpace(elementName)) return false;
+        return FindShapeElement(document.Shape, elementName) != null;
     }
 
     private static IEnumerable<string> GetShapeElementNamesRecursive(ShapeElement element)
