@@ -120,6 +120,10 @@ public sealed partial class DebugWindowManager
     private string _worldgenPreviewPeekStatus = "No real chunk peek requested yet.";
     private int _worldgenPreviewRegionSize = 1;
     private int _worldgenPreviewPassIndex;
+    private bool _worldgenPreviewAutoPeekOnEdit = true;
+    private bool _worldgenPreviewPeekDirty;
+    private DateTime _worldgenPreviewPeekDueUtc;
+    private string _worldgenPreviewAutoPeekStatus = "Auto 3D refresh waits for draft edits.";
     private WorldgenPeekRegionCacheKey? _worldgenPreviewPeekCacheKey;
     private WorldgenPeekRegionProfile? _worldgenPreviewPeekProfile;
 
@@ -443,6 +447,7 @@ public sealed partial class DebugWindowManager
                     _worldgenRowIndex = i;
                     RememberWorldgenDraft();
                     InvalidateWorldgenPreviewRasterCache();
+                    ScheduleWorldgenRealtimePeek("selected row changed");
                 }
                 if (ImGui.IsItemHovered())
                 {
@@ -712,6 +717,7 @@ public sealed partial class DebugWindowManager
             ValidateWorldgenCurrentText();
             RememberWorldgenDraft();
             InvalidateWorldgenPreviewRasterCache();
+            ScheduleWorldgenRealtimePeek("raw JSON draft changed");
         }
     }
 
@@ -791,6 +797,7 @@ public sealed partial class DebugWindowManager
             {
                 _worldgenPreviewMapLayer = null;
                 InvalidateWorldgenPreviewRasterCache();
+                ScheduleWorldgenRealtimePeek("preview mode changed");
             }
         }
 
@@ -799,9 +806,16 @@ public sealed partial class DebugWindowManager
 
         float halfWidth = Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.48f);
         ImGui.PushItemWidth(halfWidth);
+        int previousOriginX = _worldgenPreviewOriginX;
+        int previousOriginZ = _worldgenPreviewOriginZ;
         ImGui.InputInt("Origin X##worldgen-preview-origin-x", ref _worldgenPreviewOriginX);
         ImGui.SameLine();
         ImGui.InputInt("Z##worldgen-preview-origin-z", ref _worldgenPreviewOriginZ);
+        if (_worldgenPreviewOriginX != previousOriginX || _worldgenPreviewOriginZ != previousOriginZ)
+        {
+            ClearWorldgenPeekProfile("Preview origin changed; peek again to refresh the real 3D preview.");
+            ScheduleWorldgenRealtimePeek("preview origin changed");
+        }
         if (ImGui.InputInt("Resolution##worldgen-preview-resolution", ref _worldgenPreviewResolution))
         {
             _worldgenPreviewResolution = Math.Clamp(_worldgenPreviewResolution, 32, 192);
@@ -833,6 +847,8 @@ public sealed partial class DebugWindowManager
         {
             DrawWorldgenMapLayerPreviewControls();
         }
+
+        ProcessWorldgenRealtimePeek();
 
         if (ImGui.Button("Use current world##worldgen-preview-current"))
         {
@@ -1040,6 +1056,7 @@ public sealed partial class DebugWindowManager
             if (_worldgenPreviewRegionSize != previousRegionSize)
             {
                 ClearWorldgenPeekProfile("Region size changed; peek again to refresh the real 3D preview.");
+                ScheduleWorldgenRealtimePeek("region size changed");
             }
         }
 
@@ -1051,14 +1068,33 @@ public sealed partial class DebugWindowManager
             if (_worldgenPreviewPassIndex != previousPassIndex)
             {
                 ClearWorldgenPeekProfile("Worldgen pass changed; peek again to refresh the real 3D preview.");
+                ScheduleWorldgenRealtimePeek("worldgen pass changed");
             }
         }
+
+        if (ImGui.Checkbox("Auto refresh real peek##worldgen-auto-peek", ref _worldgenPreviewAutoPeekOnEdit))
+        {
+            if (_worldgenPreviewAutoPeekOnEdit)
+            {
+                ScheduleWorldgenRealtimePeek("auto refresh enabled");
+            }
+            else
+            {
+                _worldgenPreviewPeekDirty = false;
+                _worldgenPreviewAutoPeekStatus = "Auto 3D refresh disabled.";
+            }
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Debounces real PeekChunkColumn refreshes after edits. This currently refreshes live engine output; draft mutation into the real 3D pipeline is the next W4.5 step.");
+        }
+        ImGui.TextDisabled(_worldgenPreviewAutoPeekStatus);
 
         bool canPeek = _worldgenPreviewServerApi != null && !_worldgenPreviewPeekPending;
         if (!canPeek) ImGui.BeginDisabled();
         if (ImGui.Button("Peek region##worldgen-peek-region"))
         {
-            RequestWorldgenPeekRegion();
+            RequestWorldgenPeekRegion(forceRefresh: false, reason: "manual");
         }
         if (!canPeek) ImGui.EndDisabled();
 
@@ -1158,6 +1194,8 @@ public sealed partial class DebugWindowManager
         {
             _worldgenDiagnostics.Exception("Worldgen preview could not read player position", exception);
         }
+
+        ScheduleWorldgenRealtimePeek("current world state loaded");
     }
 
     private string GetCurrentWorldgenSeedText()
@@ -1848,7 +1886,12 @@ public sealed partial class DebugWindowManager
         return WorldgenPeekPassLabels[index];
     }
 
-    private void RequestWorldgenPeekRegion()
+    private string GetWorldgenPreviewDraftFingerprint()
+    {
+        return $"{_worldgenLoadedKey}:{_worldgenRowIndex}:{_worldgenCurrentText.Length}:{StringComparer.Ordinal.GetHashCode(_worldgenCurrentText)}";
+    }
+
+    private void RequestWorldgenPeekRegion(bool forceRefresh = false, string reason = "manual")
     {
         ICoreServerAPI? serverApi = _worldgenPreviewServerApi;
         if (serverApi == null)
@@ -1883,8 +1926,8 @@ public sealed partial class DebugWindowManager
         int originChunkZ = centerChunkZ - regionSize / 2;
         EnumWorldGenPass untilPass = GetSelectedWorldgenPeekPass();
         string passLabel = GetSelectedWorldgenPeekPassLabel();
-        WorldgenPeekRegionCacheKey cacheKey = new(ParseWorldgenPreviewSeed(), originChunkX, originChunkZ, regionSize, untilPass);
-        if (_worldgenPreviewPeekProfile != null && _worldgenPreviewPeekCacheKey == cacheKey)
+        WorldgenPeekRegionCacheKey cacheKey = new(ParseWorldgenPreviewSeed(), originChunkX, originChunkZ, regionSize, untilPass, GetWorldgenPreviewDraftFingerprint());
+        if (!forceRefresh && _worldgenPreviewPeekProfile != null && _worldgenPreviewPeekCacheKey == cacheKey)
         {
             _worldgenPreviewPeekStatus = $"Using cached {passLabel} peek for {regionSize}x{regionSize} chunks at {originChunkX},{originChunkZ}.";
             return;
@@ -1893,7 +1936,7 @@ public sealed partial class DebugWindowManager
         _worldgenPreviewPeekPending = true;
         _worldgenPreviewPeekProfile = null;
         _worldgenPreviewPeekCacheKey = null;
-        _worldgenPreviewPeekStatus = $"Requesting real {passLabel} peek for {regionSize}x{regionSize} chunks at {originChunkX},{originChunkZ}...";
+        _worldgenPreviewPeekStatus = $"Requesting real {passLabel} peek for {regionSize}x{regionSize} chunks at {originChunkX},{originChunkZ} ({reason})...";
 
         bool restoreAutoGenerate = TryGetWorldgenAutoGenerateChunks(worldManager, out bool previousAutoGenerate)
             ? previousAutoGenerate
@@ -3504,6 +3547,45 @@ public sealed partial class DebugWindowManager
         ValidateWorldgenCurrentText();
         RememberWorldgenDraft();
         InvalidateWorldgenPreviewRasterCache();
+        ScheduleWorldgenRealtimePeek("structured draft changed");
+    }
+
+    private void ScheduleWorldgenRealtimePeek(string reason)
+    {
+        if (_worldgenPreviewMode != WorldgenPreviewModeRegion3D || !_worldgenPreviewAutoPeekOnEdit) return;
+
+        _worldgenPreviewPeekDirty = true;
+        _worldgenPreviewPeekDueUtc = DateTime.UtcNow.AddMilliseconds(750);
+        _worldgenPreviewAutoPeekStatus = $"Auto 3D refresh queued: {reason}.";
+    }
+
+    private void ProcessWorldgenRealtimePeek()
+    {
+        if (!_worldgenPreviewAutoPeekOnEdit ||
+            !_worldgenPreviewPeekDirty ||
+            _worldgenPreviewMode != WorldgenPreviewModeRegion3D ||
+            _worldgenPreviewPeekPending)
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow < _worldgenPreviewPeekDueUtc) return;
+
+        if (_worldgenPreviewServerApi == null)
+        {
+            _worldgenPreviewAutoPeekStatus = "Auto 3D refresh waiting for singleplayer server API.";
+            return;
+        }
+
+        if (!_worldgenTextValid)
+        {
+            _worldgenPreviewAutoPeekStatus = "Auto 3D refresh waiting for valid JSON.";
+            return;
+        }
+
+        _worldgenPreviewPeekDirty = false;
+        _worldgenPreviewAutoPeekStatus = "Auto 3D refresh requested from live engine config.";
+        RequestWorldgenPeekRegion(forceRefresh: true, reason: "auto");
     }
 
     private void ValidateWorldgenCurrentText()
@@ -3997,7 +4079,8 @@ public sealed partial class DebugWindowManager
         int OriginChunkX,
         int OriginChunkZ,
         int RegionSizeChunks,
-        EnumWorldGenPass UntilPass);
+        EnumWorldGenPass UntilPass,
+        string DraftFingerprint);
 
     private sealed record WorldgenPeekRegionProfile(
         int OriginChunkX,
