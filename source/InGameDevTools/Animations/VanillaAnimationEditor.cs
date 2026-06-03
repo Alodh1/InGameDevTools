@@ -1987,12 +1987,12 @@ public sealed partial class DebugWindowManager
     private bool ApplyVanillaViewportMoveGizmoDrag(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, AnimationKeyFrameElement element, TransformGizmoAxis axis, double projected, VanillaGizmoProjection projection)
     {
         double modelDelta = projected / Math.Max(1f, _vanillaViewportGizmoDragScale);
+        modelDelta = SnapVanillaGizmoValue(modelDelta, Math.Max(0.001, TransformGizmoIncrement));
         NVector3 modelDeltaVector = GetVanillaViewportMoveModelDelta(projection, axis, modelDelta);
         NVector3 offsetDelta = _vanillaViewportGizmoDragTranslationBasis.ModelToOffsetDelta(modelDeltaVector) * 16f;
-        double step = Math.Max(0.001, TransformGizmoIncrement * 16.0);
-        double offsetX = SnapVanillaGizmoValue(_vanillaViewportGizmoDragStartOffsetX + offsetDelta.X, step);
-        double offsetY = SnapVanillaGizmoValue(_vanillaViewportGizmoDragStartOffsetY + offsetDelta.Y, step);
-        double offsetZ = SnapVanillaGizmoValue(_vanillaViewportGizmoDragStartOffsetZ + offsetDelta.Z, step);
+        double offsetX = _vanillaViewportGizmoDragStartOffsetX + offsetDelta.X;
+        double offsetY = _vanillaViewportGizmoDragStartOffsetY + offsetDelta.Y;
+        double offsetZ = _vanillaViewportGizmoDragStartOffsetZ + offsetDelta.Z;
 
         if (Math.Abs(offsetX - (element.OffsetX ?? 0)) < 0.0001 &&
             Math.Abs(offsetY - (element.OffsetY ?? 0)) < 0.0001 &&
@@ -2003,9 +2003,9 @@ public sealed partial class DebugWindowManager
 
         AnimationKeyFrameElement desiredElement = CloneElement(element);
         SetVanillaGizmoMoveOffsetValues(desiredElement, offsetX, offsetY, offsetZ);
-        if (_vanillaIkFollowMove && TryApplyVanillaViewportIkMove(row, entry, desiredElement, modelDeltaVector))
+        if (_vanillaIkFollowMove)
         {
-            return true;
+            return TryApplyVanillaViewportIkMove(row, entry, desiredElement, modelDeltaVector);
         }
 
         element = GetOrCreateVanillaEditableKeyFrameElement(keyFrame, _vanillaSelection.ElementName, element);
