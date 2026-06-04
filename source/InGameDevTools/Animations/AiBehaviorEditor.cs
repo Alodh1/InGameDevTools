@@ -48,6 +48,7 @@ public sealed partial class DebugWindowManager
     private readonly Dictionary<string, string> _aiBehaviorLiveActiveBySlot = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<AiBehaviorLiveFieldSnapshot> _aiBehaviorLiveFieldSnapshots = [];
     private readonly List<AiBehaviorLiveRemovedTaskSnapshot> _aiBehaviorLiveRemovedTaskSnapshots = [];
+    private readonly List<AiBehaviorLiveAddedTaskSnapshot> _aiBehaviorLiveAddedTaskSnapshots = [];
     private long _aiBehaviorLiveEntityId;
     private string _aiBehaviorLiveEntityCode = "";
     private string _aiBehaviorLiveStatus = "No live entity target selected.";
@@ -111,11 +112,13 @@ public sealed partial class DebugWindowManager
     {
         RestoreAiBehaviorLiveFieldSnapshots(updateStatus: false);
         RestoreAiBehaviorLiveRemovedTaskSnapshots(updateStatus: false);
+        RestoreAiBehaviorLiveAddedTaskSnapshots(updateStatus: false);
         _aiBehaviorLiveTasks.Clear();
         _aiBehaviorLiveTransitions.Clear();
         _aiBehaviorLiveActiveBySlot.Clear();
         _aiBehaviorLiveFieldSnapshots.Clear();
         _aiBehaviorLiveRemovedTaskSnapshots.Clear();
+        _aiBehaviorLiveAddedTaskSnapshots.Clear();
         _aiBehaviorLiveEntityId = 0;
         _aiBehaviorLiveEntityCode = "";
         _aiBehaviorLiveStatus = "No live entity target selected.";
@@ -820,6 +823,7 @@ public sealed partial class DebugWindowManager
         {
             RestoreAiBehaviorLiveFieldSnapshots(updateStatus: true);
             RestoreAiBehaviorLiveRemovedTaskSnapshots(updateStatus: true);
+            RestoreAiBehaviorLiveAddedTaskSnapshots(updateStatus: true);
             RefreshAiBehaviorLiveSnapshot(recordTransitions: false);
         }
         if (!hasLiveEdits) ImGui.EndDisabled();
@@ -830,6 +834,11 @@ public sealed partial class DebugWindowManager
         }
         ImGui.TextWrapped(_aiBehaviorLiveServerStatus);
         ImGui.TextWrapped(_aiBehaviorLiveStatus);
+
+        if (hasLiveTarget)
+        {
+            DrawAiBehaviorLiveSourceActions();
+        }
 
         if (_aiBehaviorLiveActiveBySlot.Count > 0)
         {
@@ -913,6 +922,22 @@ public sealed partial class DebugWindowManager
         DrawAiBehaviorLiveEditPanel();
     }
 
+    private void DrawAiBehaviorLiveSourceActions()
+    {
+        ImGui.SeparatorText("Live source actions");
+        bool hasSourceTask = TryGetSelectedAiBehaviorSourceTask(out JObject? sourceTask, out string sourceTaskStatus);
+        if (!hasSourceTask) ImGui.BeginDisabled();
+        if (ImGui.Button("Add selected source task live##entity-ai-live-add-source-task", new NVector2(-1, 0)))
+        {
+            AddSelectedAiBehaviorSourceTaskLive(sourceTask!);
+        }
+        if (!hasSourceTask) ImGui.EndDisabled();
+        if (!hasSourceTask)
+        {
+            ImGui.TextWrapped(sourceTaskStatus);
+        }
+    }
+
     private void DrawAiBehaviorLiveEditPanel()
     {
         if (_aiBehaviorLiveTasks.Count == 0) return;
@@ -975,7 +1000,8 @@ public sealed partial class DebugWindowManager
         {
             int fieldCount = _aiBehaviorLiveFieldSnapshots.Count(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId);
             int removedCount = _aiBehaviorLiveRemovedTaskSnapshots.Count(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId);
-            ImGui.TextWrapped($"{fieldCount} live field edit snapshot(s), {removedCount} removed task snapshot(s) are available for revert.");
+            int addedCount = _aiBehaviorLiveAddedTaskSnapshots.Count(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId);
+            ImGui.TextWrapped($"{fieldCount} live field edit snapshot(s), {removedCount} removed task snapshot(s), {addedCount} added task snapshot(s) are available for revert.");
         }
     }
 
@@ -1361,6 +1387,7 @@ public sealed partial class DebugWindowManager
         {
             RestoreAiBehaviorLiveFieldSnapshots(updateStatus: false);
             RestoreAiBehaviorLiveRemovedTaskSnapshots(updateStatus: false);
+            RestoreAiBehaviorLiveAddedTaskSnapshots(updateStatus: false);
         }
 
         _aiBehaviorLiveEntityId = entity.EntityId;
@@ -1457,7 +1484,8 @@ public sealed partial class DebugWindowManager
     {
         return _aiBehaviorLiveEntityId != 0 &&
             (_aiBehaviorLiveFieldSnapshots.Any(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId) ||
-             _aiBehaviorLiveRemovedTaskSnapshots.Any(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId));
+             _aiBehaviorLiveRemovedTaskSnapshots.Any(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId) ||
+             _aiBehaviorLiveAddedTaskSnapshots.Any(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId));
     }
 
     private string BuildAiBehaviorSlotBlockText(AiBehaviorLiveTaskInfo task)
@@ -1559,9 +1587,60 @@ public sealed partial class DebugWindowManager
             return;
         }
 
-        CaptureAiBehaviorLiveRemovedTaskSnapshot(taskManager, task);
+        if (!ForgetAiBehaviorLiveAddedTaskSnapshot(task))
+        {
+            CaptureAiBehaviorLiveRemovedTaskSnapshot(taskManager, task);
+        }
         AddAiBehaviorLiveTransition($"manual: removed {task.Code}");
         _aiBehaviorLiveStatus = $"Live action: removed {task.Code}; use Revert live AI edits to re-add it.";
+        RefreshAiBehaviorLiveSnapshot(recordTransitions: true);
+    }
+
+    private void AddSelectedAiBehaviorSourceTaskLive(JObject sourceTask)
+    {
+        string? code = GetAiBehaviorTaskCode(sourceTask);
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            _aiBehaviorLiveStatus = "Selected source task has no task code.";
+            return;
+        }
+
+        if (!TryGetCurrentAiBehaviorLiveTaskManager(out object? taskManager, out string managerStatus) || taskManager == null)
+        {
+            _aiBehaviorLiveStatus = managerStatus;
+            return;
+        }
+
+        if (!TryGetCurrentAiBehaviorServerEntity(out Entity? serverEntity, out string entityStatus) || serverEntity == null)
+        {
+            _aiBehaviorLiveStatus = entityStatus;
+            return;
+        }
+
+        if (!TryGetAiBehaviorTaskType(code, out Type? taskType, out string taskTypeStatus) || taskType == null)
+        {
+            _aiBehaviorLiveStatus = taskTypeStatus;
+            _aiBehaviorDiagnostics.Warning(taskTypeStatus);
+            return;
+        }
+
+        if (!TryCreateAiBehaviorLiveTask(taskType, serverEntity, sourceTask, out object? taskObject, out string createStatus) || taskObject == null)
+        {
+            _aiBehaviorLiveStatus = createStatus;
+            _aiBehaviorDiagnostics.Warning(createStatus);
+            return;
+        }
+
+        if (!TryInvokeAiBehaviorTaskManagerMethod(taskManager, "AddTask", taskObject, code, out string addStatus))
+        {
+            _aiBehaviorLiveStatus = addStatus;
+            _aiBehaviorDiagnostics.Warning(addStatus);
+            return;
+        }
+
+        CaptureAiBehaviorLiveAddedTaskSnapshot(taskManager, taskObject, code);
+        AddAiBehaviorLiveTransition($"manual: added {code}");
+        _aiBehaviorLiveStatus = $"Live action: added {code}; use Revert live AI edits to remove it.";
         RefreshAiBehaviorLiveSnapshot(recordTransitions: true);
     }
 
@@ -1579,6 +1658,34 @@ public sealed partial class DebugWindowManager
             new WeakReference<object>(taskManager),
             task.TaskObject,
             task.Code));
+    }
+
+    private void CaptureAiBehaviorLiveAddedTaskSnapshot(object taskManager, object taskObject, string code)
+    {
+        int taskRuntimeId = RuntimeHelpers.GetHashCode(taskObject);
+        bool exists = _aiBehaviorLiveAddedTaskSnapshots.Any(snapshot =>
+            snapshot.EntityId == _aiBehaviorLiveEntityId &&
+            snapshot.TaskRuntimeId == taskRuntimeId);
+        if (exists) return;
+
+        _aiBehaviorLiveAddedTaskSnapshots.Add(new AiBehaviorLiveAddedTaskSnapshot(
+            _aiBehaviorLiveEntityId,
+            taskRuntimeId,
+            new WeakReference<object>(taskManager),
+            taskObject,
+            code));
+    }
+
+    private bool ForgetAiBehaviorLiveAddedTaskSnapshot(AiBehaviorLiveTaskInfo task)
+    {
+        int taskRuntimeId = RuntimeHelpers.GetHashCode(task.TaskObject);
+        int index = _aiBehaviorLiveAddedTaskSnapshots.FindIndex(snapshot =>
+            snapshot.EntityId == _aiBehaviorLiveEntityId &&
+            snapshot.TaskRuntimeId == taskRuntimeId);
+        if (index < 0) return false;
+
+        _aiBehaviorLiveAddedTaskSnapshots.RemoveAt(index);
+        return true;
     }
 
     private void RestoreAiBehaviorLiveRemovedTaskSnapshots(bool updateStatus)
@@ -1619,6 +1726,44 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void RestoreAiBehaviorLiveAddedTaskSnapshots(bool updateStatus)
+    {
+        long targetEntityId = _aiBehaviorLiveEntityId;
+        bool restoreAll = targetEntityId == 0;
+        int removed = 0;
+        int skipped = 0;
+
+        for (int index = _aiBehaviorLiveAddedTaskSnapshots.Count - 1; index >= 0; index--)
+        {
+            AiBehaviorLiveAddedTaskSnapshot snapshot = _aiBehaviorLiveAddedTaskSnapshots[index];
+            if (!restoreAll && snapshot.EntityId != targetEntityId) continue;
+
+            object? taskManager = null;
+            if (!snapshot.TaskManager.TryGetTarget(out taskManager) && !TryGetCurrentAiBehaviorLiveTaskManager(out taskManager, out _))
+            {
+                taskManager = null;
+            }
+
+            if (taskManager != null && TryInvokeAiBehaviorTaskManagerMethod(taskManager, "RemoveTask", snapshot.TaskObject, snapshot.Code, out _))
+            {
+                removed++;
+            }
+            else
+            {
+                skipped++;
+            }
+
+            _aiBehaviorLiveAddedTaskSnapshots.RemoveAt(index);
+        }
+
+        if (updateStatus && (removed > 0 || skipped > 0))
+        {
+            _aiBehaviorLiveStatus = skipped == 0
+                ? $"Removed {removed} added live AI task(s)."
+                : $"Removed {removed} added live AI task(s); skipped {skipped} stale task reference(s).";
+        }
+    }
+
     private bool TryGetCurrentAiBehaviorLiveTaskManager(out object? taskManager, out string status)
     {
         taskManager = null;
@@ -1650,6 +1795,308 @@ public sealed partial class DebugWindowManager
 
         status = managerSource;
         return true;
+    }
+
+    private bool TryGetCurrentAiBehaviorServerEntity(out Entity? serverEntity, out string status)
+    {
+        serverEntity = null;
+        ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
+        if (serverApi == null)
+        {
+            status = "Live AI actions require an integrated singleplayer server.";
+            return false;
+        }
+
+        if (_aiBehaviorLiveEntityId == 0)
+        {
+            status = "No live entity target selected.";
+            return false;
+        }
+
+        serverEntity = serverApi.World.GetEntityById(_aiBehaviorLiveEntityId);
+        if (serverEntity == null)
+        {
+            status = $"Server entity #{_aiBehaviorLiveEntityId} was not found. Look at the entity again and refresh.";
+            return false;
+        }
+
+        status = "";
+        return true;
+    }
+
+    private bool TryGetSelectedAiBehaviorSourceTask(out JObject? task, out string status)
+    {
+        task = null;
+        if (!TryParseJsonObjectDetailed(_aiBehaviorCurrentText, out JObject? root, out string error) || root == null)
+        {
+            status = $"Selected source JSON is invalid: {error}";
+            return false;
+        }
+
+        if (!TryFindAiTaskBehavior(root, out _, out JArray? tasks, out _, out _) || tasks == null || tasks.Count == 0)
+        {
+            status = "No source task is selected.";
+            return false;
+        }
+
+        int index = Math.Clamp(_aiBehaviorTaskIndex, 0, tasks.Count - 1);
+        if (tasks[index] is not JObject selectedTask)
+        {
+            status = "Selected source task is not a JSON object.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(GetAiBehaviorTaskCode(selectedTask)))
+        {
+            status = "Selected source task has no task code.";
+            return false;
+        }
+
+        task = selectedTask;
+        status = "";
+        return true;
+    }
+
+    private bool TryGetAiBehaviorTaskType(string code, out Type? taskType, out string status)
+    {
+        taskType = null;
+        foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type? registry = assembly.GetType("Vintagestory.GameContent.AiTaskRegistry", throwOnError: false);
+            object? taskTypes = registry?.GetField("TaskTypes", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            if (taskTypes is not IDictionary dictionary) continue;
+
+            foreach (DictionaryEntry entry in dictionary)
+            {
+                string? key = entry.Key?.ToString();
+                if (!string.Equals(key, code, StringComparison.OrdinalIgnoreCase)) continue;
+
+                taskType = entry.Value as Type;
+                if (taskType == null)
+                {
+                    status = $"AiTaskRegistry entry for '{code}' is not a task type.";
+                    return false;
+                }
+
+                status = "";
+                return true;
+            }
+        }
+
+        status = $"AI task code '{code}' was not found in AiTaskRegistry.TaskTypes.";
+        return false;
+    }
+
+    private bool TryCreateAiBehaviorLiveTask(Type taskType, Entity serverEntity, JObject sourceTask, out object? taskObject, out string status)
+    {
+        taskObject = null;
+
+        if (!TryBuildAiBehaviorLiveTaskJson(sourceTask, out JsonObject? taskConfig, out JsonObject? aiConfig, out string jsonStatus) ||
+            taskConfig == null ||
+            aiConfig == null)
+        {
+            status = jsonStatus;
+            return false;
+        }
+
+        string code = GetAiBehaviorTaskCode(sourceTask) ?? taskType.Name;
+        string lastError = "";
+        ConstructorInfo[] constructors = taskType
+            .GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .OrderByDescending(constructor => constructor.GetParameters().Length)
+            .ToArray();
+
+        foreach (ConstructorInfo constructor in constructors)
+        {
+            if (!TryBuildAiBehaviorLiveTaskConstructorArgs(constructor, serverEntity, taskConfig, aiConfig, sourceTask, out object?[] args))
+            {
+                continue;
+            }
+
+            try
+            {
+                taskObject = constructor.Invoke(args);
+                if (!TryRunAiBehaviorLiveTaskAfterInitialize(taskObject, out string initStatus))
+                {
+                    taskObject = null;
+                    status = initStatus;
+                    return false;
+                }
+
+                status = "";
+                return true;
+            }
+            catch (TargetInvocationException exception)
+            {
+                lastError = exception.InnerException?.Message ?? exception.Message;
+            }
+            catch (Exception exception)
+            {
+                lastError = exception.Message;
+            }
+        }
+
+        status = string.IsNullOrWhiteSpace(lastError)
+            ? $"No compatible constructor found for AI task '{code}' ({taskType.FullName})."
+            : $"Could not construct AI task '{code}' ({taskType.FullName}): {lastError}";
+        return false;
+    }
+
+    private bool TryBuildAiBehaviorLiveTaskJson(JObject sourceTask, out JsonObject? taskConfig, out JsonObject? aiConfig, out string status)
+    {
+        taskConfig = null;
+        aiConfig = null;
+
+        try
+        {
+            taskConfig = JsonObject.FromJson(sourceTask.ToString(Formatting.None));
+
+            JObject behaviorClone;
+            if (TryParseJsonObjectDetailed(_aiBehaviorCurrentText, out JObject? root, out _) &&
+                root != null &&
+                TryFindAiTaskBehavior(root, out JObject? behavior, out _, out _, out _) &&
+                behavior != null)
+            {
+                behaviorClone = (JObject)behavior.DeepClone();
+            }
+            else
+            {
+                behaviorClone = new JObject { ["code"] = "taskai" };
+            }
+
+            behaviorClone["aitasks"] = new JArray((JObject)sourceTask.DeepClone());
+            aiConfig = JsonObject.FromJson(behaviorClone.ToString(Formatting.None));
+            status = "";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            status = $"Could not convert selected source task to runtime JsonObject: {exception.Message}";
+            return false;
+        }
+    }
+
+    private bool TryBuildAiBehaviorLiveTaskConstructorArgs(
+        ConstructorInfo constructor,
+        Entity serverEntity,
+        JsonObject taskConfig,
+        JsonObject aiConfig,
+        JObject sourceTask,
+        out object?[] args)
+    {
+        ParameterInfo[] parameters = constructor.GetParameters();
+        args = new object?[parameters.Length];
+        int jsonIndex = 0;
+
+        for (int index = 0; index < parameters.Length; index++)
+        {
+            ParameterInfo parameter = parameters[index];
+            Type parameterType = parameter.ParameterType;
+            string parameterName = parameter.Name ?? "";
+
+            if (parameterType.IsInstanceOfType(serverEntity))
+            {
+                args[index] = serverEntity;
+                continue;
+            }
+
+            if (IsAiBehaviorJsonObjectType(parameterType))
+            {
+                args[index] = SelectAiBehaviorConstructorJsonObject(parameterName, jsonIndex++, taskConfig, aiConfig);
+                continue;
+            }
+
+            ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
+            if (serverApi != null && parameterType.IsInstanceOfType(serverApi))
+            {
+                args[index] = serverApi;
+                continue;
+            }
+
+            if (_api != null && parameterType.IsInstanceOfType(_api))
+            {
+                args[index] = _api;
+                continue;
+            }
+
+            object? world = TryGetMemberValue(serverEntity, "World") ?? _api?.World;
+            if (world != null && parameterType.IsInstanceOfType(world))
+            {
+                args[index] = world;
+                continue;
+            }
+
+            if (parameterType == typeof(string))
+            {
+                args[index] = GetAiBehaviorTaskCode(sourceTask) ?? "";
+                continue;
+            }
+
+            if (parameter.HasDefaultValue)
+            {
+                args[index] = parameter.DefaultValue;
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsAiBehaviorJsonObjectType(Type type)
+    {
+        return type == typeof(JsonObject) ||
+            string.Equals(type.FullName, "Vintagestory.API.Datastructures.JsonObject", StringComparison.Ordinal);
+    }
+
+    private static JsonObject SelectAiBehaviorConstructorJsonObject(string parameterName, int jsonIndex, JsonObject taskConfig, JsonObject aiConfig)
+    {
+        if (parameterName.Contains("ai", StringComparison.OrdinalIgnoreCase) ||
+            parameterName.Contains("attribute", StringComparison.OrdinalIgnoreCase) ||
+            parameterName.Contains("behavior", StringComparison.OrdinalIgnoreCase))
+        {
+            return aiConfig;
+        }
+
+        if (parameterName.Contains("task", StringComparison.OrdinalIgnoreCase))
+        {
+            return taskConfig;
+        }
+
+        return jsonIndex == 0 ? taskConfig : aiConfig;
+    }
+
+    private static bool TryRunAiBehaviorLiveTaskAfterInitialize(object taskObject, out string status)
+    {
+        MethodInfo? method = taskObject.GetType()
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, "AfterInitialize", StringComparison.Ordinal) &&
+                candidate.GetParameters().Length == 0);
+
+        if (method == null)
+        {
+            status = "";
+            return true;
+        }
+
+        try
+        {
+            method.Invoke(taskObject, null);
+            status = "";
+            return true;
+        }
+        catch (TargetInvocationException exception)
+        {
+            status = $"AI task initialization failed: {exception.InnerException?.Message ?? exception.Message}";
+            return false;
+        }
+        catch (Exception exception)
+        {
+            status = $"AI task initialization failed: {exception.Message}";
+            return false;
+        }
     }
 
     private static bool TryInvokeAiBehaviorTaskManagerMethod(object taskManager, string methodName, AiBehaviorLiveTaskInfo task, out string status)
@@ -3162,6 +3609,13 @@ public sealed partial class DebugWindowManager
         object? OriginalValue);
 
     private sealed record AiBehaviorLiveRemovedTaskSnapshot(
+        long EntityId,
+        int TaskRuntimeId,
+        WeakReference<object> TaskManager,
+        object TaskObject,
+        string Code);
+
+    private sealed record AiBehaviorLiveAddedTaskSnapshot(
         long EntityId,
         int TaskRuntimeId,
         WeakReference<object> TaskManager,
