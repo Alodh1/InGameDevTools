@@ -624,6 +624,7 @@ public sealed partial class DebugWindowManager : IDisposable
         LootDrops,
         Worldgen,
         Patches,
+        EntityAi,
         Settings
     }
 
@@ -858,6 +859,13 @@ public sealed partial class DebugWindowManager : IDisposable
                     PatchCreatorTab(deltaSeconds, _showEditorDiagnostics);
                     ImGui.EndTabItem();
                 }
+                bool entityAiTabOpen = true;
+                if (ImGui.BeginTabItem("Entity AI##tab", ref entityAiTabOpen))
+                {
+                    _activeDevToolsTab = DevToolsTab.EntityAi;
+                    AiBehaviorEditorTab(deltaSeconds, _showEditorDiagnostics);
+                    ImGui.EndTabItem();
+                }
                 bool settingsTabOpen = true;
                 if (ImGui.BeginTabItem("Settings##tab", ref settingsTabOpen))
                 {
@@ -1026,6 +1034,9 @@ public sealed partial class DebugWindowManager : IDisposable
             case DevToolsTab.Patches:
                 ApplyPatchCreatorRuntime(force);
                 break;
+            case DevToolsTab.EntityAi:
+                _liveApplyManager.LastStatus = "Entity AI source edits save authored files; live AI tuning is not enabled yet.";
+                break;
             case DevToolsTab.Settings:
                 _liveApplyManager.LastStatus = "Settings apply directly to the editor UI.";
                 break;
@@ -1042,6 +1053,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ClearLootDropLiveApplyState();
         ClearWorldgenLiveApplyState();
         ClearPatchCreatorLiveApplyState();
+        ClearAiBehaviorLiveApplyState();
     }
 
     private void ResetDevToolsLayout()
@@ -1058,6 +1070,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ResetLootDropLayout();
         ResetWorldgenLayout();
         ResetPatchCreatorLayout();
+        ResetAiBehaviorLayout();
     }
 
     private void CollidersTab()
