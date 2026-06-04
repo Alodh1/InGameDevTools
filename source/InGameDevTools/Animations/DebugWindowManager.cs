@@ -57,6 +57,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
     public void Dispose()
     {
+        ClearLiveApplyState();
         RestoreWorldgenPreviewForEditorTeardown("devtools disposed");
         DisposeWorldgenPreviewRasterTexture();
         FlushDevToolsConfigSave(force: true);
@@ -765,6 +766,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGuiWindowFlags windowFlags = ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings;
         if (_devToolsCollapsed)
         {
+            ClearAiBehaviorLiveApplyState();
             RestoreWorldgenPreviewForEditorTeardown("devtools collapsed");
             DrawCollapsedDevToolsWindow(displaySize, windowFlags);
             _detachedEditorCamera?.Update(deltaSeconds, editorOpen: false);
@@ -878,6 +880,10 @@ public sealed partial class DebugWindowManager : IDisposable
             if (_activeDevToolsTab != DevToolsTab.Worldgen)
             {
                 RestoreWorldgenPreviewForEditorTeardown("left Worldgen tab");
+            }
+            if (_activeDevToolsTab != DevToolsTab.EntityAi)
+            {
+                ClearAiBehaviorLiveApplyState();
             }
             ImGui.SetWindowFontScale(1f);
             DrawSourceSavePopup();

@@ -1387,6 +1387,7 @@ public sealed partial class DebugWindowManager
             _liveApplyManager.RevertAll();
         }
 
+        ClearAiBehaviorLiveApplyState();
         SetEditorFrameOverride(null);
         _detachedEditorCamera?.SetEnabled(false);
         _rigPoseEditorEnabled = false;
