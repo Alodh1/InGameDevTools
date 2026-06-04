@@ -584,6 +584,7 @@ public sealed partial class DebugWindowManager : IDisposable
     private SourceAssetIndex? _sourceAssetIndex;
     private bool _fovReflectionWarningLogged;
     private bool _showEditorDiagnostics;
+    private readonly DevToolsEditorDiagnostics _devToolsDiagnostics = new("Dev tools");
     private readonly DevToolsEditorDiagnostics _animationDiagnostics = new("Animations");
     private readonly DevToolsEditorDiagnostics _transformDiagnostics = new("Transforms");
 
@@ -786,77 +787,77 @@ public sealed partial class DebugWindowManager : IDisposable
                 {
                     _activeDevToolsTab = DevToolsTab.Animations;
                     _selectVanillaAnimationsTabOnNextDraw = false;
-                    VanillaAnimationsTab(deltaSeconds);
+                    DrawGuardedEditorTab("Animations", _animationDiagnostics, () => VanillaAnimationsTab(deltaSeconds));
                     ImGui.EndTabItem();
                 }
                 bool recipeTabOpen = true;
                 if (ImGui.BeginTabItem("Recipe Editor##tab", ref recipeTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.RecipeEditor;
-                    RecipeEditorTab(deltaSeconds, _showEditorDiagnostics);
+                    DrawGuardedEditorTab("Recipe Editor", _recipeEditor.Diagnostics, () => RecipeEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool particlesTabOpen = true;
                 if (ImGui.BeginTabItem("Particles##tab", ref particlesTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.Particles;
-                    _particleEffectsManager.DrawEditor("devtools-particles", deltaSeconds, _devToolsUiScale, _liveApplyManager, _showEditorDiagnostics);
+                    DrawGuardedEditorTab("Particles", _devToolsDiagnostics, () => _particleEffectsManager.DrawEditor("devtools-particles", deltaSeconds, _devToolsUiScale, _liveApplyManager, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool transformsTabOpen = true;
                 if (ImGui.BeginTabItem("Transforms##tab", ref transformsTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.Transforms;
-                    TransformsEditorTab(deltaSeconds);
+                    DrawGuardedEditorTab("Transforms", _transformDiagnostics, () => TransformsEditorTab(deltaSeconds));
                     ImGui.EndTabItem();
                 }
                 bool configLibTabOpen = true;
                 if (ImGui.BeginTabItem("ConfigLib##tab", ref configLibTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.ConfigLib;
-                    ConfigLibGeneratorTab(deltaSeconds, _showEditorDiagnostics);
+                    DrawGuardedEditorTab("ConfigLib", _configLibDiagnostics, () => ConfigLibGeneratorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool blockItemJsonTabOpen = true;
                 if (BlockItemJsonEditorVisible && ImGui.BeginTabItem("Block/Item JSON##tab", ref blockItemJsonTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.BlockItemJson;
-                    BlockItemJsonEditorTab(deltaSeconds, _showEditorDiagnostics);
+                    DrawGuardedEditorTab("Block/Item JSON", _blockItemJsonDiagnostics, () => BlockItemJsonEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool lootDropsTabOpen = true;
                 if (ImGui.BeginTabItem("Loot/Drops##tab", ref lootDropsTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.LootDrops;
-                    LootDropEditorTab(deltaSeconds, _showEditorDiagnostics);
+                    DrawGuardedEditorTab("Loot/Drops", _lootDropDiagnostics, () => LootDropEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool worldgenTabOpen = true;
                 if (ImGui.BeginTabItem("Worldgen##tab", ref worldgenTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.Worldgen;
-                    WorldgenEditorTab(deltaSeconds, _showEditorDiagnostics);
+                    DrawGuardedEditorTab("Worldgen", _worldgenDiagnostics, () => WorldgenEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool patchesTabOpen = true;
                 if (ImGui.BeginTabItem("Patches##tab", ref patchesTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.Patches;
-                    PatchCreatorTab(deltaSeconds, _showEditorDiagnostics);
+                    DrawGuardedEditorTab("Patches", _patchCreatorDiagnostics, () => PatchCreatorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool entityAiTabOpen = true;
                 if (ImGui.BeginTabItem("Entity AI##tab", ref entityAiTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.EntityAi;
-                    AiBehaviorEditorTab(deltaSeconds, _showEditorDiagnostics);
+                    DrawGuardedEditorTab("Entity AI", _aiBehaviorDiagnostics, () => AiBehaviorEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool settingsTabOpen = true;
                 if (ImGui.BeginTabItem("Settings##tab", ref settingsTabOpen))
                 {
                     _activeDevToolsTab = DevToolsTab.Settings;
-                    SettingsTab(deltaSeconds);
+                    DrawGuardedEditorTab("Settings", _devToolsDiagnostics, () => SettingsTab(deltaSeconds));
                     ImGui.EndTabItem();
                 }
                 ImGui.EndTabBar();
@@ -884,6 +885,22 @@ public sealed partial class DebugWindowManager : IDisposable
         FlushDevToolsConfigSave(force: false);
 
         return _showAnimationEditor ? CallbackGUIStatus.GrabMouse : CallbackGUIStatus.Closed;
+    }
+
+    private void DrawGuardedEditorTab(string editorName, DevToolsEditorDiagnostics diagnostics, Action draw)
+    {
+        try
+        {
+            draw();
+        }
+        catch (Exception exception)
+        {
+            _api.Logger.Error("[InGameDevTools] {0} tab draw failed: {1}", editorName, exception);
+            diagnostics.Exception($"{editorName} tab draw failed", exception);
+            ImGui.TextColored(new NVector4(1f, 0.42f, 0.34f, 1f), $"{editorName} hit an error.");
+            ImGui.TextWrapped("The editor caught the error so the devtools window can stay open.");
+            diagnostics.Draw($"{editorName.ToLowerInvariant().Replace(' ', '-')}-tab-guard", _showEditorDiagnostics);
+        }
     }
 
     private void DrawDevToolsToolbar()
