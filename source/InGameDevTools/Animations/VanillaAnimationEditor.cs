@@ -6782,17 +6782,22 @@ public sealed partial class DebugWindowManager
                     NormalizePlayerModelShapeTextures(modelShape, shapeLocation.Domain);
 
                     Shape? scoreShape = modelShape;
+                    IReadOnlyList<string> matchElements = config.KeyElements;
                     if (!string.IsNullOrWhiteSpace(config.BaseShapeCode) &&
                         configs.TryGetValue(NormalizeModelCode(config.BaseShapeCode, config.ConfigLocation.Domain), out VanillaPlayerModelConfig? baseConfig))
                     {
                         AssetLocation? baseShapeLocation = ResolveShapeLocation(api, baseConfig.ShapePath, baseConfig.ConfigLocation.Domain);
                         Shape? baseShape = TryLoadShape(api.Assets.TryGet(baseShapeLocation, true));
                         scoreShape = baseShape ?? scoreShape;
+                        if (baseConfig.KeyElements.Count > 0)
+                        {
+                            matchElements = baseConfig.KeyElements;
+                        }
                     }
 
                     JObject? shapeSourceJson = TryLoadJson(api, shapeLocation);
                     bool hasOwnAnimations = modelShape.Animations is { Length: > 0 };
-                    bool hasBorrowedSource = TryFindBestAnimationSource(animationCandidates, scoreShape, out EntityProperties? animationEntity, out Shape? animationShape, out int matchedElements) &&
+                    bool hasBorrowedSource = TryFindBestAnimationSource(api, animationCandidates, scoreShape, matchElements, out EntityProperties? animationEntity, out Shape? animationShape, out int matchedElements) &&
                         animationEntity != null &&
                         animationShape?.Animations is { Length: > 0 };
                     if (!hasOwnAnimations && !hasBorrowedSource)
@@ -6892,6 +6897,7 @@ public sealed partial class DebugWindowManager
                             source,
                             shapePath,
                             entry["BaseShapeCode"]?.ToString(),
+                            CollectPlayerModelKeyElements(entry),
                             enabled);
                     }
                 }
@@ -6900,19 +6906,24 @@ public sealed partial class DebugWindowManager
             }
 
             private static bool TryFindBestAnimationSource(
+                ICoreClientAPI api,
                 IReadOnlyList<EntityProperties> candidates,
                 Shape modelShape,
+                IReadOnlyList<string> keyElements,
                 out EntityProperties? entityType,
                 out Shape? animationShape,
                 out int matchedElements)
             {
-                HashSet<string> modelElements = CollectShapeElementNames(modelShape);
+                HashSet<string> modelElements = keyElements.Count > 0
+                    ? keyElements.Where(element => !string.IsNullOrWhiteSpace(element)).ToHashSet(StringComparer.OrdinalIgnoreCase)
+                    : CollectShapeElementNames(modelShape);
+                EntityProperties? localPlayerType = api.World?.Player?.Entity?.Properties;
                 entityType = null;
                 animationShape = null;
                 matchedElements = 0;
                 if (modelElements.Count == 0) return false;
 
-                foreach (EntityProperties candidate in candidates)
+                foreach (EntityProperties candidate in candidates.OrderBy(candidate => candidate.Code?.ToString() ?? "", StringComparer.OrdinalIgnoreCase))
                 {
                     Shape? candidateShape = candidate.Client?.LoadedShapeForEntity ?? candidate.Client?.LoadedShape;
                     VanillaAnimation[] animations = candidateShape?.Animations ?? [];
@@ -6920,7 +6931,8 @@ public sealed partial class DebugWindowManager
 
                     HashSet<string> animationElements = CollectAnimationElementNames(animations);
                     int score = animationElements.Count(modelElements.Contains);
-                    if (score <= matchedElements) continue;
+                    if (score < matchedElements) continue;
+                    if (score == matchedElements && !ShouldPreferAnimationCandidate(candidate, entityType, localPlayerType)) continue;
 
                     matchedElements = score;
                     entityType = candidate;
@@ -6928,6 +6940,24 @@ public sealed partial class DebugWindowManager
                 }
 
                 return matchedElements > 0;
+            }
+
+            private static bool ShouldPreferAnimationCandidate(EntityProperties candidate, EntityProperties? current, EntityProperties? localPlayerType)
+            {
+                if (current == null) return true;
+
+                bool candidateIsLocal = IsSameEntityType(candidate, localPlayerType);
+                bool currentIsLocal = IsSameEntityType(current, localPlayerType);
+                if (candidateIsLocal != currentIsLocal) return candidateIsLocal;
+
+                return string.Compare(candidate.Code?.ToString() ?? "", current.Code?.ToString() ?? "", StringComparison.OrdinalIgnoreCase) < 0;
+            }
+
+            private static bool IsSameEntityType(EntityProperties? left, EntityProperties? right)
+            {
+                if (left == null || right == null) return false;
+                return ReferenceEquals(left, right) ||
+                    string.Equals(left.Code?.ToString(), right.Code?.ToString(), StringComparison.OrdinalIgnoreCase);
             }
 
             private static EntityProperties ResolvePlayerModelRuntimeEntity(ICoreClientAPI api, IReadOnlyList<EntityProperties> candidates)
@@ -7058,6 +7088,16 @@ public sealed partial class DebugWindowManager
                     .ToArray();
             }
 
+            private static IReadOnlyList<string> CollectPlayerModelKeyElements(JObject entry)
+            {
+                if (entry["KeyElements"] is not JArray keyElements) return [];
+                return keyElements
+                    .Select(token => token.Type == JTokenType.String ? token.ToString() : "")
+                    .Where(element => !string.IsNullOrWhiteSpace(element))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+
             private static string NormalizeModelCode(string code, string defaultDomain)
             {
                 AssetLocation location = AssetLocation.Create(code, string.IsNullOrWhiteSpace(defaultDomain) ? "game" : defaultDomain);
@@ -7071,6 +7111,7 @@ public sealed partial class DebugWindowManager
                 JObject SourceJson,
                 string ShapePath,
                 string? BaseShapeCode,
+                IReadOnlyList<string> KeyElements,
                 bool Enabled)
             {
                 public string FullCode => Code;
