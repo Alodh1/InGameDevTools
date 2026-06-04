@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Reflection;
 using ImGuiNET;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -44,7 +45,7 @@ public sealed partial class DebugWindowManager
         {
             if (document.PlayerModelSource?.UsesOwnAnimations == true)
             {
-                ImGui.TextWrapped("Runtime apply for PlayerModelLib own-animation shapes needs a live player-model adapter. Export saves the correct model shape; borrowed fallback models can still apply to their source animation entity.");
+                ImGui.TextWrapped("No loaded player currently uses this PlayerModelLib model. Export still saves the correct model shape.");
             }
             return;
         }
@@ -155,12 +156,13 @@ public sealed partial class DebugWindowManager
             : $"vanilla:metadata:{document.HistoryKey}";
     }
 
-    private static bool IsVanillaLiveTargetAvailable(VanillaAnimationDocument document)
+    private bool IsVanillaLiveTargetAvailable(VanillaAnimationDocument document)
     {
-        if (document.PlayerModelSource?.UsesOwnAnimations == true &&
-            document.RuntimeTargetEntities.Count == 0)
+        if (document.PlayerModelSource?.UsesOwnAnimations == true)
         {
-            return false;
+            return document.Shape != null &&
+                document.ShapeAnimations.Count > 0 &&
+                GetPlayerModelRuntimeTargets(document).Any();
         }
 
         return document.Kind switch
@@ -181,6 +183,11 @@ public sealed partial class DebugWindowManager
     private DebugWindowManager.LivePatchSnapshot CaptureVanillaShapeLiveSnapshot(VanillaAnimationDocument document)
     {
         Shape[] targets = GetVanillaRuntimeShapes(document).ToArray();
+        if (targets.Length == 0 && document.PlayerModelSource?.UsesOwnAnimations == true)
+        {
+            throw new InvalidOperationException("No loaded player currently uses this PlayerModelLib model.");
+        }
+
         List<VanillaShapeRuntimeSnapshot> snapshots = targets
             .Select(shape => new VanillaShapeRuntimeSnapshot(shape, CloneVanillaAnimationArray(shape.Animations)))
             .ToList();
@@ -248,6 +255,12 @@ public sealed partial class DebugWindowManager
         if (document.Kind == VanillaDocumentKind.Shape)
         {
             VanillaAnimation[] edited = document.ShapeAnimations.Select(entry => CloneVanillaAnimation(entry.Animation)).ToArray();
+            if (document.PlayerModelSource?.UsesOwnAnimations == true)
+            {
+                ApplyVanillaLivePlayerModelDocument(document, edited);
+                return;
+            }
+
             Dictionary<Shape, Shape> editedShapeCache = new(ReferenceEqualityComparer.Instance);
             bool shapeApplied = false;
             foreach (EntityClientProperties client in GetVanillaRuntimeEntityClients(document))
@@ -278,11 +291,30 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void ApplyVanillaLivePlayerModelDocument(VanillaAnimationDocument document, VanillaAnimation[] edited)
+    {
+        VanillaPlayerModelRuntimeTarget[] targets = GetPlayerModelRuntimeTargets(document).ToArray();
+        if (targets.Length == 0)
+        {
+            throw new InvalidOperationException("No loaded player currently uses this PlayerModelLib model.");
+        }
+
+        HashSet<Shape> appliedShapes = [];
+        foreach (VanillaPlayerModelRuntimeTarget target in targets)
+        {
+            if (!appliedShapes.Add(target.Shape)) continue;
+            ApplyVanillaAnimationsToPlayerModelShape(target.Shape, edited, document.PlayerModelSource?.OwnAnimationCodes ?? []);
+            PrepareRuntimeShapeAnimations(target.Shape, document.DisplayPath);
+        }
+    }
+
     private string BuildVanillaAppliedStatus(VanillaAnimationDocument document)
     {
         VanillaRuntimeRefreshResult refresh = RefreshLoadedEntityAnimators(document);
 
-        int targetCount = GetVanillaRuntimeEntityTargets(document).Count();
+        int targetCount = document.PlayerModelSource?.UsesOwnAnimations == true
+            ? GetPlayerModelRuntimeTargets(document).Count()
+            : GetVanillaRuntimeEntityTargets(document).Count();
         string baseStatus = targetCount > 1
             ? $"Live applied {document.DisplayPath} to {targetCount} compatible group target(s){(document.RuntimeSkippedMembers > 0 ? $"; skipped {document.RuntimeSkippedMembers}" : "")}."
             : $"Live applied {document.DisplayPath}.";
@@ -297,6 +329,18 @@ public sealed partial class DebugWindowManager
     private IEnumerable<Shape> GetVanillaRuntimeShapes(VanillaAnimationDocument document)
     {
         HashSet<Shape> seen = [];
+        if (document.PlayerModelSource?.UsesOwnAnimations == true)
+        {
+            foreach (VanillaPlayerModelRuntimeTarget target in GetPlayerModelRuntimeTargets(document))
+            {
+                if (seen.Add(target.Shape))
+                {
+                    yield return target.Shape;
+                }
+            }
+            yield break;
+        }
+
         foreach (Shape? shape in new[]
         {
             document.Shape
@@ -420,6 +464,55 @@ public sealed partial class DebugWindowManager
         PrepareRuntimeShapeAnimationLookups(target);
     }
 
+    private static void ApplyVanillaAnimationsToPlayerModelShape(Shape target, VanillaAnimation[] edited, IReadOnlyList<string> ownAnimationCodes)
+    {
+        Dictionary<string, VanillaAnimation> editedByCode = edited
+            .Select(animation => new { Code = animation.Code ?? animation.Name ?? "", Animation = animation })
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.Code))
+            .GroupBy(entry => entry.Code, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => CloneVanillaAnimation(group.Last().Animation), StringComparer.OrdinalIgnoreCase);
+        HashSet<string> ownCodes = new(ownAnimationCodes.Where(code => !string.IsNullOrWhiteSpace(code)), StringComparer.OrdinalIgnoreCase);
+        if (ownCodes.Count == 0)
+        {
+            target.Animations = CloneVanillaAnimationArray(edited);
+            PrepareRuntimeShapeAnimationLookups(target);
+            return;
+        }
+
+        List<VanillaAnimation> merged = [];
+        HashSet<string> writtenCodes = new(StringComparer.OrdinalIgnoreCase);
+        foreach (VanillaAnimation existing in target.Animations ?? [])
+        {
+            string code = existing.Code ?? existing.Name ?? "";
+            if (ownCodes.Contains(code))
+            {
+                if (editedByCode.TryGetValue(code, out VanillaAnimation? replacement))
+                {
+                    merged.Add(CloneVanillaAnimation(replacement));
+                    writtenCodes.Add(code);
+                }
+                continue;
+            }
+
+            merged.Add(CloneVanillaAnimation(existing));
+            if (!string.IsNullOrWhiteSpace(code))
+            {
+                writtenCodes.Add(code);
+            }
+        }
+
+        foreach ((string code, VanillaAnimation animation) in editedByCode.OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            if (writtenCodes.Add(code))
+            {
+                merged.Add(CloneVanillaAnimation(animation));
+            }
+        }
+
+        target.Animations = merged.ToArray();
+        PrepareRuntimeShapeAnimationLookups(target);
+    }
+
     private bool ApplyVanillaAnimationsToRuntimeClientShapes(EntityClientProperties client, VanillaAnimation[] edited, string label, Dictionary<Shape, Shape> editedShapeCache)
     {
         bool applied = false;
@@ -504,6 +597,11 @@ public sealed partial class DebugWindowManager
 
     private VanillaRuntimeRefreshResult RefreshLoadedEntityAnimators(VanillaAnimationDocument document)
     {
+        if (document.PlayerModelSource?.UsesOwnAnimations == true)
+        {
+            return RefreshLoadedPlayerModelAnimators(document);
+        }
+
         VanillaRuntimeRefreshResult total = new();
         foreach (EntityProperties entityType in GetVanillaRuntimeEntityTargets(document))
         {
@@ -511,6 +609,40 @@ public sealed partial class DebugWindowManager
         }
 
         return total;
+    }
+
+    private VanillaRuntimeRefreshResult RefreshLoadedPlayerModelAnimators(VanillaAnimationDocument document)
+    {
+        VanillaRuntimeRefreshResult result = new();
+        foreach (VanillaPlayerModelRuntimeTarget target in GetPlayerModelRuntimeTargets(document))
+        {
+            result.Matched++;
+            try
+            {
+                ClearRuntimeAnimationCache(target.Entity);
+                if (target.Entity.AnimManager != null)
+                {
+                    target.Entity.AnimManager.AnimationsDirty = true;
+                }
+
+                target.Entity.MarkShapeModified();
+                if (target.Entity.Properties?.Client?.Renderer is EntityShapeRenderer renderer)
+                {
+                    renderer.TesselateShape();
+                    result.Refreshed++;
+                }
+                else
+                {
+                    result.Failures.Add($"{target.Entity.Code}: renderer is not an entity shape renderer");
+                }
+            }
+            catch (Exception exception)
+            {
+                result.Failures.Add($"{target.Entity.Code}: {exception.Message}");
+            }
+        }
+
+        return result;
     }
 
     private VanillaRuntimeRefreshResult RefreshLoadedEntityAnimators(EntityProperties? entityType, string label)
@@ -571,6 +703,68 @@ public sealed partial class DebugWindowManager
                 yield return entity;
             }
         }
+    }
+
+    private IEnumerable<VanillaPlayerModelRuntimeTarget> GetPlayerModelRuntimeTargets(VanillaAnimationDocument document)
+    {
+        VanillaPlayerModelSource? playerModel = document.PlayerModelSource;
+        if (playerModel?.UsesOwnAnimations != true || _api.World is not IClientWorldAccessor clientWorld) yield break;
+
+        HashSet<long> seenEntities = [];
+        foreach (Entity entity in clientWorld.LoadedEntities.Values)
+        {
+            if (!seenEntities.Add(entity.EntityId)) continue;
+            EntityBehavior? behavior = entity.GetBehavior("skinnableplayercustommodel");
+            if (behavior == null) continue;
+            if (!TryGetPlayerModelCurrentCode(behavior, out string currentCode) ||
+                !MatchesPlayerModelCode(playerModel, currentCode))
+            {
+                continue;
+            }
+
+            if (TryGetPlayerModelShape(behavior, out Shape? shape) && shape != null)
+            {
+                yield return new VanillaPlayerModelRuntimeTarget(entity, behavior, shape);
+            }
+        }
+    }
+
+    private static bool TryGetPlayerModelCurrentCode(EntityBehavior behavior, out string code)
+    {
+        code = "";
+        object? value = behavior.GetType().GetProperty("CurrentModelCode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(behavior);
+        if (value is not string current || string.IsNullOrWhiteSpace(current))
+        {
+            return false;
+        }
+
+        code = current;
+        return true;
+    }
+
+    private static bool TryGetPlayerModelShape(EntityBehavior behavior, out Shape? shape)
+    {
+        shape = null;
+        object? model = behavior.GetType().GetProperty("CurrentModel", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(behavior);
+        if (model == null) return false;
+
+        object? value = model.GetType().GetProperty("Shape", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(model);
+        shape = value as Shape;
+        return shape != null;
+    }
+
+    private static bool MatchesPlayerModelCode(VanillaPlayerModelSource playerModel, string runtimeCode)
+    {
+        if (string.IsNullOrWhiteSpace(runtimeCode)) return false;
+        if (string.Equals(runtimeCode, playerModel.Code, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(runtimeCode, playerModel.FullCode, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        int separator = playerModel.FullCode.IndexOf(':');
+        string pathOnly = separator >= 0 ? playerModel.FullCode[(separator + 1)..] : playerModel.FullCode;
+        return string.Equals(runtimeCode, pathOnly, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryResolveRuntimeEntityShape(Entity entity, EntityProperties entityType, out Shape? shape, out string failureReason)
@@ -672,6 +866,7 @@ public sealed partial class DebugWindowManager
     private sealed record VanillaEntityClientShapeSnapshot(EntityClientProperties Client, Shape? LoadedShape, Shape? LoadedShapeForEntity, Shape[]? LoadedAlternateShapes);
     private sealed record VanillaMetadataRuntimeSnapshot(EntityProperties EntityType, EntityClientProperties Client, AnimationMetaData[] Animations);
     private sealed record VanillaMetadataRuntimeTarget(EntityProperties EntityType, EntityClientProperties Client);
+    private sealed record VanillaPlayerModelRuntimeTarget(Entity Entity, EntityBehavior Behavior, Shape Shape);
 
     private sealed class VanillaRuntimeRefreshResult
     {

@@ -6361,7 +6361,8 @@ public sealed partial class DebugWindowManager
         EntityProperties AnimationEntityType,
         string AnimationSourceCode,
         int MatchedElementCount,
-        VanillaPlayerModelAnimationMode AnimationMode)
+        VanillaPlayerModelAnimationMode AnimationMode,
+        IReadOnlyList<string> OwnAnimationCodes)
     {
         public string Domain => ConfigLocation.Domain;
         public string FullCode => Code.Contains(':', StringComparison.Ordinal) ? Code : $"{Domain}:{Code}";
@@ -6843,7 +6844,8 @@ public sealed partial class DebugWindowManager
                         runtimeEntityType,
                         animationSourceCode,
                         hasBorrowedSource ? matchedElements : 0,
-                        animationMode));
+                        animationMode,
+                        hasOwnAnimations ? CollectAnimationCodes(modelShape.Animations) : []));
                 }
 
                 return result;
@@ -7030,6 +7032,15 @@ public sealed partial class DebugWindowManager
                 }
 
                 return names;
+            }
+
+            private static string[] CollectAnimationCodes(IEnumerable<VanillaAnimation>? animations)
+            {
+                return (animations ?? [])
+                    .Select(animation => animation.Code ?? animation.Name ?? "")
+                    .Where(code => !string.IsNullOrWhiteSpace(code))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
             }
 
             private static string NormalizeModelCode(string code, string defaultDomain)
