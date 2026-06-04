@@ -85,6 +85,10 @@ public sealed partial class DebugWindowManager
     private readonly Dictionary<string, WorldgenDraftState> _worldgenDraftStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ImGuiThreePanelLayoutState _worldgenLayout = new(0.26f, 0.30f);
     private readonly DevToolsEditorDiagnostics _worldgenDiagnostics = new("Worldgen");
+    private float _worldgenPreviewBottomFraction = 0.42f;
+    private bool _worldgenPreviewPoppedOut;
+    private float _worldgenPoppedViewportWidth = 1100f;
+    private float _worldgenPoppedViewportHeight = 760f;
     private WorldgenIndexState _worldgenIndexState;
     private int _worldgenIndexAssetIndex;
     private bool _worldgenIndexIncludedServerAssets;
@@ -162,6 +166,14 @@ public sealed partial class DebugWindowManager
             NVector2 available = ImGui.GetContentRegionAvail();
             float scale = Math.Max(0.75f, _devToolsUiScale);
             float splitterThickness = Math.Max(5f, 6f * scale);
+            float topBottomAvailableHeight = Math.Max(1f, available.Y - splitterThickness);
+            float previewMin = Math.Min(topBottomAvailableHeight * 0.55f, 260f * scale);
+            float editorMin = Math.Min(topBottomAvailableHeight - previewMin, 260f * scale);
+            float previewMax = Math.Max(previewMin, topBottomAvailableHeight - editorMin);
+            float previewHeight = Math.Clamp(topBottomAvailableHeight * _worldgenPreviewBottomFraction, previewMin, previewMax);
+            float topHeight = Math.Max(editorMin, topBottomAvailableHeight - previewHeight);
+            _worldgenPreviewBottomFraction = Math.Clamp(previewHeight / topBottomAvailableHeight, 0.12f, 0.9f);
+
             ImGuiLayoutHelper.CalculateThreePanelWidths(
                 available.X,
                 splitterThickness,
@@ -176,15 +188,19 @@ public sealed partial class DebugWindowManager
                 out float centerWidth,
                 out float rightWidth);
 
-            DrawWorldgenBrowser(new NVector2(leftWidth, available.Y));
+            DrawWorldgenBrowser(new NVector2(leftWidth, topHeight));
             ImGui.SameLine(0, 0);
-            ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _worldgenLayout.LeftFraction, 260f * scale, Math.Max(260f * scale, panelAvailableWidth - rightWidth - 520f * scale));
+            ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-left-splitter", topHeight, splitterThickness, panelAvailableWidth, ref _worldgenLayout.LeftFraction, 260f * scale, Math.Max(260f * scale, panelAvailableWidth - rightWidth - 520f * scale));
             ImGui.SameLine(0, 0);
-            DrawWorldgenEditorPanel(new NVector2(centerWidth, available.Y));
+            DrawWorldgenEditorPanel(new NVector2(centerWidth, topHeight));
             ImGui.SameLine(0, 0);
-            ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _worldgenLayout.RightFraction, 340f * scale, Math.Max(340f * scale, panelAvailableWidth - leftWidth - 520f * scale), invertDrag: true);
+            ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-right-splitter", topHeight, splitterThickness, panelAvailableWidth, ref _worldgenLayout.RightFraction, 340f * scale, Math.Max(340f * scale, panelAvailableWidth - leftWidth - 520f * scale), invertDrag: true);
             ImGui.SameLine(0, 0);
-            DrawWorldgenInspector(new NVector2(rightWidth, available.Y), showDiagnostics);
+            DrawWorldgenInspector(new NVector2(rightWidth, topHeight), showDiagnostics);
+
+            ImGuiLayoutHelper.DrawHorizontalSplitter("##worldgen-preview-splitter", available.X, splitterThickness, topBottomAvailableHeight, ref _worldgenPreviewBottomFraction, previewMin, previewMax);
+            DrawWorldgenPreviewPanel(new NVector2(available.X, previewHeight));
+            DrawWorldgenPoppedOutViewport();
         }
         catch (Exception exception)
         {
@@ -200,6 +216,7 @@ public sealed partial class DebugWindowManager
     private void ResetWorldgenLayout()
     {
         _worldgenLayout.Reset();
+        _worldgenPreviewBottomFraction = 0.42f;
     }
 
     private void ApplyWorldgenRuntime(bool force = false)
@@ -779,9 +796,6 @@ public sealed partial class DebugWindowManager
     private void DrawWorldgenInspector(NVector2 size, bool showDiagnostics)
     {
         ImGui.BeginChild("##worldgen-inspector", size, true);
-        DrawWorldgenPreviewViewport();
-        ImGui.Separator();
-
         WorldgenAssetEntry? entry = SelectedWorldgenEntry;
         if (entry == null)
         {
@@ -831,6 +845,99 @@ public sealed partial class DebugWindowManager
         ImGui.Separator();
         _worldgenDiagnostics.Draw("worldgen-inspector-diagnostics", showDiagnostics);
         ImGui.EndChild();
+    }
+
+    private void DrawWorldgenPreviewPanel(NVector2 size)
+    {
+        ImGui.BeginChild("##worldgen-preview-panel", size, true);
+        if (_worldgenPreviewPoppedOut)
+        {
+            ImGui.TextWrapped("Worldgen preview is popped out into a separate resizable window.");
+            if (ImGui.Button("Return viewport here##worldgen-preview-pop-in", new NVector2(-1, 0)))
+            {
+                _worldgenPreviewPoppedOut = false;
+            }
+
+            ImGui.TextWrapped(GetWorldgenPreviewAutoModeStatus());
+            ImGui.EndChild();
+            return;
+        }
+
+        DrawWorldgenPreviewViewport();
+        ImGui.EndChild();
+    }
+
+    private void DrawWorldgenPoppedOutViewport()
+    {
+        if (!_worldgenPreviewPoppedOut) return;
+
+        bool open = true;
+        NVector2 displaySize = GetVanillaImGuiDisplaySize();
+        _worldgenPoppedViewportWidth = Math.Clamp(_worldgenPoppedViewportWidth, 520f, Math.Max(520f, displaySize.X - 24f));
+        _worldgenPoppedViewportHeight = Math.Clamp(_worldgenPoppedViewportHeight, 360f, Math.Max(360f, displaySize.Y - 36f));
+        ImGui.SetNextWindowSize(new NVector2(_worldgenPoppedViewportWidth, _worldgenPoppedViewportHeight), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSizeConstraints(new NVector2(520f, 360f), new NVector2(Math.Max(520f, displaySize.X), Math.Max(360f, displaySize.Y)));
+
+        if (ImGui.Begin("Worldgen viewport##worldgen-popped-viewport", ref open, ImGuiWindowFlags.NoSavedSettings))
+        {
+            ImGui.SetWindowFontScale(_devToolsUiScale);
+            if (ImGui.Button("Dock back##worldgen-popout-dock-back"))
+            {
+                _worldgenPreviewPoppedOut = false;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Fill##worldgen-popout-place-fill"))
+            {
+                SetWorldgenPoppedViewportRect(10f, 44f, displaySize.X - 20f, displaySize.Y - 54f);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Center##worldgen-popout-place-center"))
+            {
+                float width = Math.Min(_worldgenPoppedViewportWidth, displaySize.X - 20f);
+                float height = Math.Min(_worldgenPoppedViewportHeight, displaySize.Y - 54f);
+                SetWorldgenPoppedViewportRect((displaySize.X - width) * 0.5f, (displaySize.Y - height) * 0.5f, width, height);
+            }
+
+            float requestedWidth = _worldgenPoppedViewportWidth;
+            float requestedHeight = _worldgenPoppedViewportHeight;
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(100);
+            bool resize = ImGui.InputFloat("W##worldgen-popout-width", ref requestedWidth, 0, 0, "%.0f");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(100);
+            resize |= ImGui.InputFloat("H##worldgen-popout-height", ref requestedHeight, 0, 0, "%.0f");
+            if (resize)
+            {
+                _worldgenPoppedViewportWidth = Math.Clamp(requestedWidth, 520f, Math.Max(520f, displaySize.X));
+                _worldgenPoppedViewportHeight = Math.Clamp(requestedHeight, 360f, Math.Max(360f, displaySize.Y));
+                ImGui.SetWindowSize(new NVector2(_worldgenPoppedViewportWidth, _worldgenPoppedViewportHeight), ImGuiCond.Always);
+            }
+
+            DrawWorldgenPreviewViewport();
+
+            if (!ImGui.IsAnyItemActive())
+            {
+                NVector2 windowSize = ImGui.GetWindowSize();
+                _worldgenPoppedViewportWidth = windowSize.X;
+                _worldgenPoppedViewportHeight = windowSize.Y;
+            }
+
+            ImGui.SetWindowFontScale(1f);
+        }
+        ImGui.End();
+
+        if (!open)
+        {
+            _worldgenPreviewPoppedOut = false;
+        }
+    }
+
+    private void SetWorldgenPoppedViewportRect(float x, float y, float width, float height)
+    {
+        _worldgenPoppedViewportWidth = Math.Max(520f, width);
+        _worldgenPoppedViewportHeight = Math.Max(360f, height);
+        ImGui.SetWindowPos(new NVector2(Math.Max(0f, x), Math.Max(0f, y)), ImGuiCond.Always);
+        ImGui.SetWindowSize(new NVector2(_worldgenPoppedViewportWidth, _worldgenPoppedViewportHeight), ImGuiCond.Always);
     }
 
     private void DrawWorldgenPreviewViewport()
@@ -931,9 +1038,15 @@ public sealed partial class DebugWindowManager
             _worldgenPreview3DYaw = MathF.PI * 0.25f;
             _worldgenPreview3DPitch = 0.70f;
         }
+        ImGui.SameLine();
+        bool poppedOut = _worldgenPreviewPoppedOut;
+        if (ImGui.Checkbox("Pop out viewport##worldgen-preview-popout", ref poppedOut))
+        {
+            _worldgenPreviewPoppedOut = poppedOut;
+        }
 
         float availableHeight = ImGui.GetContentRegionAvail().Y;
-        float height = Math.Clamp(availableHeight * 0.46f, 220f, Math.Max(220f, availableHeight - 260f));
+        float height = Math.Max(240f * Math.Max(0.75f, _devToolsUiScale), availableHeight);
         ImGui.BeginChild("##worldgen-preview-viewport", new NVector2(-float.Epsilon, height), true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
         NVector2 min = ImGui.GetWindowPos();
