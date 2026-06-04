@@ -52,6 +52,8 @@ public sealed partial class DebugWindowManager
     private readonly VanillaAnimationEditorHistory _vanillaHistory = new();
     private VanillaAnimationPreviewScene? _vanillaPreviewScene;
     private VanillaAnimationViewport3DRenderer? _vanillaPreviewRenderer;
+    private bool _vanillaPreviewMeshRebuildPending;
+    private string _vanillaPreviewMeshRebuildPendingRowKey = "";
     private string _vanillaFilter = "";
     private bool _vanillaShowDirtyOnly;
     private bool _vanillaOverwriteExport;
@@ -1639,6 +1641,7 @@ public sealed partial class DebugWindowManager
                 !string.Equals(_vanillaViewportGizmoDragElementName, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase))
             {
                 CommitPendingVanillaHistory(entry.Document);
+                FlushPendingVanillaPreviewMeshRebuild(row);
                 ClearVanillaViewportGizmoDrag();
             }
             else
@@ -2896,6 +2899,11 @@ public sealed partial class DebugWindowManager
         try
         {
             bool sameScene = _vanillaPreviewScene?.Key == row.Key;
+            if (!sameScene)
+            {
+                ClearPendingVanillaPreviewMeshRebuild();
+            }
+
             float requestedFrame = sameScene ? _vanillaPreviewScene!.CurrentFrame : 0f;
             if (_vanillaPreviewScene == null || !sameScene || rebuildMesh)
             {
@@ -2925,7 +2933,40 @@ public sealed partial class DebugWindowManager
     private void RefreshVanillaPreviewAfterEdit(VanillaBrowserRow row, params string[] changedElementNames)
     {
         if (_vanillaPreviewScene?.Key != row.Key) return;
-        BuildVanillaPreviewScene(row, ShouldRebuildVanillaPreviewMeshAfterEdit(changedElementNames));
+        bool rebuildMesh = ShouldRebuildVanillaPreviewMeshAfterEdit(changedElementNames);
+        if (rebuildMesh && IsVanillaViewportDraggingRow(row))
+        {
+            _vanillaPreviewMeshRebuildPending = true;
+            _vanillaPreviewMeshRebuildPendingRowKey = row.Key;
+            BuildVanillaPreviewScene(row, rebuildMesh: false);
+            return;
+        }
+
+        BuildVanillaPreviewScene(row, rebuildMesh);
+    }
+
+    private bool IsVanillaViewportDraggingRow(VanillaBrowserRow row)
+    {
+        return _vanillaViewportGizmoDragAxis != TransformGizmoAxis.None &&
+            string.Equals(_vanillaViewportGizmoDragRowKey, row.Key, StringComparison.Ordinal);
+    }
+
+    private void FlushPendingVanillaPreviewMeshRebuild(VanillaBrowserRow row)
+    {
+        if (!_vanillaPreviewMeshRebuildPending ||
+            !string.Equals(_vanillaPreviewMeshRebuildPendingRowKey, row.Key, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        ClearPendingVanillaPreviewMeshRebuild();
+        BuildVanillaPreviewScene(row, rebuildMesh: true);
+    }
+
+    private void ClearPendingVanillaPreviewMeshRebuild()
+    {
+        _vanillaPreviewMeshRebuildPending = false;
+        _vanillaPreviewMeshRebuildPendingRowKey = "";
     }
 
     private bool ShouldRebuildVanillaPreviewMeshAfterEdit(IEnumerable<string>? changedElementNames)
@@ -2962,6 +3003,7 @@ public sealed partial class DebugWindowManager
 
     private void DisposeVanillaPreviewScene()
     {
+        ClearPendingVanillaPreviewMeshRebuild();
         _vanillaPreviewScene?.Dispose();
         _vanillaPreviewScene = null;
         _vanillaPreviewRenderer?.SetVisible(false);
