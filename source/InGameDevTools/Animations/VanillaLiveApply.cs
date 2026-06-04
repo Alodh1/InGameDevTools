@@ -42,6 +42,10 @@ public sealed partial class DebugWindowManager
             });
         if (!available)
         {
+            if (document.PlayerModelSource?.UsesOwnAnimations == true)
+            {
+                ImGui.TextWrapped("Runtime apply for PlayerModelLib own-animation shapes needs a live player-model adapter. Export saves the correct model shape; borrowed fallback models can still apply to their source animation entity.");
+            }
             return;
         }
 
@@ -153,6 +157,12 @@ public sealed partial class DebugWindowManager
 
     private static bool IsVanillaLiveTargetAvailable(VanillaAnimationDocument document)
     {
+        if (document.PlayerModelSource?.UsesOwnAnimations == true &&
+            document.RuntimeTargetEntities.Count == 0)
+        {
+            return false;
+        }
+
         return document.Kind switch
         {
             VanillaDocumentKind.Shape => document.Shape != null && document.ShapeAnimations.Count > 0,
@@ -373,7 +383,7 @@ public sealed partial class DebugWindowManager
             return document.RuntimeTargetEntities;
         }
 
-        return document.EntityType != null ? [document.EntityType] : [];
+        return document.UseEntityTypeAsRuntimeFallback && document.EntityType != null ? [document.EntityType] : [];
     }
 
     private void PrepareRuntimeShapeAnimations(Shape shape, string label)

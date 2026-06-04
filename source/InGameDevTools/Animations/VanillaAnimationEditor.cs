@@ -6281,6 +6281,12 @@ public sealed partial class DebugWindowManager
         GizmoHandle
     }
 
+    private enum VanillaPlayerModelAnimationMode
+    {
+        OwnShape,
+        BorrowedFallback
+    }
+
     private readonly record struct VanillaSymmetryPairCandidate(string ElementName, VanillaSymmetrySide SourceSide);
     private readonly record struct VanillaSymmetryResult(bool Applied, int Written, int CreatedKeyFrames, int OverwrittenElements, string Message);
     private readonly record struct VanillaIkManualChain(IReadOnlyList<string> ElementNames, string EndElementName, string DisplayName);
@@ -6350,12 +6356,16 @@ public sealed partial class DebugWindowManager
         AssetLocation ShapeLocation,
         JObject? ShapeSourceJson,
         Shape Shape,
+        AssetLocation AnimationAssetLocation,
+        JObject? AnimationSourceJson,
         EntityProperties AnimationEntityType,
         string AnimationSourceCode,
-        int MatchedElementCount)
+        int MatchedElementCount,
+        VanillaPlayerModelAnimationMode AnimationMode)
     {
         public string Domain => ConfigLocation.Domain;
         public string FullCode => Code.Contains(':', StringComparison.Ordinal) ? Code : $"{Domain}:{Code}";
+        public bool UsesOwnAnimations => AnimationMode == VanillaPlayerModelAnimationMode.OwnShape;
     }
 
     private sealed record VanillaGroupTargets(IReadOnlyList<EntityProperties> Targets, int Skipped);
@@ -6778,17 +6788,45 @@ public sealed partial class DebugWindowManager
                         scoreShape = baseShape ?? scoreShape;
                     }
 
-                    if (!TryFindBestAnimationSource(animationCandidates, scoreShape, out EntityProperties? animationEntity, out Shape? animationShape, out int matchedElements) ||
-                        animationEntity == null ||
-                        animationShape?.Animations == null ||
-                        animationShape.Animations.Length == 0)
+                    JObject? shapeSourceJson = TryLoadJson(api, shapeLocation);
+                    bool hasOwnAnimations = modelShape.Animations is { Length: > 0 };
+                    bool hasBorrowedSource = TryFindBestAnimationSource(animationCandidates, scoreShape, out EntityProperties? animationEntity, out Shape? animationShape, out int matchedElements) &&
+                        animationEntity != null &&
+                        animationShape?.Animations is { Length: > 0 };
+                    if (!hasOwnAnimations && !hasBorrowedSource)
                     {
                         continue;
                     }
 
                     Shape editableShape = modelShape.Clone() ?? modelShape;
-                    editableShape.Animations = animationShape.Animations.Select(CloneVanillaAnimation).ToArray();
-                    JObject? shapeSourceJson = TryLoadJson(api, shapeLocation);
+                    VanillaPlayerModelAnimationMode animationMode;
+                    AssetLocation animationAssetLocation = shapeLocation;
+                    JObject? animationSourceJson = shapeSourceJson;
+                    EntityProperties runtimeEntityType;
+                    string animationSourceCode;
+
+                    if (hasOwnAnimations)
+                    {
+                        editableShape.Animations = (editableShape.Animations ?? []).Select(CloneVanillaAnimation).ToArray();
+                        runtimeEntityType = animationEntity ?? ResolvePlayerModelRuntimeEntity(api, animationCandidates);
+                        animationSourceCode = "own shape";
+                        animationMode = VanillaPlayerModelAnimationMode.OwnShape;
+                    }
+                    else
+                    {
+                        editableShape.Animations = animationShape!.Animations.Select(CloneVanillaAnimation).ToArray();
+                        runtimeEntityType = animationEntity!;
+                        animationSourceCode = animationEntity!.Code?.ToString() ?? config.FullCode;
+                        animationMode = VanillaPlayerModelAnimationMode.BorrowedFallback;
+
+                        AssetLocation? borrowedAssetLocation = GetShapeAssetLocation(animationEntity);
+                        if (borrowedAssetLocation != null)
+                        {
+                            animationAssetLocation = borrowedAssetLocation;
+                            animationSourceJson = TryLoadJson(api, borrowedAssetLocation);
+                        }
+                    }
+
                     string shapeKey = $"{config.FullCode}|{shapeLocation}";
                     if (!indexedShapes.Add(shapeKey)) continue;
 
@@ -6800,9 +6838,12 @@ public sealed partial class DebugWindowManager
                         shapeLocation,
                         shapeSourceJson,
                         editableShape,
-                        animationEntity,
-                        animationEntity.Code?.ToString() ?? config.FullCode,
-                        matchedElements));
+                        animationAssetLocation,
+                        animationSourceJson,
+                        runtimeEntityType,
+                        animationSourceCode,
+                        hasBorrowedSource ? matchedElements : 0,
+                        animationMode));
                 }
 
                 return result;
@@ -6884,6 +6925,25 @@ public sealed partial class DebugWindowManager
                 }
 
                 return matchedElements > 0;
+            }
+
+            private static EntityProperties ResolvePlayerModelRuntimeEntity(ICoreClientAPI api, IReadOnlyList<EntityProperties> candidates)
+            {
+                EntityProperties? localPlayerType = api.World?.Player?.Entity?.Properties;
+                if (localPlayerType != null)
+                {
+                    return localPlayerType;
+                }
+
+                EntityProperties? playerLikeCandidate = candidates.FirstOrDefault(candidate =>
+                    candidate.Client?.LoadedShapeForEntity != null &&
+                    candidate.Client?.Animations is { Length: > 0 });
+                if (playerLikeCandidate != null)
+                {
+                    return playerLikeCandidate;
+                }
+
+                return candidates.First();
             }
 
             private static AssetLocation? ResolveShapeLocation(ICoreClientAPI api, string rawPath, string defaultDomain)
@@ -7336,11 +7396,11 @@ public sealed partial class DebugWindowManager
 
                 JObject? entitySourceJson = playerModel?.ConfigSourceJson ?? selectedMember.Source?.SourceJson ?? TryLoadJson(api, GetEntityAssetLocation(entityType));
                 AssetLocation? entityAssetLocation = playerModel?.ConfigLocation ?? selectedMember.Source?.Location ?? GetEntityAssetLocation(entityType);
-                AssetLocation? shapeAssetLocation = playerModel?.ShapeLocation ?? GetShapeAssetLocation(entityType);
-                JObject? shapeSourceJson = playerModel?.ShapeSourceJson ?? TryLoadJson(api, shapeAssetLocation);
+                AssetLocation? shapeAssetLocation = playerModel?.AnimationAssetLocation ?? GetShapeAssetLocation(entityType);
+                JObject? shapeSourceJson = playerModel?.AnimationSourceJson ?? TryLoadJson(api, shapeAssetLocation);
                 IReadOnlyList<VanillaEntityMember> editMembers = groupEdit ? option.Members : [selectedMember];
                 VanillaGroupTargets shapeTargets = playerModel != null
-                    ? new VanillaGroupTargets([playerModel.AnimationEntityType], 0)
+                    ? BuildPlayerModelShapeTargets(playerModel)
                     : BuildGroupTargets(editMembers, selectedMember, VanillaDocumentKind.Shape);
                 VanillaGroupTargets metadataTargets = BuildGroupTargets(editMembers, selectedMember, VanillaDocumentKind.EntityMetadata);
 
@@ -7360,7 +7420,8 @@ public sealed partial class DebugWindowManager
                         GroupLabel = groupLabel,
                         RuntimeTargetEntities = shapeTargets.Targets,
                         RuntimeSkippedMembers = shapeTargets.Skipped,
-                        RuntimeGroupKind = playerModel != null ? "Playermodelib model" : option.GroupKind,
+                        RuntimeGroupKind = playerModel != null ? GetPlayerModelRuntimeGroupKind(playerModel) : option.GroupKind,
+                        UseEntityTypeAsRuntimeFallback = playerModel?.UsesOwnAnimations != true,
                         PlayerModelSource = playerModel
                     };
 
@@ -7418,7 +7479,7 @@ public sealed partial class DebugWindowManager
                     : "";
                 string playerModelStatus = playerModel == null
                     ? ""
-                    : $" Playermodelib model shape uses animations from {playerModel.AnimationSourceCode} ({playerModel.MatchedElementCount} matched elements).";
+                    : BuildPlayerModelIndexStatus(playerModel);
                 Status = $"Indexed {entityCode}: {shapeCount} shape animations, {metadataCount} metadata entries.{targetStatus}{playerModelStatus}";
             }
             catch (Exception exception)
@@ -7428,6 +7489,30 @@ public sealed partial class DebugWindowManager
                 Status = $"Could not index {entityType.Code}: {exception.Message}";
                 LoggerUtil.Warn(api, this, $"Could not index vanilla entity animation '{entityType.Code}': {exception}");
             }
+        }
+
+        private static VanillaGroupTargets BuildPlayerModelShapeTargets(VanillaPlayerModelSource playerModel)
+        {
+            return playerModel.UsesOwnAnimations
+                ? new VanillaGroupTargets([], 0)
+                : new VanillaGroupTargets([playerModel.AnimationEntityType], 0);
+        }
+
+        private static string GetPlayerModelRuntimeGroupKind(VanillaPlayerModelSource playerModel)
+        {
+            return playerModel.UsesOwnAnimations
+                ? "Playermodelib own shape"
+                : "Playermodelib borrowed source";
+        }
+
+        private static string BuildPlayerModelIndexStatus(VanillaPlayerModelSource playerModel)
+        {
+            if (playerModel.UsesOwnAnimations)
+            {
+                return $" Playermodelib model uses its own shape animations from {playerModel.ShapeLocation}.";
+            }
+
+            return $" Playermodelib model preview borrows animations from {playerModel.AnimationSourceCode} ({playerModel.MatchedElementCount} matched elements); edits save to {playerModel.AnimationAssetLocation}.";
         }
 
         private static VanillaGroupTargets BuildGroupTargets(IReadOnlyList<VanillaEntityMember> members, VanillaEntityMember selected, VanillaDocumentKind kind)
@@ -7503,6 +7588,7 @@ public sealed partial class DebugWindowManager
         public VanillaPlayerModelSource? PlayerModelSource { get; init; }
         public string GroupLabel { get; init; } = "";
         public IReadOnlyList<EntityProperties> RuntimeTargetEntities { get; init; } = [];
+        public bool UseEntityTypeAsRuntimeFallback { get; init; } = true;
         public int RuntimeSkippedMembers { get; init; }
         public string RuntimeGroupKind { get; init; } = "";
         public List<VanillaShapeAnimationEntry> ShapeAnimations { get; } = [];
