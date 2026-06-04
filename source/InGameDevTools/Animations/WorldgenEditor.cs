@@ -379,6 +379,7 @@ public sealed partial class DebugWindowManager
             if (!ImGuiLayoutHelper.MatchesDomain(_worldgenDomainFilter, entry.Domain)) continue;
             if (_worldgenKindFilter > 0 && entry.Kind != FilterIndexToWorldgenKind(_worldgenKindFilter)) continue;
             if (_worldgenDirtyOnly && !IsWorldgenEntryDirty(entry)) continue;
+            if (!IsWorldgenEntryCompatibleWithCurrentPreview(entry, out _)) continue;
             _visibleWorldgenEntries.Add(entry);
         }
 
@@ -407,6 +408,12 @@ public sealed partial class DebugWindowManager
         filterChanged |= ImGuiLayoutHelper.DrawDomainCombo("Domain##worldgen-domain", ref _worldgenDomainFilter, _worldgenEntries.Select(entry => entry.Domain));
         filterChanged |= ImGui.Combo("Kind##worldgen-kind", ref _worldgenKindFilter, WorldgenKindFilterLabels, WorldgenKindFilterLabels.Length);
         filterChanged |= ImGui.Checkbox("Dirty only##worldgen-dirty-only", ref _worldgenDirtyOnly);
+        ImGui.TextDisabled(SanitizeWorldgenPreviewText(GetWorldgenPreviewAssetRestrictionStatus(), 90));
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(SanitizeWorldgenPreviewText(GetWorldgenPreviewAssetRestrictionStatus(), 260));
+        }
+
         if (filterChanged)
         {
             RebuildVisibleWorldgenEntries();
@@ -432,15 +439,18 @@ public sealed partial class DebugWindowManager
             {
                 WorldgenAssetEntry entry = _visibleWorldgenEntries[i];
                 bool dirty = IsWorldgenEntryDirty(entry);
+                bool compatible = IsWorldgenEntryCompatibleWithCurrentPreview(entry, out string compatibilityReason);
                 string label = $"{entry.KindLabel}: {entry.Domain}:{entry.AssetPath}{(dirty ? " *" : "")}##worldgen-entry-{i}";
-                if (ImGui.Selectable(label, i == _worldgenEntryIndex))
+                if (!compatible) ImGui.BeginDisabled();
+                if (ImGui.Selectable(label, i == _worldgenEntryIndex) && compatible)
                 {
                     _worldgenEntryIndex = i;
                     LoadWorldgenEntry(entry);
                 }
+                if (!compatible) ImGui.EndDisabled();
                 if (ImGui.IsItemHovered())
                 {
-                    ImGui.SetTooltip($"{entry.Domain}:{entry.AssetPath}\n{entry.KindLabel}\n{(dirty ? "Modified draft" : "Unmodified")}");
+                    ImGui.SetTooltip($"{entry.Domain}:{entry.AssetPath}\n{entry.KindLabel}\n{(dirty ? "Modified draft" : "Unmodified")}\n{compatibilityReason}");
                 }
             }
         }
@@ -1252,9 +1262,17 @@ public sealed partial class DebugWindowManager
     {
         ImGui.TextUnformatted("Worldgen preview");
         ImGui.SameLine();
-        if (ImGui.Checkbox("Auto##worldgen-preview-auto-mode", ref _worldgenPreviewAutoMode) && _worldgenPreviewAutoMode)
+        if (ImGui.Checkbox("Auto##worldgen-preview-auto-mode", ref _worldgenPreviewAutoMode))
         {
-            ApplyWorldgenPreviewModeForSelectedEntry();
+            if (_worldgenPreviewAutoMode)
+            {
+                RebuildVisibleWorldgenEntries();
+                ApplyWorldgenPreviewModeForSelectedEntry();
+            }
+            else
+            {
+                EnsureWorldgenSelectionMatchesPreviewMode();
+            }
         }
         if (ImGui.IsItemHovered())
         {
@@ -1279,6 +1297,7 @@ public sealed partial class DebugWindowManager
                 _worldgenPreviewMapLayer = null;
                 InvalidateWorldgenPreviewRasterCache();
                 ScheduleWorldgenRealtimePeek("preview mode changed");
+                EnsureWorldgenSelectionMatchesPreviewMode();
             }
         }
 
@@ -1702,6 +1721,23 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void EnsureWorldgenSelectionMatchesPreviewMode()
+    {
+        RebuildVisibleWorldgenEntries();
+
+        WorldgenAssetEntry? entry = SelectedWorldgenEntry;
+        if (entry == null)
+        {
+            _worldgenStatus = $"{WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)]} preview has no compatible asset in the current filters.";
+            return;
+        }
+
+        if (!_worldgenLoadedKey.Equals(entry.Key, StringComparison.OrdinalIgnoreCase))
+        {
+            LoadWorldgenEntry(entry);
+        }
+    }
+
     private void ApplyWorldgenPreviewModeForEntry(WorldgenAssetEntry entry)
     {
         if (!_worldgenPreviewAutoMode) return;
@@ -1742,6 +1778,70 @@ public sealed partial class DebugWindowManager
             WorldgenAssetKind.RockStrata => WorldgenPreviewModeRockStrata,
             _ => WorldgenPreviewModeGradient
         };
+    }
+
+    private bool IsWorldgenEntryCompatibleWithCurrentPreview(WorldgenAssetEntry entry, out string reason)
+    {
+        if (_worldgenPreviewAutoMode)
+        {
+            reason = "Compatible: auto mode switches the viewport to match this asset.";
+            return true;
+        }
+
+        return IsWorldgenEntryCompatibleWithPreviewMode(entry.Kind, _worldgenPreviewMode, out reason);
+    }
+
+    private string GetWorldgenPreviewAssetRestrictionStatus()
+    {
+        if (_worldgenPreviewAutoMode)
+        {
+            return "Asset filter: auto mode allows all assets.";
+        }
+
+        string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
+        return GetWorldgenPreviewCompatibleKindText(_worldgenPreviewMode, out string compatibleKinds)
+            ? $"Asset filter: {modeLabel} uses {compatibleKinds}."
+            : $"Asset filter: {modeLabel} does not require a selected asset kind.";
+    }
+
+    private static bool IsWorldgenEntryCompatibleWithPreviewMode(WorldgenAssetKind kind, int previewMode, out string reason)
+    {
+        string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(previewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
+        if (!GetWorldgenPreviewCompatibleKindText(previewMode, out string compatibleKinds))
+        {
+            reason = $"Compatible: {modeLabel} preview does not use the selected asset.";
+            return true;
+        }
+
+        bool compatible = previewMode switch
+        {
+            WorldgenPreviewModeOre => kind == WorldgenAssetKind.Deposits,
+            WorldgenPreviewModeBlockPatch => kind == WorldgenAssetKind.BlockPatches,
+            WorldgenPreviewModeTerrainShape => kind == WorldgenAssetKind.Landforms,
+            WorldgenPreviewModeRockStrata => kind == WorldgenAssetKind.RockStrata,
+            WorldgenPreviewModeRegion3D => kind is WorldgenAssetKind.Deposits or WorldgenAssetKind.BlockPatches or WorldgenAssetKind.Landforms,
+            _ => true
+        };
+
+        reason = compatible
+            ? $"Compatible: {modeLabel} preview uses {compatibleKinds}."
+            : $"Not compatible: {modeLabel} preview only uses {compatibleKinds}.";
+        return compatible;
+    }
+
+    private static bool GetWorldgenPreviewCompatibleKindText(int previewMode, out string compatibleKinds)
+    {
+        compatibleKinds = previewMode switch
+        {
+            WorldgenPreviewModeOre => "deposit assets",
+            WorldgenPreviewModeBlockPatch => "block-patch assets",
+            WorldgenPreviewModeTerrainShape => "landform assets",
+            WorldgenPreviewModeRockStrata => "rock-strata assets",
+            WorldgenPreviewModeRegion3D => "deposit, block-patch, or landform assets",
+            _ => ""
+        };
+
+        return !string.IsNullOrWhiteSpace(compatibleKinds);
     }
 
     private void UseCurrentWorldgenPreviewState()
