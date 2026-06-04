@@ -251,15 +251,18 @@ static public class StandardEasingFunctions
         }
         else if (x < 2 / BounceD1)
         {
-            return BounceN1 * ((x - 1.5f) / BounceD1) * (x - 1.5f) + 0.75f;
+            float offset = x - 1.5f / BounceD1;
+            return BounceN1 * offset * offset + 0.75f;
         }
         else if (x < 2.5 / BounceD1)
         {
-            return BounceN1 * ((x - 2.25f) / BounceD1) * (x - 2.25f) + 0.9375f;
+            float offset = x - 2.25f / BounceD1;
+            return BounceN1 * offset * offset + 0.9375f;
         }
         else
         {
-            return BounceN1 * ((x - 2.625f) / BounceD1) * (x - 2.625f) + 0.984375f;
+            float offset = x - 2.625f / BounceD1;
+            return BounceN1 * offset * offset + 0.984375f;
         }
     }
 }
