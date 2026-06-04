@@ -1690,7 +1690,11 @@ public sealed partial class DebugWindowManager
                 NVector2 from = previous - centerScreen;
                 NVector2 to = projected - centerScreen;
                 float cross = from.X * to.Y - from.Y * to.X;
-                if (Math.Abs(cross) > 0.001f) return Math.Sign(cross);
+                if (Math.Abs(cross) > 0.001f)
+                {
+                    double sign = Math.Sign(cross);
+                    return axis == TransformGizmoAxis.Y ? -sign : sign;
+                }
             }
 
             previous = projected;

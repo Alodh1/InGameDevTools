@@ -1955,7 +1955,11 @@ public sealed partial class DebugWindowManager
             NVector2 from = points[index - 1] - projection.Center;
             NVector2 to = points[index] - projection.Center;
             float cross = from.X * to.Y - from.Y * to.X;
-            if (Math.Abs(cross) > 0.001f) return Math.Sign(cross);
+            if (Math.Abs(cross) > 0.001f)
+            {
+                double sign = Math.Sign(cross);
+                return axis == TransformGizmoAxis.Y ? -sign : sign;
+            }
         }
 
         return -1.0;
