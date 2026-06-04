@@ -599,15 +599,30 @@ public sealed partial class DebugWindowManager
         ImGui.SeparatorText(GetAiBehaviorTaskCode(task) ?? "AI task");
         changed |= DrawAiBehaviorStringProperty(task, "code", "Code", required: true);
         changed |= DrawAiBehaviorStringProperty(task, "id", "Id", required: false);
-        changed |= DrawAiBehaviorIntProperty(task, "priority", "Priority", 0, 10000);
-        changed |= DrawAiBehaviorIntProperty(task, "slot", "Slot", 0, 64);
-        changed |= DrawAiBehaviorFloatProperty(task, "executionChance", "Execution chance", 0f, 1f, "%.3f");
-        changed |= DrawAiBehaviorIntProperty(task, "mincooldown", "Min cooldown ms", 0, 3_600_000);
-        changed |= DrawAiBehaviorIntProperty(task, "maxcooldown", "Max cooldown ms", 0, 3_600_000);
-        changed |= DrawAiBehaviorFloatProperty(task, "moveSpeed", "Move speed", 0f, 10f, "%.3f");
-        changed |= DrawAiBehaviorFloatProperty(task, "seekingRange", "Seeking range", 0f, 256f, "%.2f");
-        changed |= DrawAiBehaviorFloatProperty(task, "attackRange", "Attack range", 0f, 64f, "%.2f");
-        changed |= DrawAiBehaviorFloatProperty(task, "damage", "Damage", 0f, 500f, "%.2f");
+
+        ImGui.SeparatorText("Common parameters");
+        foreach (AiBehaviorParameterSpec spec in AiBehaviorParameterSpecs.Where(spec => spec.Scope == AiBehaviorParameterScope.Common))
+        {
+            changed |= DrawAiBehaviorSourceParameter(task, spec);
+        }
+
+        ImGui.SeparatorText("Task-specific parameters");
+        int taskSpecificDrawn = 0;
+        foreach (AiBehaviorParameterSpec spec in AiBehaviorParameterSpecs.Where(spec => spec.Scope == AiBehaviorParameterScope.TaskSpecific))
+        {
+            if (DrawAiBehaviorSourceParameter(task, spec))
+            {
+                changed = true;
+            }
+            if (HasAiBehaviorSourceProperty(task, spec.SourcePropertyNames))
+            {
+                taskSpecificDrawn++;
+            }
+        }
+        if (taskSpecificDrawn == 0)
+        {
+            ImGui.TextWrapped("No schema-backed task-specific parameters are set on this task yet.");
+        }
 
         if (ImGui.CollapsingHeader("Other parameters##entity-ai-other-params"))
         {
@@ -619,6 +634,33 @@ public sealed partial class DebugWindowManager
         }
 
         return changed;
+    }
+
+    private bool DrawAiBehaviorSourceParameter(JObject task, AiBehaviorParameterSpec spec)
+    {
+        return spec.Kind switch
+        {
+            AiBehaviorParameterKind.Int => DrawAiBehaviorIntProperty(task, GetAiBehaviorSourcePropertyName(task, spec), spec.Label, (int)spec.Min, (int)spec.Max),
+            AiBehaviorParameterKind.Float => DrawAiBehaviorFloatProperty(task, GetAiBehaviorSourcePropertyName(task, spec), spec.Label, spec.Min, spec.Max, spec.Format),
+            AiBehaviorParameterKind.Bool => DrawAiBehaviorBoolProperty(task, GetAiBehaviorSourcePropertyName(task, spec), spec.Label),
+            AiBehaviorParameterKind.Range => DrawAiBehaviorRangeProperty(task, GetAiBehaviorSourcePropertyName(task, spec), spec.Label, spec.Min, spec.Max, spec.Format),
+            _ => false
+        };
+    }
+
+    private static string GetAiBehaviorSourcePropertyName(JObject task, AiBehaviorParameterSpec spec)
+    {
+        foreach (string propertyName in spec.SourcePropertyNames)
+        {
+            if (task[propertyName] != null) return propertyName;
+        }
+
+        return spec.SourcePropertyNames[0];
+    }
+
+    private static bool HasAiBehaviorSourceProperty(JObject task, IReadOnlyList<string> propertyNames)
+    {
+        return propertyNames.Any(propertyName => task[propertyName] != null);
     }
 
     private bool DrawAiBehaviorStringProperty(JObject task, string propertyName, string label, bool required)
@@ -718,6 +760,108 @@ public sealed partial class DebugWindowManager
         {
             task.Remove(propertyName);
             return true;
+        }
+
+        return false;
+    }
+
+    private bool DrawAiBehaviorBoolProperty(JObject task, string propertyName, string label)
+    {
+        bool exists = task[propertyName] != null;
+        if (!exists)
+        {
+            if (ImGui.Button($"Add {label}##entity-ai-add-{propertyName}"))
+            {
+                task[propertyName] = true;
+                return true;
+            }
+            return false;
+        }
+
+        bool value = task[propertyName]?.Type switch
+        {
+            JTokenType.Boolean => task[propertyName]!.Value<bool>(),
+            JTokenType.Integer => task[propertyName]!.Value<int>() != 0,
+            JTokenType.Float => Math.Abs(task[propertyName]!.Value<double>()) > double.Epsilon,
+            _ => bool.TryParse(task[propertyName]?.ToString(), out bool parsed) && parsed
+        };
+
+        if (ImGui.Checkbox($"{label}##entity-ai-{propertyName}", ref value))
+        {
+            task[propertyName] = value;
+            return true;
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##entity-ai-remove-{propertyName}"))
+        {
+            task.Remove(propertyName);
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool DrawAiBehaviorRangeProperty(JObject task, string propertyName, string label, float min, float max, string format)
+    {
+        bool exists = task[propertyName] != null;
+        if (!exists)
+        {
+            if (ImGui.Button($"Add {label}##entity-ai-add-{propertyName}"))
+            {
+                task[propertyName] = new JArray(min, max);
+                return true;
+            }
+            return false;
+        }
+
+        NVector2 range = TryReadJsonRange(task[propertyName], out NVector2 parsed)
+            ? parsed
+            : new NVector2(min, max);
+        range.X = Math.Clamp(range.X, min, max);
+        range.Y = Math.Clamp(range.Y, min, max);
+
+        ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+        if (ImGui.SliderFloat2($"{label}##entity-ai-{propertyName}", ref range, min, max, format))
+        {
+            task[propertyName] = new JArray(Math.Clamp(range.X, min, max), Math.Clamp(range.Y, min, max));
+            return true;
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##entity-ai-remove-{propertyName}"))
+        {
+            task.Remove(propertyName);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryReadJsonRange(JToken? token, out NVector2 range)
+    {
+        range = default;
+        if (token is JArray array && array.Count >= 2)
+        {
+            bool hasFirst = TryReadJsonFloat(array[0], out float first);
+            bool hasSecond = TryReadJsonFloat(array[1], out float second);
+            if (hasFirst && hasSecond)
+            {
+                range = new NVector2(first, second);
+                return true;
+            }
+        }
+
+        if (token is JObject obj)
+        {
+            JToken? minToken = obj["min"] ?? obj["Min"] ?? obj["x"] ?? obj["X"] ?? obj["from"];
+            JToken? maxToken = obj["max"] ?? obj["Max"] ?? obj["y"] ?? obj["Y"] ?? obj["to"];
+            if (TryReadJsonFloat(minToken, out float minValue) &&
+                TryReadJsonFloat(maxToken, out float maxValue))
+            {
+                range = new NVector2(minValue, maxValue);
+                return true;
+            }
         }
 
         return false;
@@ -1031,21 +1175,16 @@ public sealed partial class DebugWindowManager
         int drawn = 0;
 
         ImGui.SeparatorText("Common");
-        drawn += DrawAiBehaviorLiveIntField(task.TaskObject, "Priority", 0, 10000, "Priority", "priority") ? 1 : 0;
-        drawn += DrawAiBehaviorLiveIntField(task.TaskObject, "Slot", 0, 64, "Slot", "slot") ? 1 : 0;
-        drawn += DrawAiBehaviorLiveFloatField(task.TaskObject, "Execution chance", 0f, 1f, "%.3f", "ExecutionChance", "executionChance", "chance") ? 1 : 0;
-        drawn += DrawAiBehaviorLiveIntField(task.TaskObject, "Min cooldown ms", 0, 3_600_000, "MinCooldownMs", "mincooldown") ? 1 : 0;
-        drawn += DrawAiBehaviorLiveIntField(task.TaskObject, "Max cooldown ms", 0, 3_600_000, "MaxCooldownMs", "maxcooldown") ? 1 : 0;
-        drawn += DrawAiBehaviorLiveBoolField(task.TaskObject, "When swimming", "WhenSwimming", "whenSwimming") ? 1 : 0;
-        drawn += DrawAiBehaviorLiveRangeField(task.TaskObject, "Day time frames", 0f, 1f, "%.3f", "duringDayTimeFrames", "DuringDayTimeFrames", "DayTimeFrames", "dayTimeFrames") ? 1 : 0;
-        drawn += DrawAiBehaviorLiveRangeField(task.TaskObject, "Light levels", 0f, 32f, "%.1f", "EntityLightLevels", "entityLightLevels", "LightLevelRange", "lightLevelRange") ? 1 : 0;
-        drawn += DrawAiBehaviorLiveRangeField(task.TaskObject, "Temperature range", -50f, 100f, "%.1f", "TemperatureRange", "temperatureRange") ? 1 : 0;
+        foreach (AiBehaviorParameterSpec spec in AiBehaviorParameterSpecs.Where(spec => spec.Scope == AiBehaviorParameterScope.Common))
+        {
+            drawn += DrawAiBehaviorLiveParameter(task.TaskObject, spec) ? 1 : 0;
+        }
 
         ImGui.SeparatorText("Per-task numeric fields");
         int taskSpecificDrawn = 0;
-        foreach (AiBehaviorLiveNumericSpec spec in AiBehaviorLiveNumericSpecs)
+        foreach (AiBehaviorParameterSpec spec in AiBehaviorParameterSpecs.Where(spec => spec.Scope == AiBehaviorParameterScope.TaskSpecific))
         {
-            if (DrawAiBehaviorLiveFloatField(task.TaskObject, spec.Label, spec.Min, spec.Max, spec.Format, spec.MemberNames))
+            if (DrawAiBehaviorLiveParameter(task.TaskObject, spec))
             {
                 taskSpecificDrawn++;
             }
@@ -1095,6 +1234,18 @@ public sealed partial class DebugWindowManager
         }
 
         return drawn;
+    }
+
+    private bool DrawAiBehaviorLiveParameter(object task, AiBehaviorParameterSpec spec)
+    {
+        return spec.Kind switch
+        {
+            AiBehaviorParameterKind.Int => DrawAiBehaviorLiveIntField(task, spec.Label, (int)spec.Min, (int)spec.Max, spec.LiveMemberNames),
+            AiBehaviorParameterKind.Float => DrawAiBehaviorLiveFloatField(task, spec.Label, spec.Min, spec.Max, spec.Format, spec.LiveMemberNames),
+            AiBehaviorParameterKind.Bool => DrawAiBehaviorLiveBoolField(task, spec.Label, spec.LiveMemberNames),
+            AiBehaviorParameterKind.Range => DrawAiBehaviorLiveRangeField(task, spec.Label, spec.Min, spec.Max, spec.Format, spec.LiveMemberNames),
+            _ => false
+        };
     }
 
     private bool DrawAiBehaviorLiveMemberControl(object target, AiBehaviorLiveMember member)
@@ -3702,34 +3853,43 @@ public sealed partial class DebugWindowManager
         return text.Length <= maxLength ? text : text[..Math.Max(0, maxLength - 3)] + "...";
     }
 
-    private static readonly HashSet<string> AiBehaviorFirstClassProperties = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "code",
-        "id",
-        "priority",
-        "slot",
-        "executionChance",
-        "mincooldown",
-        "maxcooldown",
-        "moveSpeed",
-        "seekingRange",
-        "attackRange",
-        "damage"
-    };
-
-    private static readonly AiBehaviorLiveNumericSpec[] AiBehaviorLiveNumericSpecs =
+    private static readonly AiBehaviorParameterSpec[] AiBehaviorParameterSpecs =
     [
-        new("Move speed", 0f, 10f, "%.3f", ["moveSpeed", "movespeed", "MoveSpeed"]),
-        new("Seeking range", 0f, 256f, "%.2f", ["seekingRange", "SeekingRange", "seekRange", "range"]),
-        new("Attack range", 0f, 64f, "%.2f", ["attackRange", "AttackRange"]),
-        new("Damage", 0f, 500f, "%.2f", ["damage", "Damage"]),
-        new("Knockback strength", 0f, 100f, "%.2f", ["knockbackStrength", "KnockbackStrength"]),
-        new("Attack angle deg", 0f, 360f, "%.1f", ["attackAngleRangeDeg", "AttackAngleRangeDeg"]),
-        new("Max follow time", 0f, 3600f, "%.1f", ["maxFollowTime", "MaxFollowTime"]),
-        new("Leap chance", 0f, 1f, "%.3f", ["leapChance", "LeapChance"]),
-        new("Flee distance", 0f, 256f, "%.2f", ["fleeDistance", "FleeDistance"]),
-        new("Retaliate range", 0f, 256f, "%.2f", ["retaliateRange", "RetaliateRange"])
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Int, "Priority", 0f, 10000f, "%.0f", ["priority"], ["Priority", "priority"]),
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Int, "Slot", 0f, 64f, "%.0f", ["slot"], ["Slot", "slot"]),
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Float, "Execution chance", 0f, 1f, "%.3f", ["executionChance", "chance"], ["ExecutionChance", "executionChance", "chance"]),
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Int, "Min cooldown ms", 0f, 3_600_000f, "%.0f", ["mincooldown", "minCooldownMs"], ["MinCooldownMs", "mincooldown", "minCooldownMs"]),
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Int, "Max cooldown ms", 0f, 3_600_000f, "%.0f", ["maxcooldown", "maxCooldownMs"], ["MaxCooldownMs", "maxcooldown", "maxCooldownMs"]),
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Bool, "When swimming", 0f, 1f, "%.0f", ["whenSwimming"], ["WhenSwimming", "whenSwimming"]),
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Range, "Day time frames", 0f, 1f, "%.3f", ["duringDayTimeFrames", "dayTimeFrames"], ["duringDayTimeFrames", "DuringDayTimeFrames", "DayTimeFrames", "dayTimeFrames"]),
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Range, "Light levels", 0f, 32f, "%.1f", ["entityLightLevels", "lightLevelRange"], ["EntityLightLevels", "entityLightLevels", "LightLevelRange", "lightLevelRange"]),
+        new(AiBehaviorParameterScope.Common, AiBehaviorParameterKind.Range, "Temperature range", -50f, 100f, "%.1f", ["temperatureRange"], ["TemperatureRange", "temperatureRange"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Move speed", 0f, 10f, "%.3f", ["moveSpeed", "movespeed"], ["moveSpeed", "movespeed", "MoveSpeed"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Seeking range", 0f, 256f, "%.2f", ["seekingRange", "seekRange", "range"], ["seekingRange", "SeekingRange", "seekRange", "range"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Attack range", 0f, 64f, "%.2f", ["attackRange"], ["attackRange", "AttackRange"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Damage", 0f, 500f, "%.2f", ["damage"], ["damage", "Damage"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Knockback strength", 0f, 100f, "%.2f", ["knockbackStrength"], ["knockbackStrength", "KnockbackStrength"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Attack angle deg", 0f, 360f, "%.1f", ["attackAngleRangeDeg"], ["attackAngleRangeDeg", "AttackAngleRangeDeg"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Max follow time", 0f, 3600f, "%.1f", ["maxFollowTime"], ["maxFollowTime", "MaxFollowTime"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Leap chance", 0f, 1f, "%.3f", ["leapChance"], ["leapChance", "LeapChance"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Flee distance", 0f, 256f, "%.2f", ["fleeDistance"], ["fleeDistance", "FleeDistance"]),
+        new(AiBehaviorParameterScope.TaskSpecific, AiBehaviorParameterKind.Float, "Retaliate range", 0f, 256f, "%.2f", ["retaliateRange"], ["retaliateRange", "RetaliateRange"])
     ];
+
+    private static readonly HashSet<string> AiBehaviorFirstClassProperties = BuildAiBehaviorFirstClassProperties();
+
+    private static HashSet<string> BuildAiBehaviorFirstClassProperties()
+    {
+        HashSet<string> properties = new(StringComparer.OrdinalIgnoreCase) { "code", "id" };
+        foreach (AiBehaviorParameterSpec spec in AiBehaviorParameterSpecs)
+        {
+            foreach (string propertyName in spec.SourcePropertyNames)
+            {
+                properties.Add(propertyName);
+            }
+        }
+        return properties;
+    }
 
     private enum AiBehaviorIndexState
     {
@@ -3822,12 +3982,29 @@ public sealed partial class DebugWindowManager
         object TaskObject,
         string Code);
 
-    private sealed record AiBehaviorLiveNumericSpec(
+    private sealed record AiBehaviorParameterSpec(
+        AiBehaviorParameterScope Scope,
+        AiBehaviorParameterKind Kind,
         string Label,
         float Min,
         float Max,
         string Format,
-        string[] MemberNames);
+        string[] SourcePropertyNames,
+        string[] LiveMemberNames);
+
+    private enum AiBehaviorParameterScope
+    {
+        Common,
+        TaskSpecific
+    }
+
+    private enum AiBehaviorParameterKind
+    {
+        Int,
+        Float,
+        Bool,
+        Range
+    }
 
     private sealed record AiBehaviorVariantGroup(string Code, IReadOnlyList<string> States);
 }
