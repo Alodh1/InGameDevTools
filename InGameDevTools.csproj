@@ -28,6 +28,7 @@
     <AssemblyName>ingamedevtools</AssemblyName>
     <RootNamespace>InGameDevTools</RootNamespace>
     <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>

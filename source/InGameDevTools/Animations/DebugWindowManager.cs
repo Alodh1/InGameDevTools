@@ -594,7 +594,7 @@ public sealed partial class DebugWindowManager : IDisposable
     private float _animationSpeed = 1;
     private ParticleEffectsManager _particleEffectsManager;
     private AnimationJson? _animationBuffer;
-    internal static DebugWindowManager _instance;
+    internal static DebugWindowManager _instance = null!;
     private readonly ImGuiModSystem? _imguiModSystem;
     private bool _drawSubscribed;
     private SourceAssetIndex? _sourceAssetIndex;

@@ -51,18 +51,21 @@ internal static class ElementPosePatches
     {
         static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
-            ConstructorInfo elementPoseCtor = AccessTools.Constructor(typeof(ElementPose));
-            ConstructorInfo extendedPoseCtor = AccessTools.Constructor(typeof(ExtendedElementPose));
-            MethodInfo setElementName = AccessTools.Method(typeof(ExtendedElementPose), nameof(ExtendedElementPose.ResolveElementName));
-
             List<CodeInstruction> codes = new(instructions);
+            ConstructorInfo? elementPoseCtor = AccessTools.Constructor(typeof(ElementPose));
+            ConstructorInfo? extendedPoseCtor = AccessTools.Constructor(typeof(ExtendedElementPose));
+            MethodInfo? setElementName = AccessTools.Method(typeof(ExtendedElementPose), nameof(ExtendedElementPose.ResolveElementName));
+            if (elementPoseCtor == null || extendedPoseCtor == null || setElementName == null)
+            {
+                return codes;
+            }
 
             for (int i = 0; i < codes.Count; i++)
             {
                 CodeInstruction instr = codes[i];
 
                 // Replace ElementPose constructor with ExtendedElementPose constructor
-                if (instr.opcode == OpCodes.Newobj && instr.operand == elementPoseCtor)
+                if (instr.opcode == OpCodes.Newobj && IsSameConstructor(instr.operand, elementPoseCtor))
                 {
                     instr.operand = extendedPoseCtor;
 
@@ -96,16 +99,20 @@ internal static class ElementPosePatches
         {
             List<CodeInstruction> codes = new(instructions);
 
-            ConstructorInfo elementPoseCtor = AccessTools.Constructor(typeof(ElementPose));
-            ConstructorInfo extendedPoseCtor = AccessTools.Constructor(typeof(ExtendedElementPose));
-            MethodInfo setElementName = AccessTools.Method(typeof(ExtendedElementPose), nameof(ExtendedElementPose.ResolveElementName));
+            ConstructorInfo? elementPoseCtor = AccessTools.Constructor(typeof(ElementPose));
+            ConstructorInfo? extendedPoseCtor = AccessTools.Constructor(typeof(ExtendedElementPose));
+            MethodInfo? setElementName = AccessTools.Method(typeof(ExtendedElementPose), nameof(ExtendedElementPose.ResolveElementName));
+            if (elementPoseCtor == null || extendedPoseCtor == null || setElementName == null)
+            {
+                return codes;
+            }
 
             for (int i = 0; i < codes.Count; i++)
             {
                 CodeInstruction instr = codes[i];
 
                 // Replace "newobj ElementPose::.ctor()" with "newobj ExtendedElementPose::.ctor()"
-                if (instr.opcode == OpCodes.Newobj && instr.operand == elementPoseCtor)
+                if (instr.opcode == OpCodes.Newobj && IsSameConstructor(instr.operand, elementPoseCtor))
                 {
                     instr.operand = extendedPoseCtor;
 
@@ -117,7 +124,7 @@ internal static class ElementPosePatches
                     {
                         CodeInstruction c = codes[j];
                         if (c.opcode == OpCodes.Callvirt && c.operand is System.Reflection.MethodInfo mi &&
-                            mi.Name == "Add" && mi.DeclaringType.IsGenericType &&
+                            mi.Name == "Add" && mi.DeclaringType != null && mi.DeclaringType.IsGenericType &&
                             mi.DeclaringType.GetGenericTypeDefinition() == typeof(List<>))
                         {
                             insertIndex = j + 1; // insert after this instruction
@@ -143,5 +150,12 @@ internal static class ElementPosePatches
 
             return codes;
         }
+    }
+
+    private static bool IsSameConstructor(object? operand, ConstructorInfo expected)
+    {
+        return operand is ConstructorInfo candidate &&
+            candidate.MetadataToken == expected.MetadataToken &&
+            candidate.Module == expected.Module;
     }
 }

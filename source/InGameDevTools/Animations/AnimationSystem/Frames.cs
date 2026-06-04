@@ -77,8 +77,8 @@ public readonly struct PlayerItemFrame
     {
         PlayerFrame player = PlayerFrame.Compose(frames.Select(entry => (entry.element.Player, entry.weight)));
         ItemFrame item = ItemFrame.Compose(frames
-            .Where(entry => entry.element.Item != null)
-            .Select(entry => (entry.element.Item.Value, entry.weight))
+            .Where(entry => entry.element.Item.HasValue)
+            .Select(entry => (entry.element.Item.GetValueOrDefault(), entry.weight))
             );
 
         return new(player, item);
@@ -391,7 +391,8 @@ public readonly struct ItemFrame
 
     public void Apply(ElementPose pose)
     {
-        if (Elements.TryGetValue(pose.ForElement.Name, out AnimationElement element))
+        string? name = pose.ForElement?.Name;
+        if (!string.IsNullOrWhiteSpace(name) && Elements.TryGetValue(name, out AnimationElement element))
         {
             element.Apply(pose);
         }
@@ -1343,10 +1344,10 @@ public readonly struct AnimationElement
 
     private static float? EditValue(float? value, float multiplier, float speed, string title)
     {
-        bool enabled = value != null;
+        bool enabled = value.HasValue;
         if (enabled)
         {
-            float valueValue = value.Value * multiplier;
+            float valueValue = value.GetValueOrDefault() * multiplier;
             ImGui.SetNextItemWidth(90);
             ImGui.DragFloat($"##{title}value", ref valueValue, speed); ImGui.SameLine();
 

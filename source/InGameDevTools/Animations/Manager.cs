@@ -94,7 +94,7 @@ public sealed class AnimationsManager
     public static void RegisterCollider(string item, string type, Action<LineSegmentCollider> setter, System.Func<LineSegmentCollider> getter) => DebugWindowManager.RegisterCollider(item, type, setter, getter);
 
     private readonly ICoreClientAPI _api;
-    internal static AnimationsManager _instance;
+    internal static AnimationsManager _instance = null!;
 
     private Animation? GetAnimationRecursive(string code, IEnumerable<string> tags)
     {
@@ -162,15 +162,34 @@ public sealed class AnimationsManager
             return result;
         }
 
-        foreach (KeyValuePair<string, JToken?> entry in json.Token as JObject)
+        if (json.Token is not JObject root)
+        {
+            LoggerUtil.Error(_api, this, $"Error on parsing animations file '{asset.Location}'. Expected a JSON object.");
+            return result;
+        }
+
+        foreach (KeyValuePair<string, JToken?> entry in root)
         {
             string code = entry.Key;
 
             try
             {
+                if (entry.Value == null)
+                {
+                    LoggerUtil.Error(_api, this, $"Error on parsing animation '{code}' from '{asset.Location}'. Animation entry is null.");
+                    continue;
+                }
+
                 JsonObject animationJson = new(entry.Value);
 
-                Animation animation = animationJson.AsObject<AnimationJson>().ToAnimation();
+                AnimationJson? animationDto = animationJson.AsObject<AnimationJson>();
+                if (animationDto == null)
+                {
+                    LoggerUtil.Error(_api, this, $"Error on parsing animation '{code}' from '{asset.Location}'. Animation entry could not be deserialized.");
+                    continue;
+                }
+
+                Animation animation = animationDto.ToAnimation();
 
                 string animationCode = code.Contains(':') ? code : $"{domain}:{code}";
 

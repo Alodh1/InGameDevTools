@@ -761,7 +761,7 @@ public sealed class PLayerKeyFrameJson
         }
 
         if (frame.Frame.UpperTorso != null) result.Elements.Add("UpperTorso", frame.Frame.UpperTorso.Value.ToArray());
-        if (frame.Frame.LowerTorso != null) result.Elements.Add("LowerTorso", frame.Frame.UpperTorso.Value.ToArray());
+        if (frame.Frame.LowerTorso != null) result.Elements.Add("LowerTorso", frame.Frame.LowerTorso.Value.ToArray());
         if (frame.Frame.DetachedAnchorFrame != null) result.Elements.Add("DetachedAnchor", frame.Frame.DetachedAnchorFrame.Value.ToArray());
 
         return result;

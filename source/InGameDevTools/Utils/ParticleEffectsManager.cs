@@ -3192,7 +3192,7 @@ public class ParticleEffectsManager
         Vector3 worldPosition = FromCameraReferenceFrame(player, position);
         Vector3 worldVelocity = FromCameraReferenceFrame(player, velocity);
 
-        Vec3f vanillaPlayerPosition = player.SidedPos.AheadCopy(0).XYZFloat.Add(0, (float)player.LocalEyePos.Y, 0);
+        Vec3f vanillaPlayerPosition = player.Pos.AheadCopy(0).XYZFloat.Add(0, (float)player.LocalEyePos.Y, 0);
 
         Vector3 effectPosition = new Vector3(vanillaPlayerPosition.X, vanillaPlayerPosition.Y, vanillaPlayerPosition.Z) + worldPosition;
 
@@ -3252,7 +3252,7 @@ public class ParticleEffectsManager
     }
     private static Vector3 FromCameraReferenceFrame(Entity player, Vector3 position)
     {
-        Vec3f vanillaViewVector = player.SidedPos.GetViewVector().Normalize();
+        Vec3f vanillaViewVector = player.Pos.GetViewVector().Normalize();
         Vector3 viewVector = new(vanillaViewVector.X, vanillaViewVector.Y, vanillaViewVector.Z);
         Vector3 vertical = new(0, 1, 0);
         Vector3 localZ = viewVector;
