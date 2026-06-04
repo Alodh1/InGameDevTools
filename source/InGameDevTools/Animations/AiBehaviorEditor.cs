@@ -43,17 +43,22 @@ public sealed partial class DebugWindowManager
     private int _aiBehaviorKnownTaskCodeIndex;
     private string[]? _aiBehaviorKnownTaskCodes;
     private readonly List<AiBehaviorLiveTaskInfo> _aiBehaviorLiveTasks = [];
+    private readonly List<AiBehaviorLiveTransition> _aiBehaviorLiveTransitions = [];
+    private readonly Dictionary<string, string> _aiBehaviorLiveActiveBySlot = new(StringComparer.OrdinalIgnoreCase);
     private long _aiBehaviorLiveEntityId;
     private string _aiBehaviorLiveEntityCode = "";
     private string _aiBehaviorLiveStatus = "No live entity target selected.";
     private string _aiBehaviorLiveServerStatus = "Singleplayer server API has not been checked.";
+    private bool _aiBehaviorLiveAutoRefresh = true;
+    private float _aiBehaviorLiveRefreshAccumulator;
+
+    private const float AiBehaviorLiveRefreshIntervalSeconds = 0.75f;
 
     private void AiBehaviorEditorTab(float deltaSeconds, bool showDiagnostics)
     {
-        _ = deltaSeconds;
-
         try
         {
+            UpdateAiBehaviorLiveAutoRefresh(deltaSeconds);
             EnsureAiBehaviorEntriesIndexed();
 
             NVector2 available = ImGui.GetContentRegionAvail();
@@ -101,10 +106,28 @@ public sealed partial class DebugWindowManager
     private void ClearAiBehaviorLiveApplyState()
     {
         _aiBehaviorLiveTasks.Clear();
+        _aiBehaviorLiveTransitions.Clear();
+        _aiBehaviorLiveActiveBySlot.Clear();
         _aiBehaviorLiveEntityId = 0;
         _aiBehaviorLiveEntityCode = "";
         _aiBehaviorLiveStatus = "No live entity target selected.";
         _aiBehaviorLiveServerStatus = "Singleplayer server API has not been checked.";
+        _aiBehaviorLiveRefreshAccumulator = 0f;
+    }
+
+    private void UpdateAiBehaviorLiveAutoRefresh(float deltaSeconds)
+    {
+        if (!_aiBehaviorLiveAutoRefresh || _aiBehaviorLiveEntityId == 0)
+        {
+            _aiBehaviorLiveRefreshAccumulator = 0f;
+            return;
+        }
+
+        _aiBehaviorLiveRefreshAccumulator += Math.Clamp(deltaSeconds, 0f, 0.25f);
+        if (_aiBehaviorLiveRefreshAccumulator < AiBehaviorLiveRefreshIntervalSeconds) return;
+
+        _aiBehaviorLiveRefreshAccumulator = 0f;
+        RefreshAiBehaviorLiveSnapshot(recordTransitions: true);
     }
 
     private void EnsureAiBehaviorEntriesIndexed()
@@ -748,6 +771,8 @@ public sealed partial class DebugWindowManager
         ImGui.SeparatorText("Live single entity");
         ImGui.TextWrapped("Read-only SP view. It shows the running task manager for one looked-at entity; source edits still need authored files.");
 
+        ImGui.Checkbox("Auto refresh##entity-ai-live-auto-refresh", ref _aiBehaviorLiveAutoRefresh);
+
         if (ImGui.Button("Use looked-at live target##entity-ai-live-looked-at", new NVector2(-1, 0)))
         {
             Entity? entity = TryGetLookedAtEntityForAiBehavior();
@@ -755,6 +780,8 @@ public sealed partial class DebugWindowManager
             {
                 _aiBehaviorLiveStatus = "No looked-at entity target found.";
                 _aiBehaviorLiveTasks.Clear();
+                _aiBehaviorLiveActiveBySlot.Clear();
+                _aiBehaviorLiveTransitions.Clear();
             }
             else
             {
@@ -766,9 +793,17 @@ public sealed partial class DebugWindowManager
         if (!hasLiveTarget) ImGui.BeginDisabled();
         if (ImGui.Button("Refresh live tasks##entity-ai-live-refresh", new NVector2(-1, 0)))
         {
-            RefreshAiBehaviorLiveSnapshot();
+            RefreshAiBehaviorLiveSnapshot(recordTransitions: true);
         }
         if (!hasLiveTarget) ImGui.EndDisabled();
+
+        if (_aiBehaviorLiveTransitions.Count > 0)
+        {
+            if (ImGui.Button("Clear activity log##entity-ai-live-clear-log", new NVector2(-1, 0)))
+            {
+                _aiBehaviorLiveTransitions.Clear();
+            }
+        }
 
         if (hasLiveTarget)
         {
@@ -777,8 +812,32 @@ public sealed partial class DebugWindowManager
         ImGui.TextWrapped(_aiBehaviorLiveServerStatus);
         ImGui.TextWrapped(_aiBehaviorLiveStatus);
 
+        if (_aiBehaviorLiveActiveBySlot.Count > 0)
+        {
+            ImGui.SeparatorText("Active slots");
+            foreach (KeyValuePair<string, string> active in _aiBehaviorLiveActiveBySlot.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                ImGui.TextWrapped($"{active.Key}: {active.Value}");
+            }
+        }
+
+        if (_aiBehaviorLiveTransitions.Count > 0)
+        {
+            ImGui.SeparatorText("Activity log");
+            if (ImGui.BeginChild("##entity-ai-live-transition-list", new NVector2(-float.Epsilon, 116f), true))
+            {
+                for (int index = _aiBehaviorLiveTransitions.Count - 1; index >= 0; index--)
+                {
+                    AiBehaviorLiveTransition transition = _aiBehaviorLiveTransitions[index];
+                    ImGui.TextWrapped($"{transition.Time} {transition.Text}");
+                }
+            }
+            ImGui.EndChild();
+        }
+
         if (_aiBehaviorLiveTasks.Count == 0) return;
 
+        ImGui.SeparatorText("Tasks");
         if (ImGui.BeginChild("##entity-ai-live-task-list", new NVector2(-float.Epsilon, Math.Clamp(_aiBehaviorLiveTasks.Count * 24f + 18f, 96f, 260f)), true))
         {
             for (int index = 0; index < _aiBehaviorLiveTasks.Count; index++)
@@ -1016,17 +1075,24 @@ public sealed partial class DebugWindowManager
 
     private void SetAiBehaviorLiveTarget(Entity entity, bool refresh)
     {
+        bool changedTarget = _aiBehaviorLiveEntityId != entity.EntityId;
         _aiBehaviorLiveEntityId = entity.EntityId;
         AssetLocation? code = entity.Properties?.Code;
         _aiBehaviorLiveEntityCode = code == null ? "<unknown entity>" : $"{code.Domain}:{code.Path}";
         _aiBehaviorLiveStatus = refresh ? "Refreshing live AI task list." : "Live entity target selected.";
+        _aiBehaviorLiveRefreshAccumulator = 0f;
+        if (changedTarget)
+        {
+            _aiBehaviorLiveTransitions.Clear();
+            _aiBehaviorLiveActiveBySlot.Clear();
+        }
         if (refresh)
         {
-            RefreshAiBehaviorLiveSnapshot();
+            RefreshAiBehaviorLiveSnapshot(recordTransitions: false);
         }
     }
 
-    private void RefreshAiBehaviorLiveSnapshot()
+    private void RefreshAiBehaviorLiveSnapshot(bool recordTransitions = true)
     {
         _aiBehaviorLiveTasks.Clear();
 
@@ -1035,6 +1101,7 @@ public sealed partial class DebugWindowManager
         {
             _aiBehaviorLiveServerStatus = "Singleplayer server API: unavailable; live AI read requires singleplayer.";
             _aiBehaviorLiveStatus = "Source editing still works; no live task manager is available.";
+            _aiBehaviorLiveActiveBySlot.Clear();
             return;
         }
 
@@ -1042,6 +1109,7 @@ public sealed partial class DebugWindowManager
         if (_aiBehaviorLiveEntityId == 0)
         {
             _aiBehaviorLiveStatus = "No live entity target selected.";
+            _aiBehaviorLiveActiveBySlot.Clear();
             return;
         }
 
@@ -1051,12 +1119,14 @@ public sealed partial class DebugWindowManager
             if (serverEntity == null)
             {
                 _aiBehaviorLiveStatus = $"Server entity #{_aiBehaviorLiveEntityId} was not found. Look at the entity again and refresh.";
+                _aiBehaviorLiveActiveBySlot.Clear();
                 return;
             }
 
             if (!TryGetAiTaskManager(serverEntity, out object? taskManager, out string managerSource) || taskManager == null)
             {
                 _aiBehaviorLiveStatus = $"No live task manager found on {_aiBehaviorLiveEntityCode} #{_aiBehaviorLiveEntityId}.";
+                _aiBehaviorLiveActiveBySlot.Clear();
                 return;
             }
 
@@ -1067,12 +1137,74 @@ public sealed partial class DebugWindowManager
                 _aiBehaviorLiveTasks.Add(BuildAiBehaviorLiveTaskInfo(task, activeTasks.Contains(task)));
             }
 
-            _aiBehaviorLiveStatus = $"Live read: {_aiBehaviorLiveTasks.Count} task(s) from {managerSource}.";
+            Dictionary<string, string> activeBySlot = BuildAiBehaviorActiveSlotMap(_aiBehaviorLiveTasks);
+            UpdateAiBehaviorLiveTransitions(activeBySlot, recordTransitions);
+            _aiBehaviorLiveStatus = $"Live read: {_aiBehaviorLiveTasks.Count} task(s), {activeBySlot.Count} active slot(s) from {managerSource}.";
         }
         catch (Exception exception)
         {
             _aiBehaviorLiveStatus = $"Live AI read failed: {exception.Message}";
             _aiBehaviorDiagnostics.Exception("Entity AI live read failed", exception);
+        }
+    }
+
+    private static Dictionary<string, string> BuildAiBehaviorActiveSlotMap(IEnumerable<AiBehaviorLiveTaskInfo> tasks)
+    {
+        Dictionary<string, string> activeBySlot = new(StringComparer.OrdinalIgnoreCase);
+        int unnamedIndex = 0;
+
+        foreach (AiBehaviorLiveTaskInfo task in tasks)
+        {
+            if (!task.IsActive) continue;
+
+            string slot = string.IsNullOrWhiteSpace(task.Slot) || task.Slot == "?"
+                ? $"task {++unnamedIndex}"
+                : $"slot {task.Slot}";
+            activeBySlot[slot] = task.Code;
+        }
+
+        return activeBySlot;
+    }
+
+    private void UpdateAiBehaviorLiveTransitions(IReadOnlyDictionary<string, string> activeBySlot, bool recordTransitions)
+    {
+        if (recordTransitions)
+        {
+            foreach (KeyValuePair<string, string> previous in _aiBehaviorLiveActiveBySlot)
+            {
+                if (!activeBySlot.ContainsKey(previous.Key))
+                {
+                    AddAiBehaviorLiveTransition($"{previous.Key}: stopped {previous.Value}");
+                }
+            }
+
+            foreach (KeyValuePair<string, string> current in activeBySlot)
+            {
+                if (!_aiBehaviorLiveActiveBySlot.TryGetValue(current.Key, out string? previousCode))
+                {
+                    AddAiBehaviorLiveTransition($"{current.Key}: started {current.Value}");
+                }
+                else if (!string.Equals(previousCode, current.Value, StringComparison.OrdinalIgnoreCase))
+                {
+                    AddAiBehaviorLiveTransition($"{current.Key}: {previousCode} -> {current.Value}");
+                }
+            }
+        }
+
+        _aiBehaviorLiveActiveBySlot.Clear();
+        foreach (KeyValuePair<string, string> active in activeBySlot)
+        {
+            _aiBehaviorLiveActiveBySlot[active.Key] = active.Value;
+        }
+    }
+
+    private void AddAiBehaviorLiveTransition(string text)
+    {
+        _aiBehaviorLiveTransitions.Add(new AiBehaviorLiveTransition(DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture), text));
+        const int maxTransitions = 80;
+        if (_aiBehaviorLiveTransitions.Count > maxTransitions)
+        {
+            _aiBehaviorLiveTransitions.RemoveRange(0, _aiBehaviorLiveTransitions.Count - maxTransitions);
         }
     }
 
@@ -1765,6 +1897,8 @@ public sealed partial class DebugWindowManager
         string Slot,
         string Cooldown,
         bool IsActive);
+
+    private sealed record AiBehaviorLiveTransition(string Time, string Text);
 
     private sealed record AiBehaviorVariantGroup(string Code, IReadOnlyList<string> States);
 }
