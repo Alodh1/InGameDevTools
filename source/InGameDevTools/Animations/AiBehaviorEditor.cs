@@ -47,6 +47,7 @@ public sealed partial class DebugWindowManager
     private readonly List<AiBehaviorLiveTransition> _aiBehaviorLiveTransitions = [];
     private readonly Dictionary<string, string> _aiBehaviorLiveActiveBySlot = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<AiBehaviorLiveFieldSnapshot> _aiBehaviorLiveFieldSnapshots = [];
+    private readonly List<AiBehaviorLiveRemovedTaskSnapshot> _aiBehaviorLiveRemovedTaskSnapshots = [];
     private long _aiBehaviorLiveEntityId;
     private string _aiBehaviorLiveEntityCode = "";
     private string _aiBehaviorLiveStatus = "No live entity target selected.";
@@ -109,10 +110,12 @@ public sealed partial class DebugWindowManager
     private void ClearAiBehaviorLiveApplyState()
     {
         RestoreAiBehaviorLiveFieldSnapshots(updateStatus: false);
+        RestoreAiBehaviorLiveRemovedTaskSnapshots(updateStatus: false);
         _aiBehaviorLiveTasks.Clear();
         _aiBehaviorLiveTransitions.Clear();
         _aiBehaviorLiveActiveBySlot.Clear();
         _aiBehaviorLiveFieldSnapshots.Clear();
+        _aiBehaviorLiveRemovedTaskSnapshots.Clear();
         _aiBehaviorLiveEntityId = 0;
         _aiBehaviorLiveEntityCode = "";
         _aiBehaviorLiveStatus = "No live entity target selected.";
@@ -811,11 +814,12 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        bool hasLiveEdits = _aiBehaviorLiveFieldSnapshots.Any(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId);
+        bool hasLiveEdits = HasAiBehaviorLiveEditsForCurrentTarget();
         if (!hasLiveEdits) ImGui.BeginDisabled();
         if (ImGui.Button("Revert live AI edits##entity-ai-live-revert-fields", new NVector2(-1, 0)))
         {
             RestoreAiBehaviorLiveFieldSnapshots(updateStatus: true);
+            RestoreAiBehaviorLiveRemovedTaskSnapshots(updateStatus: true);
             RefreshAiBehaviorLiveSnapshot(recordTransitions: false);
         }
         if (!hasLiveEdits) ImGui.EndDisabled();
@@ -930,6 +934,11 @@ public sealed partial class DebugWindowManager
             ExecuteAiBehaviorLiveTaskAction(task, "StopTask", "stopped");
         }
 
+        if (ImGui.Button("Remove selected task##entity-ai-live-remove-task", new NVector2(-1, 0)))
+        {
+            RemoveAiBehaviorLiveTask(task);
+        }
+
         bool changed = false;
         int drawn = 0;
 
@@ -954,7 +963,7 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        changed = _aiBehaviorLiveFieldSnapshots.Any(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId);
+        changed = HasAiBehaviorLiveEditsForCurrentTarget();
         if (drawn == 0 && taskSpecificDrawn == 0)
         {
             ImGui.TextWrapped("No writable common live fields were found on this task.");
@@ -962,7 +971,9 @@ public sealed partial class DebugWindowManager
 
         if (changed)
         {
-            ImGui.TextWrapped($"{_aiBehaviorLiveFieldSnapshots.Count(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId)} live field edit snapshot(s) are available for revert.");
+            int fieldCount = _aiBehaviorLiveFieldSnapshots.Count(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId);
+            int removedCount = _aiBehaviorLiveRemovedTaskSnapshots.Count(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId);
+            ImGui.TextWrapped($"{fieldCount} live field edit snapshot(s), {removedCount} removed task snapshot(s) are available for revert.");
         }
     }
 
@@ -1253,6 +1264,7 @@ public sealed partial class DebugWindowManager
         if (changedTarget)
         {
             RestoreAiBehaviorLiveFieldSnapshots(updateStatus: false);
+            RestoreAiBehaviorLiveRemovedTaskSnapshots(updateStatus: false);
         }
 
         _aiBehaviorLiveEntityId = entity.EntityId;
@@ -1345,6 +1357,13 @@ public sealed partial class DebugWindowManager
         return activeBySlot;
     }
 
+    private bool HasAiBehaviorLiveEditsForCurrentTarget()
+    {
+        return _aiBehaviorLiveEntityId != 0 &&
+            (_aiBehaviorLiveFieldSnapshots.Any(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId) ||
+             _aiBehaviorLiveRemovedTaskSnapshots.Any(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId));
+    }
+
     private string BuildAiBehaviorSlotBlockText(AiBehaviorLiveTaskInfo task)
     {
         if (task.IsActive) return "";
@@ -1429,6 +1448,81 @@ public sealed partial class DebugWindowManager
         RefreshAiBehaviorLiveSnapshot(recordTransitions: true);
     }
 
+    private void RemoveAiBehaviorLiveTask(AiBehaviorLiveTaskInfo task)
+    {
+        if (!TryGetCurrentAiBehaviorLiveTaskManager(out object? taskManager, out string status) || taskManager == null)
+        {
+            _aiBehaviorLiveStatus = status;
+            return;
+        }
+
+        if (!TryInvokeAiBehaviorTaskManagerMethod(taskManager, "RemoveTask", task, out string removeStatus))
+        {
+            _aiBehaviorLiveStatus = removeStatus;
+            _aiBehaviorDiagnostics.Warning(removeStatus);
+            return;
+        }
+
+        CaptureAiBehaviorLiveRemovedTaskSnapshot(taskManager, task);
+        AddAiBehaviorLiveTransition($"manual: removed {task.Code}");
+        _aiBehaviorLiveStatus = $"Live action: removed {task.Code}; use Revert live AI edits to re-add it.";
+        RefreshAiBehaviorLiveSnapshot(recordTransitions: true);
+    }
+
+    private void CaptureAiBehaviorLiveRemovedTaskSnapshot(object taskManager, AiBehaviorLiveTaskInfo task)
+    {
+        int taskRuntimeId = RuntimeHelpers.GetHashCode(task.TaskObject);
+        bool exists = _aiBehaviorLiveRemovedTaskSnapshots.Any(snapshot =>
+            snapshot.EntityId == _aiBehaviorLiveEntityId &&
+            snapshot.TaskRuntimeId == taskRuntimeId);
+        if (exists) return;
+
+        _aiBehaviorLiveRemovedTaskSnapshots.Add(new AiBehaviorLiveRemovedTaskSnapshot(
+            _aiBehaviorLiveEntityId,
+            taskRuntimeId,
+            new WeakReference<object>(taskManager),
+            task.TaskObject,
+            task.Code));
+    }
+
+    private void RestoreAiBehaviorLiveRemovedTaskSnapshots(bool updateStatus)
+    {
+        long targetEntityId = _aiBehaviorLiveEntityId;
+        bool restoreAll = targetEntityId == 0;
+        int restored = 0;
+        int skipped = 0;
+
+        for (int index = _aiBehaviorLiveRemovedTaskSnapshots.Count - 1; index >= 0; index--)
+        {
+            AiBehaviorLiveRemovedTaskSnapshot snapshot = _aiBehaviorLiveRemovedTaskSnapshots[index];
+            if (!restoreAll && snapshot.EntityId != targetEntityId) continue;
+
+            object? taskManager = null;
+            if (!snapshot.TaskManager.TryGetTarget(out taskManager) && !TryGetCurrentAiBehaviorLiveTaskManager(out taskManager, out _))
+            {
+                taskManager = null;
+            }
+
+            if (taskManager != null && TryInvokeAiBehaviorTaskManagerMethod(taskManager, "AddTask", snapshot.TaskObject, snapshot.Code, out _))
+            {
+                restored++;
+            }
+            else
+            {
+                skipped++;
+            }
+
+            _aiBehaviorLiveRemovedTaskSnapshots.RemoveAt(index);
+        }
+
+        if (updateStatus && (restored > 0 || skipped > 0))
+        {
+            _aiBehaviorLiveStatus = skipped == 0
+                ? $"Re-added {restored} removed live AI task(s)."
+                : $"Re-added {restored} removed live AI task(s); skipped {skipped} stale task reference(s).";
+        }
+    }
+
     private bool TryGetCurrentAiBehaviorLiveTaskManager(out object? taskManager, out string status)
     {
         taskManager = null;
@@ -1500,6 +1594,22 @@ public sealed partial class DebugWindowManager
 
         status = $"No compatible {methodName} overload found on {taskManager.GetType().Name}.";
         return false;
+    }
+
+    private static bool TryInvokeAiBehaviorTaskManagerMethod(object taskManager, string methodName, object taskObject, string code, out string status)
+    {
+        string slot = ReadAiBehaviorMemberString(taskObject, "Slot") ?? ReadAiBehaviorMemberString(taskObject, "slot") ?? "?";
+        AiBehaviorLiveTaskInfo task = new(
+            taskObject,
+            string.IsNullOrWhiteSpace(code) ? taskObject.GetType().Name : code,
+            taskObject.GetType().FullName ?? taskObject.GetType().Name,
+            ReadAiBehaviorMemberString(taskObject, "Priority") ?? "?",
+            slot,
+            BuildAiBehaviorCooldownText(taskObject),
+            false,
+            "",
+            "");
+        return TryInvokeAiBehaviorTaskManagerMethod(taskManager, methodName, task, out status);
     }
 
     private static int ScoreAiBehaviorTaskManagerMethod(MethodInfo method, AiBehaviorLiveTaskInfo task)
@@ -2812,6 +2922,13 @@ public sealed partial class DebugWindowManager
         WeakReference<object> Target,
         string MemberName,
         object? OriginalValue);
+
+    private sealed record AiBehaviorLiveRemovedTaskSnapshot(
+        long EntityId,
+        int TaskRuntimeId,
+        WeakReference<object> TaskManager,
+        object TaskObject,
+        string Code);
 
     private sealed record AiBehaviorLiveNumericSpec(
         string Label,
