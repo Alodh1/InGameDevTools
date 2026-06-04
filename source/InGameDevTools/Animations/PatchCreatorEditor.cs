@@ -197,21 +197,13 @@ public sealed partial class DebugWindowManager
 
         try
         {
-            int processed = 0;
-            while (processed < PatchCreatorIndexBatchSize && _patchCreatorIndexAssetIndex < _patchCreatorIndexAssets.Count)
-            {
-                IndexPatchCreatorAsset(_patchCreatorIndexAssets[_patchCreatorIndexAssetIndex++]);
-                processed++;
-            }
-
-            if (_patchCreatorIndexAssetIndex >= _patchCreatorIndexAssets.Count)
-            {
-                CompletePatchCreatorIndexing();
-            }
-            else
-            {
-                _patchCreatorStatus = BuildPatchCreatorIndexProgressText();
-            }
+            DevToolsBatching.ProcessBatch(
+                _patchCreatorIndexAssets,
+                ref _patchCreatorIndexAssetIndex,
+                PatchCreatorIndexBatchSize,
+                IndexPatchCreatorAsset,
+                CompletePatchCreatorIndexing,
+                () => _patchCreatorStatus = BuildPatchCreatorIndexProgressText());
         }
         catch (Exception exception)
         {

@@ -189,22 +189,17 @@ public sealed partial class DebugWindowManager
 
         try
         {
-            int processed = 0;
-            while (processed < AiBehaviorIndexBatchSize && _aiBehaviorIndexAssetIndex < _aiBehaviorIndexAssets.Count)
-            {
-                IndexAiBehaviorAsset(_aiBehaviorIndexAssets[_aiBehaviorIndexAssetIndex++]);
-                processed++;
-            }
-
-            if (_aiBehaviorIndexAssetIndex >= _aiBehaviorIndexAssets.Count)
-            {
-                CompleteAiBehaviorIndexing();
-            }
-            else
-            {
-                _aiBehaviorStatus = BuildAiBehaviorIndexProgressText();
-                RebuildVisibleAiBehaviorEntries();
-            }
+            DevToolsBatching.ProcessBatch(
+                _aiBehaviorIndexAssets,
+                ref _aiBehaviorIndexAssetIndex,
+                AiBehaviorIndexBatchSize,
+                IndexAiBehaviorAsset,
+                CompleteAiBehaviorIndexing,
+                () =>
+                {
+                    _aiBehaviorStatus = BuildAiBehaviorIndexProgressText();
+                    RebuildVisibleAiBehaviorEntries();
+                });
         }
         catch (Exception exception)
         {

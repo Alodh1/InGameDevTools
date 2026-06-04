@@ -309,21 +309,13 @@ public sealed partial class DebugWindowManager
 
         try
         {
-            int processed = 0;
-            while (processed < WorldgenIndexBatchSize && _worldgenIndexAssetIndex < _worldgenIndexAssets.Count)
-            {
-                IndexWorldgenAsset(_worldgenIndexAssets[_worldgenIndexAssetIndex++]);
-                processed++;
-            }
-
-            if (_worldgenIndexAssetIndex >= _worldgenIndexAssets.Count)
-            {
-                CompleteWorldgenIndexing();
-            }
-            else
-            {
-                _worldgenStatus = BuildWorldgenIndexProgressText();
-            }
+            DevToolsBatching.ProcessBatch(
+                _worldgenIndexAssets,
+                ref _worldgenIndexAssetIndex,
+                WorldgenIndexBatchSize,
+                IndexWorldgenAsset,
+                CompleteWorldgenIndexing,
+                () => _worldgenStatus = BuildWorldgenIndexProgressText());
         }
         catch (Exception exception)
         {
