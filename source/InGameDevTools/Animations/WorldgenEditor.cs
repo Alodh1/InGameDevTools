@@ -86,7 +86,6 @@ public sealed partial class DebugWindowManager
     private readonly Dictionary<string, WorldgenDraftState> _worldgenDraftStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ImGuiThreePanelLayoutState _worldgenLayout = new(0.26f, 0.30f);
     private readonly DevToolsEditorDiagnostics _worldgenDiagnostics = new("Worldgen");
-    private float _worldgenPreviewBottomFraction = 0.42f;
     private bool _worldgenPreviewPoppedOut;
     private float _worldgenPoppedViewportWidth = 1100f;
     private float _worldgenPoppedViewportHeight = 760f;
@@ -595,6 +594,7 @@ public sealed partial class DebugWindowManager
         changed |= DrawWorldgenBoolField(row, "withOreMap", "With ore map");
         changed |= DrawWorldgenStringField(row, "handbookPageCode", "Handbook code");
         changed |= DrawWorldgenStringField(row, "oreMapCode", "Ore map code");
+        changed |= DrawWorldgenNatFloatObjects(row, "NatFloat fields");
         changed |= DrawWorldgenObjectJsonField(row, "attributes", "Attributes JSON");
         return changed;
     }
@@ -732,7 +732,7 @@ public sealed partial class DebugWindowManager
 
     private bool DrawWorldgenIntField(JObject row, string propertyName, string label)
     {
-        int value = row[propertyName]?.Value<int?>() ?? 0;
+        int value = TryReadJsonDouble(row[propertyName], out double parsed) ? (int)Math.Round(parsed) : 0;
         if (!ImGui.InputInt($"{label}##worldgen-{propertyName}", ref value)) return false;
 
         row[propertyName] = value;
@@ -741,7 +741,7 @@ public sealed partial class DebugWindowManager
 
     private bool DrawWorldgenIntDragField(JObject row, string propertyName, string label, int min, int max, float speed)
     {
-        int value = row[propertyName]?.Value<int?>() ?? min;
+        int value = TryReadJsonDouble(row[propertyName], out double parsed) ? (int)Math.Round(parsed) : min;
         ImGui.SetNextItemWidth(-float.Epsilon);
         if (!ImGui.DragInt($"{label}##worldgen-{propertyName}", ref value, speed, min, max)) return false;
 
@@ -751,7 +751,7 @@ public sealed partial class DebugWindowManager
 
     private bool DrawWorldgenFloatField(JObject row, string propertyName, string label)
     {
-        float value = row[propertyName]?.Value<float?>() ?? 0f;
+        float value = TryReadJsonFloat(row[propertyName], out float parsed) ? parsed : 0f;
         if (!ImGui.InputFloat($"{label}##worldgen-{propertyName}", ref value)) return false;
 
         row[propertyName] = value;
@@ -760,7 +760,7 @@ public sealed partial class DebugWindowManager
 
     private bool DrawWorldgenFloatDragField(JObject row, string propertyName, string label, float min, float max, float speed, string format)
     {
-        float value = row[propertyName]?.Value<float?>() ?? min;
+        float value = TryReadJsonFloat(row[propertyName], out float parsed) ? parsed : min;
         ImGui.SetNextItemWidth(-float.Epsilon);
         if (!ImGui.DragFloat($"{label}##worldgen-{propertyName}", ref value, speed, min, max, format)) return false;
 
@@ -770,7 +770,7 @@ public sealed partial class DebugWindowManager
 
     private bool DrawWorldgenProbabilityField(JObject row, string propertyName, string label)
     {
-        float value = row[propertyName]?.Value<float?>() ?? 0f;
+        float value = TryReadJsonFloat(row[propertyName], out float parsed) ? parsed : 0f;
         float max = Math.Max(1f, value);
         ImGui.SetNextItemWidth(-float.Epsilon);
         if (!ImGui.SliderFloat($"{label}##worldgen-{propertyName}", ref value, 0f, max, "%.3f")) return false;
@@ -781,8 +781,8 @@ public sealed partial class DebugWindowManager
 
     private bool DrawWorldgenRangeField(JObject row, string minPropertyName, string maxPropertyName, string label, float defaultMin, float defaultMax, string format)
     {
-        float minValue = row[minPropertyName]?.Value<float?>() ?? defaultMin;
-        float maxValue = row[maxPropertyName]?.Value<float?>() ?? defaultMax;
+        float minValue = TryReadJsonFloat(row[minPropertyName], out float parsedMin) ? parsedMin : defaultMin;
+        float maxValue = TryReadJsonFloat(row[maxPropertyName], out float parsedMax) ? parsedMax : defaultMax;
         float lower = Math.Min(defaultMin, Math.Min(minValue, maxValue));
         float upper = Math.Max(defaultMax, Math.Max(minValue, maxValue));
         bool changed = false;
@@ -800,7 +800,9 @@ public sealed partial class DebugWindowManager
         {
             if (minValue > maxValue)
             {
-                if (Math.Abs((row[minPropertyName]?.Value<float?>() ?? minValue) - minValue) > Math.Abs((row[maxPropertyName]?.Value<float?>() ?? maxValue) - maxValue))
+                float previousMin = TryReadJsonFloat(row[minPropertyName], out float previousMinValue) ? previousMinValue : minValue;
+                float previousMax = TryReadJsonFloat(row[maxPropertyName], out float previousMaxValue) ? previousMaxValue : maxValue;
+                if (Math.Abs(previousMin - minValue) > Math.Abs(previousMax - maxValue))
                 {
                     maxValue = minValue;
                 }
@@ -837,7 +839,7 @@ public sealed partial class DebugWindowManager
 
     private bool DrawWorldgenBoolField(JObject row, string propertyName, string label)
     {
-        bool value = row[propertyName]?.Value<bool?>() ?? false;
+        bool value = TryReadJsonBool(row[propertyName], out bool parsed) && parsed;
         if (!ImGui.Checkbox($"{label}##worldgen-{propertyName}", ref value)) return false;
 
         row[propertyName] = value;
@@ -877,6 +879,47 @@ public sealed partial class DebugWindowManager
                 row.Remove(propertyName);
                 changed = true;
             }
+        }
+
+        ImGui.PopID();
+        return changed;
+    }
+
+    private bool DrawWorldgenNatFloatObjects(JObject row, string label)
+    {
+        List<JProperty> natFloatProperties = row.Properties()
+            .Where(property => property.Value is JObject obj && LooksLikeNatFloat(obj))
+            .OrderBy(property => property.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (natFloatProperties.Count == 0) return false;
+
+        bool changed = false;
+        if (ImGui.CollapsingHeader($"{label} ({natFloatProperties.Count})##worldgen-natfloat-objects"))
+        {
+            foreach (JProperty property in natFloatProperties)
+            {
+                if (property.Value is JObject natFloat)
+                {
+                    changed |= DrawWorldgenNatFloatObject(natFloat, property.Name);
+                }
+            }
+        }
+
+        return changed;
+    }
+
+    private bool DrawWorldgenNatFloatObject(JObject natFloat, string label)
+    {
+        bool changed = false;
+        ImGui.PushID($"worldgen-natfloat-object-{label}");
+        if (ImGui.TreeNode(label))
+        {
+            changed |= DrawWorldgenNatFloatDistributionField(natFloat);
+            changed |= DrawWorldgenFloatDragField(natFloat, "avg", "Average", -100000f, 100000f, 0.01f, "%.4f");
+            changed |= DrawWorldgenFloatDragField(natFloat, "var", "Variance", 0f, 100000f, 0.01f, "%.4f");
+            changed |= DrawWorldgenFloatDragField(natFloat, "offset", "Offset", -100000f, 100000f, 0.01f, "%.4f");
+            ImGui.TreePop();
         }
 
         ImGui.PopID();
@@ -2426,7 +2469,9 @@ public sealed partial class DebugWindowManager
 
         try
         {
-            DepositVariant? draft = row.ToObject<DepositVariant>();
+            JObject draftRow = (JObject)row.DeepClone();
+            SanitizeWorldgenToken(draftRow);
+            DepositVariant? draft = draftRow.ToObject<DepositVariant>();
             if (draft == null)
             {
                 status = "selected deposit draft did not deserialize";
@@ -3132,43 +3177,43 @@ public sealed partial class DebugWindowManager
 
     private static float ReadWorldgenFloat(JObject row, string name, float fallback)
     {
-        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && token.Type != JTokenType.Null
-            ? token.Value<float>()
+        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && TryReadJsonFloat(token, out float value)
+            ? value
             : fallback;
     }
 
     private static double ReadWorldgenDouble(JObject row, string name, double fallback)
     {
-        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && token.Type != JTokenType.Null
-            ? token.Value<double>()
+        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && TryReadJsonDouble(token, out double value)
+            ? value
             : fallback;
     }
 
     private static int ReadWorldgenInt(JObject row, string name, int fallback)
     {
-        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && token.Type != JTokenType.Null
-            ? token.Value<int>()
+        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && TryReadJsonDouble(token, out double value)
+            ? (int)Math.Round(value)
             : fallback;
     }
 
     private static bool ReadWorldgenBool(JObject row, string name, bool fallback)
     {
-        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && token.Type != JTokenType.Null
-            ? token.Value<bool>()
+        return row.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out JToken? token) && TryReadJsonBool(token, out bool value)
+            ? value
             : fallback;
     }
 
     private static float[] ReadWorldgenFloatArray(JArray array)
     {
         return array
-            .Select(token => token.Value<float>())
+            .Select(token => TryReadJsonFloat(token, out float value) ? value : 0f)
             .ToArray();
     }
 
     private static double[] ReadWorldgenDoubleArray(JArray array)
     {
         return array
-            .Select(token => token.Value<double>())
+            .Select(token => TryReadJsonDouble(token, out double value) ? value : 0d)
             .ToArray();
     }
 
@@ -6318,6 +6363,7 @@ public sealed partial class DebugWindowManager
         try
         {
             token = JToken.Parse(text);
+            SanitizeWorldgenToken(token);
             return true;
         }
         catch (Exception first)
@@ -6325,6 +6371,10 @@ public sealed partial class DebugWindowManager
             try
             {
                 token = JsonObject.FromJson(text).Token;
+                if (token != null)
+                {
+                    SanitizeWorldgenToken(token);
+                }
                 return token != null;
             }
             catch (Exception second)
@@ -6337,6 +6387,88 @@ public sealed partial class DebugWindowManager
                 return false;
             }
         }
+    }
+
+    private static void SanitizeWorldgenToken(JToken token)
+    {
+        switch (token)
+        {
+            case JObject obj:
+                SanitizeWorldgenObject(obj);
+                break;
+            case JArray array:
+                SanitizeWorldgenArray(array);
+                break;
+            case JValue value:
+                SanitizeWorldgenValue(value);
+                break;
+        }
+    }
+
+    private static void SanitizeWorldgenObject(JObject obj)
+    {
+        bool natFloat = LooksLikeNatFloat(obj);
+        foreach (JProperty property in obj.Properties().ToList())
+        {
+            if (property.Value.Type == JTokenType.Undefined)
+            {
+                if (natFloat && IsWorldgenNatFloatNumberProperty(property.Name))
+                {
+                    property.Value = new JValue(0f);
+                }
+                else if (natFloat && property.Name.Equals("dist", StringComparison.OrdinalIgnoreCase))
+                {
+                    property.Value = new JValue("uniform");
+                }
+                else
+                {
+                    property.Remove();
+                }
+                continue;
+            }
+
+            SanitizeWorldgenToken(property.Value);
+        }
+    }
+
+    private static void SanitizeWorldgenArray(JArray array)
+    {
+        for (int index = 0; index < array.Count; index++)
+        {
+            JToken token = array[index];
+            if (token.Type == JTokenType.Undefined)
+            {
+                array[index] = new JValue(0f);
+                continue;
+            }
+
+            SanitizeWorldgenToken(token);
+        }
+    }
+
+    private static void SanitizeWorldgenValue(JValue value)
+    {
+        if (value.Type != JTokenType.Float) return;
+
+        try
+        {
+            double number = value.Value<double>();
+            if (double.IsNaN(number) || double.IsInfinity(number))
+            {
+                value.Value = 0d;
+            }
+        }
+        catch
+        {
+            value.Value = 0d;
+        }
+    }
+
+    private static bool IsWorldgenNatFloatNumberProperty(string propertyName)
+    {
+        return propertyName.Equals("avg", StringComparison.OrdinalIgnoreCase) ||
+            propertyName.Equals("var", StringComparison.OrdinalIgnoreCase) ||
+            propertyName.Equals("offset", StringComparison.OrdinalIgnoreCase);
     }
 
     private static IEnumerable<JObject> EnumerateObjects(JToken root) => EnumerateTokens(root).OfType<JObject>();
@@ -6384,10 +6516,36 @@ public sealed partial class DebugWindowManager
     private static bool TryReadJsonFloat(JToken? token, out float value)
     {
         value = 0f;
-        if (token == null) return false;
+        if (!TryReadJsonDouble(token, out double doubleValue)) return false;
+
+        value = (float)doubleValue;
+        return !float.IsNaN(value) && !float.IsInfinity(value);
+    }
+
+    private static bool TryReadJsonDouble(JToken? token, out double value)
+    {
+        value = 0d;
+        if (token == null || token.Type == JTokenType.Null || token.Type == JTokenType.Undefined) return false;
+
         try
         {
-            value = token.Value<float>();
+            value = token.Value<double>();
+            return !double.IsNaN(value) && !double.IsInfinity(value);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryReadJsonBool(JToken? token, out bool value)
+    {
+        value = false;
+        if (token == null || token.Type == JTokenType.Null || token.Type == JTokenType.Undefined) return false;
+
+        try
+        {
+            value = token.Value<bool>();
             return true;
         }
         catch
@@ -6398,8 +6556,8 @@ public sealed partial class DebugWindowManager
 
     private static string FormatJsonNumber(JToken token)
     {
-        return token.Type == JTokenType.Integer || token.Type == JTokenType.Float
-            ? token.Value<double>().ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)
+        return TryReadJsonDouble(token, out double value)
+            ? value.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)
             : token.ToString();
     }
 
