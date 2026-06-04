@@ -919,6 +919,17 @@ public sealed partial class DebugWindowManager
         ImGui.TextWrapped($"{task.Code} on {_aiBehaviorLiveEntityCode} #{_aiBehaviorLiveEntityId}");
         ImGui.TextWrapped("Live edits affect this one running entity instance. Use authored source save for future spawns.");
 
+        ImGui.SeparatorText("Live actions");
+        if (ImGui.Button("Force execute selected task##entity-ai-live-force-execute", new NVector2(-1, 0)))
+        {
+            ExecuteAiBehaviorLiveTaskAction(task, "ExecuteTask", "force executed");
+        }
+
+        if (ImGui.Button("Stop selected task##entity-ai-live-stop-task", new NVector2(-1, 0)))
+        {
+            ExecuteAiBehaviorLiveTaskAction(task, "StopTask", "stopped");
+        }
+
         bool changed = false;
         int drawn = 0;
 
@@ -1396,6 +1407,168 @@ public sealed partial class DebugWindowManager
         {
             _aiBehaviorLiveTransitions.RemoveRange(0, _aiBehaviorLiveTransitions.Count - maxTransitions);
         }
+    }
+
+    private void ExecuteAiBehaviorLiveTaskAction(AiBehaviorLiveTaskInfo task, string methodName, string actionText)
+    {
+        if (!TryGetCurrentAiBehaviorLiveTaskManager(out object? taskManager, out string status) || taskManager == null)
+        {
+            _aiBehaviorLiveStatus = status;
+            return;
+        }
+
+        if (!TryInvokeAiBehaviorTaskManagerMethod(taskManager, methodName, task, out string invokeStatus))
+        {
+            _aiBehaviorLiveStatus = invokeStatus;
+            _aiBehaviorDiagnostics.Warning(invokeStatus);
+            return;
+        }
+
+        AddAiBehaviorLiveTransition($"manual: {actionText} {task.Code}");
+        _aiBehaviorLiveStatus = $"Live action: {actionText} {task.Code}.";
+        RefreshAiBehaviorLiveSnapshot(recordTransitions: true);
+    }
+
+    private bool TryGetCurrentAiBehaviorLiveTaskManager(out object? taskManager, out string status)
+    {
+        taskManager = null;
+        ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
+        if (serverApi == null)
+        {
+            status = "Live AI actions require an integrated singleplayer server.";
+            return false;
+        }
+
+        if (_aiBehaviorLiveEntityId == 0)
+        {
+            status = "No live entity target selected.";
+            return false;
+        }
+
+        Entity? serverEntity = serverApi.World.GetEntityById(_aiBehaviorLiveEntityId);
+        if (serverEntity == null)
+        {
+            status = $"Server entity #{_aiBehaviorLiveEntityId} was not found. Look at the entity again and refresh.";
+            return false;
+        }
+
+        if (!TryGetAiTaskManager(serverEntity, out taskManager, out string managerSource) || taskManager == null)
+        {
+            status = $"No live task manager found on {_aiBehaviorLiveEntityCode} #{_aiBehaviorLiveEntityId}.";
+            return false;
+        }
+
+        status = managerSource;
+        return true;
+    }
+
+    private static bool TryInvokeAiBehaviorTaskManagerMethod(object taskManager, string methodName, AiBehaviorLiveTaskInfo task, out string status)
+    {
+        List<MethodInfo> candidates = taskManager.GetType()
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Where(method => string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(method => ScoreAiBehaviorTaskManagerMethod(method, task))
+            .ToList();
+
+        foreach (MethodInfo method in candidates)
+        {
+            if (!TryBuildAiBehaviorTaskManagerArgs(method, task, out object?[] args)) continue;
+
+            try
+            {
+                object? result = method.Invoke(taskManager, args);
+                if (result is bool boolResult && !boolResult)
+                {
+                    status = $"{methodName} returned false for {task.Code}.";
+                    return false;
+                }
+
+                status = $"{methodName} invoked via {method.Name}({string.Join(", ", method.GetParameters().Select(parameter => parameter.ParameterType.Name))}).";
+                return true;
+            }
+            catch (TargetInvocationException exception)
+            {
+                status = $"{methodName} failed for {task.Code}: {exception.InnerException?.Message ?? exception.Message}";
+                return false;
+            }
+            catch (Exception exception)
+            {
+                status = $"{methodName} failed for {task.Code}: {exception.Message}";
+                return false;
+            }
+        }
+
+        status = $"No compatible {methodName} overload found on {taskManager.GetType().Name}.";
+        return false;
+    }
+
+    private static int ScoreAiBehaviorTaskManagerMethod(MethodInfo method, AiBehaviorLiveTaskInfo task)
+    {
+        ParameterInfo[] parameters = method.GetParameters();
+        if (parameters.Length == 1 && parameters[0].ParameterType.IsInstanceOfType(task.TaskObject)) return 0;
+        if (parameters.Length == 1 && parameters[0].ParameterType == typeof(string)) return 1;
+        if (parameters.Length == 2 && parameters[0].ParameterType.IsInstanceOfType(task.TaskObject)) return 2;
+        if (parameters.Length == 2 && parameters[0].ParameterType == typeof(string)) return 3;
+        return 20 + parameters.Length;
+    }
+
+    private static bool TryBuildAiBehaviorTaskManagerArgs(MethodInfo method, AiBehaviorLiveTaskInfo task, out object?[] args)
+    {
+        ParameterInfo[] parameters = method.GetParameters();
+        args = new object?[parameters.Length];
+        if (parameters.Length == 0 || parameters.Length > 3) return false;
+
+        for (int index = 0; index < parameters.Length; index++)
+        {
+            Type parameterType = parameters[index].ParameterType;
+            string parameterName = parameters[index].Name ?? "";
+
+            if (parameterType.IsInstanceOfType(task.TaskObject))
+            {
+                args[index] = task.TaskObject;
+                continue;
+            }
+
+            if (parameterType == typeof(string))
+            {
+                args[index] = task.Code;
+                continue;
+            }
+
+            if (parameterType == typeof(int))
+            {
+                args[index] = TryParseAiBehaviorSlot(task.Slot, out int slot) ? slot : 0;
+                continue;
+            }
+
+            if (parameterType == typeof(bool))
+            {
+                args[index] = true;
+                continue;
+            }
+
+            if (parameters[index].HasDefaultValue)
+            {
+                args[index] = parameters[index].DefaultValue;
+                continue;
+            }
+
+            if (parameterName.Contains("slot", StringComparison.OrdinalIgnoreCase) &&
+                TryConvertAiBehaviorLiveValue(TryParseAiBehaviorSlot(task.Slot, out int parsedSlot) ? parsedSlot : 0, parameterType, out object? convertedSlot))
+            {
+                args[index] = convertedSlot;
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryParseAiBehaviorSlot(string slotText, out int slot)
+    {
+        return int.TryParse(slotText, NumberStyles.Integer, CultureInfo.InvariantCulture, out slot);
     }
 
     private bool TryGetAiTaskManager(Entity serverEntity, out object? taskManager, out string source)
