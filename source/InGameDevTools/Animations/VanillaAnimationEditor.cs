@@ -99,6 +99,12 @@ public sealed partial class DebugWindowManager
     private double _vanillaViewportGizmoDragStartOffsetX;
     private double _vanillaViewportGizmoDragStartOffsetY;
     private double _vanillaViewportGizmoDragStartOffsetZ;
+    private double _vanillaViewportGizmoDragStartRotationX;
+    private double _vanillaViewportGizmoDragStartRotationY;
+    private double _vanillaViewportGizmoDragStartRotationZ;
+    private Vec3d _vanillaViewportGizmoDragBaseRotationDegrees = new();
+    private RigIkMatrix3 _vanillaViewportGizmoDragRotationParentBasis = RigIkMatrix3.Identity;
+    private TransformGizmoSpace _vanillaViewportGizmoDragSpace = TransformGizmoSpace.World;
     private string _vanillaViewportGizmoDragRowKey = "";
     private int _vanillaViewportGizmoDragKeyFrameIndex = -1;
     private string _vanillaViewportGizmoDragElementName = "";
@@ -1627,6 +1633,12 @@ public sealed partial class DebugWindowManager
             _vanillaViewportGizmoDragStartOffsetX = element.OffsetX ?? 0;
             _vanillaViewportGizmoDragStartOffsetY = element.OffsetY ?? 0;
             _vanillaViewportGizmoDragStartOffsetZ = element.OffsetZ ?? 0;
+            _vanillaViewportGizmoDragStartRotationX = element.RotationX ?? 0;
+            _vanillaViewportGizmoDragStartRotationY = element.RotationY ?? 0;
+            _vanillaViewportGizmoDragStartRotationZ = element.RotationZ ?? 0;
+            _vanillaViewportGizmoDragBaseRotationDegrees = projection.BaseRotationDegrees;
+            _vanillaViewportGizmoDragRotationParentBasis = projection.RotationParentBasis;
+            _vanillaViewportGizmoDragSpace = GizmoSpace;
             _vanillaViewportGizmoDragRowKey = row.Key;
             _vanillaViewportGizmoDragKeyFrameIndex = _vanillaSelection.KeyFrameIndex;
             _vanillaViewportGizmoDragElementName = _vanillaSelection.ElementName;
@@ -1972,11 +1984,8 @@ public sealed partial class DebugWindowManager
             case TransformGizmoMode.Rotate:
             {
                 element = GetOrCreateVanillaEditableKeyFrameElement(keyFrame, _vanillaSelection.ElementName, element);
-                double value = _vanillaViewportGizmoDragStartValue;
-                value += UpdateVanillaViewportGizmoRingDrag();
-                value = NormalizeVanillaDegrees(SnapVanillaGizmoValue(value, Math.Max(0.001, TransformGizmoIncrement)));
-                if (Math.Abs(value - GetVanillaGizmoAxisValue(element, mode, axis)) < 0.0001) return false;
-                SetVanillaGizmoAxisValue(element, mode, axis, value);
+                double deltaDegrees = SnapVanillaGizmoValue(UpdateVanillaViewportGizmoRingDrag(), Math.Max(0.001, TransformGizmoIncrement));
+                if (!ApplyVanillaViewportRotationGizmoDrag(element, axis, deltaDegrees)) return false;
                 break;
             }
             default:
@@ -2014,6 +2023,46 @@ public sealed partial class DebugWindowManager
         element = GetOrCreateVanillaEditableKeyFrameElement(keyFrame, _vanillaSelection.ElementName, element);
         SetVanillaGizmoMoveOffsetValues(element, offsetX, offsetY, offsetZ);
         ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
+        return true;
+    }
+
+    private bool ApplyVanillaViewportRotationGizmoDrag(AnimationKeyFrameElement element, TransformGizmoAxis axis, double deltaDegrees)
+    {
+        Vec3d baseRotation = _vanillaViewportGizmoDragBaseRotationDegrees;
+        RigIkMatrix3 startLocalRotation = RigIkMatrix3.FromEulerDegrees(
+            baseRotation.X + _vanillaViewportGizmoDragStartRotationX,
+            baseRotation.Y + _vanillaViewportGizmoDragStartRotationY,
+            baseRotation.Z + _vanillaViewportGizmoDragStartRotationZ);
+
+        RigIkMatrix3 axisRotation = RigIkMatrix3.FromAxisAngle(GetVanillaCanonicalGizmoAxis(axis), deltaDegrees * GameMath.DEG2RAD);
+        RigIkMatrix3 newLocalRotation;
+        if (_vanillaViewportGizmoDragSpace == TransformGizmoSpace.World)
+        {
+            RigIkMatrix3 parent = _vanillaViewportGizmoDragRotationParentBasis.Orthonormalized();
+            RigIkMatrix3 newWorldRotation = axisRotation.Mul(parent.Mul(startLocalRotation));
+            newLocalRotation = parent.Inverted().Mul(newWorldRotation).Orthonormalized();
+        }
+        else
+        {
+            newLocalRotation = startLocalRotation.Mul(axisRotation).Orthonormalized();
+        }
+
+        Vec3d euler = newLocalRotation.ToEulerDegrees();
+        double rotationX = NormalizeVanillaDegrees(euler.X - baseRotation.X);
+        double rotationY = NormalizeVanillaDegrees(euler.Y - baseRotation.Y);
+        double rotationZ = NormalizeVanillaDegrees(euler.Z - baseRotation.Z);
+
+        if (Math.Abs(rotationX - (element.RotationX ?? 0)) < 0.0001 &&
+            Math.Abs(rotationY - (element.RotationY ?? 0)) < 0.0001 &&
+            Math.Abs(rotationZ - (element.RotationZ ?? 0)) < 0.0001)
+        {
+            return false;
+        }
+
+        element.RotationX = rotationX;
+        element.RotationY = rotationY;
+        element.RotationZ = rotationZ;
+        CompleteVanillaRotationGroup(element);
         return true;
     }
 
@@ -2055,6 +2104,17 @@ public sealed partial class DebugWindowManager
             };
 
         return NormalizeOrDefault(direction, NVector3.UnitX);
+    }
+
+    private static Vec3d GetVanillaCanonicalGizmoAxis(TransformGizmoAxis axis)
+    {
+        return axis switch
+        {
+            TransformGizmoAxis.X => new Vec3d(1, 0, 0),
+            TransformGizmoAxis.Y => new Vec3d(0, 1, 0),
+            TransformGizmoAxis.Z => new Vec3d(0, 0, 1),
+            _ => new Vec3d(1, 0, 0)
+        };
     }
 
     private static void SetVanillaGizmoMoveOffsetValues(AnimationKeyFrameElement element, double offsetX, double offsetY, double offsetZ)
@@ -2172,6 +2232,14 @@ public sealed partial class DebugWindowManager
         if (!ProjectVanillaPreviewPoint(elementModel, camera, elementPoint, min, width, height, out NVector2 center)) return false;
 
         VanillaGizmoTranslationBasis translationBasis = BuildVanillaGizmoTranslationBasis(pose);
+        RigIkMatrix3 rotationParentBasis = RigIkMatrix3.Identity;
+        Vec3d baseRotationDegrees = new(pose.ForElement.RotationX, pose.ForElement.RotationY, pose.ForElement.RotationZ);
+        if (TryGetVanillaIkPoseInfo(scene, elementName, out VanillaIkPoseInfo poseInfo, out _))
+        {
+            rotationParentBasis = poseInfo.ParentWorldRotation;
+            baseRotationDegrees = poseInfo.BaseRotationDegrees;
+        }
+
         float modelAxisLength = Math.Clamp(Math.Max(Math.Max(scene.ModelWidth, scene.ModelHeight), scene.ModelDepth) * 0.16f, 0.12f, 0.85f);
         float modelRingRadius = Math.Clamp(modelAxisLength * 0.95f, 0.10f, 0.80f);
         NVector2 axisX;
@@ -2230,7 +2298,9 @@ public sealed partial class DebugWindowManager
             translationBasis,
             translationBasis.AxisX,
             translationBasis.AxisY,
-            translationBasis.AxisZ);
+            translationBasis.AxisZ,
+            rotationParentBasis,
+            baseRotationDegrees);
         return true;
     }
 
@@ -2802,6 +2872,12 @@ public sealed partial class DebugWindowManager
         _vanillaViewportGizmoDragStartOffsetX = 0;
         _vanillaViewportGizmoDragStartOffsetY = 0;
         _vanillaViewportGizmoDragStartOffsetZ = 0;
+        _vanillaViewportGizmoDragStartRotationX = 0;
+        _vanillaViewportGizmoDragStartRotationY = 0;
+        _vanillaViewportGizmoDragStartRotationZ = 0;
+        _vanillaViewportGizmoDragBaseRotationDegrees = new Vec3d();
+        _vanillaViewportGizmoDragRotationParentBasis = RigIkMatrix3.Identity;
+        _vanillaViewportGizmoDragSpace = TransformGizmoSpace.World;
         _vanillaViewportGizmoDragRowKey = "";
         _vanillaViewportGizmoDragKeyFrameIndex = -1;
         _vanillaViewportGizmoDragElementName = "";
@@ -8882,7 +8958,9 @@ public sealed partial class DebugWindowManager
         VanillaGizmoTranslationBasis TranslationBasis,
         NVector3 AxisXModel,
         NVector3 AxisYModel,
-        NVector3 AxisZModel);
+        NVector3 AxisZModel,
+        RigIkMatrix3 RotationParentBasis,
+        Vec3d BaseRotationDegrees);
 
     private readonly struct VanillaGizmoTranslationBasis
     {

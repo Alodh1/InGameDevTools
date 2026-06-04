@@ -65,6 +65,10 @@ public sealed partial class DebugWindowManager
     private double _transformViewportGizmoDragAccumulatedDegrees;
     private double _transformViewportGizmoDragRingScreenSign = -1.0;
     private float _transformViewportGizmoDragStartValue;
+    private float _transformViewportGizmoDragStartRotationX;
+    private float _transformViewportGizmoDragStartRotationY;
+    private float _transformViewportGizmoDragStartRotationZ;
+    private TransformGizmoSpace _transformViewportGizmoDragSpace = TransformGizmoSpace.World;
     private string _transformViewportGizmoDragSlotKey = "";
     private string _transformsStatus = "";
     private bool _transformsIndexed;
@@ -1461,6 +1465,10 @@ public sealed partial class DebugWindowManager
                 ? GetTransformViewportRingScreenSign(camera, center, hoveredAxis, axisX, axisY, axisZ, axisLength)
                 : -1.0;
             _transformViewportGizmoDragStartValue = GetTransformGizmoAxisValue(transform, GizmoMode, hoveredAxis);
+            _transformViewportGizmoDragStartRotationX = transform.Rotation.X;
+            _transformViewportGizmoDragStartRotationY = transform.Rotation.Y;
+            _transformViewportGizmoDragStartRotationZ = transform.Rotation.Z;
+            _transformViewportGizmoDragSpace = GizmoSpace;
             _transformViewportGizmoDragSlotKey = slot.Key;
         }
 
@@ -1710,9 +1718,9 @@ public sealed partial class DebugWindowManager
                 value = (float)SnapTransformGizmoValue(value, Math.Max(0.0001, TransformGizmoIncrement));
                 break;
             case TransformGizmoMode.Rotate:
-                value = NormalizeTransformDegrees(value + (float)UpdateTransformViewportGizmoRingDrag());
-                value = NormalizeTransformDegrees((float)SnapTransformGizmoValue(value, Math.Max(0.0001, TransformGizmoIncrement)));
-                break;
+                if (!ApplyTransformViewportRotationGizmoDrag(transform, _transformViewportGizmoDragAxis)) return;
+                ApplyTransformDraftEdit(asset, slot, transform);
+                return;
             default:
                 return;
         }
@@ -1720,6 +1728,36 @@ public sealed partial class DebugWindowManager
         if (Math.Abs(value - GetTransformGizmoAxisValue(transform, _transformViewportGizmoDragMode, _transformViewportGizmoDragAxis)) < 0.0001f) return;
         SetTransformGizmoAxisValue(transform, _transformViewportGizmoDragMode, _transformViewportGizmoDragAxis, value);
         ApplyTransformDraftEdit(asset, slot, transform);
+    }
+
+    private bool ApplyTransformViewportRotationGizmoDrag(ModelTransform transform, TransformGizmoAxis axis)
+    {
+        double deltaDegrees = SnapTransformGizmoValue(UpdateTransformViewportGizmoRingDrag(), Math.Max(0.0001, TransformGizmoIncrement));
+        RigIkMatrix3 startRotation = RigIkMatrix3.FromEulerDegrees(
+            _transformViewportGizmoDragStartRotationX,
+            _transformViewportGizmoDragStartRotationY,
+            _transformViewportGizmoDragStartRotationZ);
+        RigIkMatrix3 axisRotation = RigIkMatrix3.FromAxisAngle(GetVanillaCanonicalGizmoAxis(axis), deltaDegrees * GameMath.DEG2RAD);
+        RigIkMatrix3 newRotation = _transformViewportGizmoDragSpace == TransformGizmoSpace.World
+            ? axisRotation.Mul(startRotation).Orthonormalized()
+            : startRotation.Mul(axisRotation).Orthonormalized();
+
+        Vec3d euler = newRotation.ToEulerDegrees();
+        float rotationX = NormalizeTransformDegrees((float)euler.X);
+        float rotationY = NormalizeTransformDegrees((float)euler.Y);
+        float rotationZ = NormalizeTransformDegrees((float)euler.Z);
+
+        if (Math.Abs(rotationX - transform.Rotation.X) < 0.0001f &&
+            Math.Abs(rotationY - transform.Rotation.Y) < 0.0001f &&
+            Math.Abs(rotationZ - transform.Rotation.Z) < 0.0001f)
+        {
+            return false;
+        }
+
+        transform.Rotation.X = rotationX;
+        transform.Rotation.Y = rotationY;
+        transform.Rotation.Z = rotationZ;
+        return true;
     }
 
     private static float GetTransformGizmoAxisValue(ModelTransform transform, TransformGizmoMode mode, TransformGizmoAxis axis)
@@ -1794,6 +1832,11 @@ public sealed partial class DebugWindowManager
         _transformViewportGizmoDragLastAngleRadians = 0;
         _transformViewportGizmoDragAccumulatedDegrees = 0;
         _transformViewportGizmoDragRingScreenSign = -1.0;
+        _transformViewportGizmoDragStartValue = 0;
+        _transformViewportGizmoDragStartRotationX = 0;
+        _transformViewportGizmoDragStartRotationY = 0;
+        _transformViewportGizmoDragStartRotationZ = 0;
+        _transformViewportGizmoDragSpace = TransformGizmoSpace.World;
         _transformViewportGizmoDragSlotKey = "";
     }
 
