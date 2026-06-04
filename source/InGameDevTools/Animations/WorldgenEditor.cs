@@ -943,107 +943,8 @@ public sealed partial class DebugWindowManager
     private void DrawWorldgenPreviewViewport()
     {
         EnsureWorldgenPreviewDefaults();
-
-        ImGui.TextUnformatted("Worldgen preview");
-        if (ImGui.Checkbox("Auto mode by asset##worldgen-preview-auto-mode", ref _worldgenPreviewAutoMode) && _worldgenPreviewAutoMode)
-        {
-            ApplyWorldgenPreviewModeForSelectedEntry();
-        }
-        ImGui.TextDisabled(GetWorldgenPreviewAutoModeStatus());
-        ImGui.SetNextItemWidth(-float.Epsilon);
-        int previewModeBefore = _worldgenPreviewMode;
-        if (ImGui.Combo("##worldgen-preview-mode", ref _worldgenPreviewMode, WorldgenPreviewModeLabels, WorldgenPreviewModeLabels.Length))
-        {
-            _worldgenPreviewAutoMode = false;
-            if (_worldgenPreviewMode != previewModeBefore)
-            {
-                if (previewModeBefore == WorldgenPreviewModeRegion3D && _worldgenPreviewMode != WorldgenPreviewModeRegion3D)
-                {
-                    RestoreActiveWorldgenPeek("preview mode changed");
-                }
-                _worldgenPreviewMapLayer = null;
-                InvalidateWorldgenPreviewRasterCache();
-                ScheduleWorldgenRealtimePeek("preview mode changed");
-            }
-        }
-
-        ImGui.SetNextItemWidth(-float.Epsilon);
-        ImGui.InputText("Seed##worldgen-preview-seed", ref _worldgenPreviewSeedText, 64);
-
-        float halfWidth = Math.Max(90f, ImGui.GetContentRegionAvail().X * 0.48f);
-        ImGui.PushItemWidth(halfWidth);
-        int previousOriginX = _worldgenPreviewOriginX;
-        int previousOriginZ = _worldgenPreviewOriginZ;
-        ImGui.InputInt("Origin X##worldgen-preview-origin-x", ref _worldgenPreviewOriginX);
-        ImGui.SameLine();
-        ImGui.InputInt("Z##worldgen-preview-origin-z", ref _worldgenPreviewOriginZ);
-        if (_worldgenPreviewOriginX != previousOriginX || _worldgenPreviewOriginZ != previousOriginZ)
-        {
-            ClearWorldgenPeekProfile("Preview origin changed; peek again to refresh the real 3D preview.");
-            ScheduleWorldgenRealtimePeek("preview origin changed");
-        }
-        if (ImGui.InputInt("Resolution##worldgen-preview-resolution", ref _worldgenPreviewResolution))
-        {
-            _worldgenPreviewResolution = Math.Clamp(_worldgenPreviewResolution, 32, 192);
-            InvalidateWorldgenPreviewRasterCache();
-        }
-        ImGui.PopItemWidth();
-
-        if (_worldgenPreviewMode == WorldgenPreviewModeClimate)
-        {
-            DrawWorldgenClimatePreviewControls();
-        }
-        else if (_worldgenPreviewMode == WorldgenPreviewModeOre)
-        {
-            DrawWorldgenOrePreviewControls();
-        }
-        else if (_worldgenPreviewMode == WorldgenPreviewModeBlockPatch)
-        {
-            DrawWorldgenBlockPatchPreviewControls();
-        }
-        else if (_worldgenPreviewMode == WorldgenPreviewModeTerrainShape)
-        {
-            DrawWorldgenTerrainShapePreviewControls();
-        }
-        else if (_worldgenPreviewMode == WorldgenPreviewModeRockStrata)
-        {
-            DrawWorldgenRockStrataPreviewControls();
-        }
-        else if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
-        {
-            DrawWorldgenRegion3DPreviewControls();
-        }
-        else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
-        {
-            DrawWorldgenMapLayerPreviewControls();
-        }
-
+        DrawWorldgenPreviewToolbar();
         ProcessWorldgenRealtimePeek();
-
-        if (ImGui.Button("Use current world##worldgen-preview-current"))
-        {
-            UseCurrentWorldgenPreviewState();
-        }
-        ImGui.SameLine();
-        if (ImGui.Button("Refresh SP##worldgen-preview-server-refresh"))
-        {
-            RefreshWorldgenServerApi();
-        }
-        ImGui.SameLine();
-        if (ImGui.Button("Reset view##worldgen-preview-reset"))
-        {
-            _worldgenPreviewPanX = 0f;
-            _worldgenPreviewPanZ = 0f;
-            _worldgenPreviewZoom = 1f;
-            _worldgenPreview3DYaw = MathF.PI * 0.25f;
-            _worldgenPreview3DPitch = 0.70f;
-        }
-        ImGui.SameLine();
-        bool poppedOut = _worldgenPreviewPoppedOut;
-        if (ImGui.Checkbox("Pop out viewport##worldgen-preview-popout", ref poppedOut))
-        {
-            _worldgenPreviewPoppedOut = poppedOut;
-        }
 
         float availableHeight = ImGui.GetContentRegionAvail().Y;
         float height = Math.Max(240f * Math.Max(0.75f, _devToolsUiScale), availableHeight);
@@ -1088,27 +989,36 @@ public sealed partial class DebugWindowManager
 
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         drawList.PushClipRect(min, max, true);
-        if (!serverRequired || serverAvailable)
+        string previewError = "";
+        try
         {
-            if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
+            if (!serverRequired || serverAvailable)
             {
-                DrawWorldgenLandformSurfacePreview(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
+                if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
+                {
+                    DrawWorldgenLandformSurfacePreview(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
+                }
+                else
+                {
+                    DrawWorldgenPreviewRaster(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
+                    DrawWorldgenPreviewGrid(drawList, min, max, centerX, centerZ, pixelsPerBlock);
+                }
             }
             else
             {
-                DrawWorldgenPreviewRaster(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
-                DrawWorldgenPreviewGrid(drawList, min, max, centerX, centerZ, pixelsPerBlock);
+                DrawWorldgenPreviewUnavailable(drawList, min, max);
             }
         }
-        else
+        catch (Exception exception)
         {
-            DrawWorldgenPreviewUnavailable(drawList, min, max);
+            previewError = $"Worldgen preview failed: {exception.Message}";
+            _worldgenStatus = previewError;
+            _worldgenDiagnostics.Exception("Worldgen preview failed", exception);
+            DrawWorldgenPreviewUnavailable(drawList, min, max, previewError, "Fix the selected draft or switch preview mode.");
         }
         drawList.PopClipRect();
 
         uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 1f));
-        uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.88f, 0.84f, 0.74f, 1f));
-        uint muted = ImGui.ColorConvertFloat4ToU32(new NVector4(0.72f, 0.68f, 0.58f, 1f));
         drawList.AddRect(min, max, border, 4f);
 
         NVector2 mouse = ImGui.GetIO().MousePos;
@@ -1133,30 +1043,266 @@ public sealed partial class DebugWindowManager
                                 ? $"{modeLabel}: draft landform surface"
                                 : $"{modeLabel}: real peeked region"
                 : $"{modeLabel}: viewport host";
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, modeStatus);
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 30f), muted, $"Cursor block: X {hoverX}, Z {hoverZ}");
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), muted, _worldgenPreviewConfigStatus);
         string serverLine = serverRequired
             ? _worldgenPreviewServerStatus
             : WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode)
                 ? _worldgenPreviewServerStatus
                 : "Singleplayer server API: not required for this mode.";
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 70f), muted, serverLine);
-        if (!string.IsNullOrWhiteSpace(hoverDetails))
+        DrawWorldgenPreviewOverlay(drawList, min, max, actual.X, modeStatus, hoverX, hoverZ, hoverDetails, serverLine, previewError);
+
+        ImGui.EndChild();
+    }
+
+    private void DrawWorldgenPreviewToolbar()
+    {
+        ImGui.TextUnformatted("Worldgen preview");
+        ImGui.SameLine();
+        if (ImGui.Checkbox("Auto##worldgen-preview-auto-mode", ref _worldgenPreviewAutoMode) && _worldgenPreviewAutoMode)
         {
-            drawList.AddText(new NVector2(min.X + 12f, min.Y + 90f), muted, hoverDetails);
+            ApplyWorldgenPreviewModeForSelectedEntry();
         }
-        drawList.AddText(new NVector2(min.X + 12f, min.Y + 110f), muted, _worldgenPreviewRasterStatus);
-        if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
+        if (ImGui.IsItemHovered())
         {
-            drawList.AddText(new NVector2(min.X + 12f, min.Y + 150f), muted, _worldgenPreviewPeekStatus);
-            if (_worldgenPreviewOracleProfile != null || !string.Equals(_worldgenPreviewOracleStatus, "No loaded-world comparison yet.", StringComparison.Ordinal))
+            ImGui.SetTooltip(SanitizeWorldgenPreviewText(GetWorldgenPreviewAutoModeStatus(), 240));
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled(SanitizeWorldgenPreviewText(GetWorldgenPreviewAutoModeStatus(), 96));
+
+        float availableWidth = Math.Max(1f, ImGui.GetContentRegionAvail().X);
+        int previewModeBefore = _worldgenPreviewMode;
+        ImGui.SetNextItemWidth(Math.Clamp(availableWidth * 0.24f, 180f, 320f));
+        if (ImGui.Combo("Mode##worldgen-preview-mode", ref _worldgenPreviewMode, WorldgenPreviewModeLabels, WorldgenPreviewModeLabels.Length))
+        {
+            _worldgenPreviewAutoMode = false;
+            if (_worldgenPreviewMode != previewModeBefore)
             {
-                drawList.AddText(new NVector2(min.X + 12f, min.Y + 170f), muted, _worldgenPreviewOracleStatus);
+                if (previewModeBefore == WorldgenPreviewModeRegion3D && _worldgenPreviewMode != WorldgenPreviewModeRegion3D)
+                {
+                    RestoreActiveWorldgenPeek("preview mode changed");
+                }
+                _worldgenPreviewMapLayer = null;
+                InvalidateWorldgenPreviewRasterCache();
+                ScheduleWorldgenRealtimePeek("preview mode changed");
             }
         }
 
-        ImGui.EndChild();
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(Math.Clamp(availableWidth * 0.16f, 130f, 230f));
+        _worldgenPreviewSeedText ??= "";
+        ImGui.InputText("Seed##worldgen-preview-seed", ref _worldgenPreviewSeedText, 64);
+
+        ImGui.SameLine();
+        if (ImGui.Button("Use world##worldgen-preview-current"))
+        {
+            UseCurrentWorldgenPreviewState();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Refresh SP##worldgen-preview-server-refresh"))
+        {
+            RefreshWorldgenServerApi();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Reset view##worldgen-preview-reset"))
+        {
+            ResetWorldgenPreviewView();
+        }
+        ImGui.SameLine();
+        bool poppedOut = _worldgenPreviewPoppedOut;
+        if (ImGui.Checkbox("Pop out##worldgen-preview-popout", ref poppedOut))
+        {
+            _worldgenPreviewPoppedOut = poppedOut;
+        }
+
+        int previousOriginX = _worldgenPreviewOriginX;
+        int previousOriginZ = _worldgenPreviewOriginZ;
+        ImGui.SetNextItemWidth(Math.Clamp(availableWidth * 0.18f, 120f, 260f));
+        ImGui.InputInt("Origin X##worldgen-preview-origin-x", ref _worldgenPreviewOriginX);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(Math.Clamp(availableWidth * 0.18f, 120f, 260f));
+        ImGui.InputInt("Z##worldgen-preview-origin-z", ref _worldgenPreviewOriginZ);
+        if (_worldgenPreviewOriginX != previousOriginX || _worldgenPreviewOriginZ != previousOriginZ)
+        {
+            ClearWorldgenPeekProfile("Preview origin changed; peek again to refresh the real 3D preview.");
+            ScheduleWorldgenRealtimePeek("preview origin changed");
+        }
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(96f);
+        if (ImGui.InputInt("Resolution##worldgen-preview-resolution", ref _worldgenPreviewResolution))
+        {
+            _worldgenPreviewResolution = Math.Clamp(_worldgenPreviewResolution, 32, 192);
+            InvalidateWorldgenPreviewRasterCache();
+        }
+
+        string summary = BuildWorldgenPreviewDetailsSummary();
+        if (!string.IsNullOrWhiteSpace(summary))
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled(SanitizeWorldgenPreviewText(summary, 110));
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(SanitizeWorldgenPreviewText(summary, 300));
+            }
+        }
+
+        if (ImGui.CollapsingHeader("Preview details##worldgen-preview-details"))
+        {
+            DrawWorldgenPreviewModeDetails();
+        }
+    }
+
+    private void ResetWorldgenPreviewView()
+    {
+        _worldgenPreviewPanX = 0f;
+        _worldgenPreviewPanZ = 0f;
+        _worldgenPreviewZoom = 1f;
+        _worldgenPreview3DYaw = MathF.PI * 0.25f;
+        _worldgenPreview3DPitch = 0.70f;
+    }
+
+    private void DrawWorldgenPreviewModeDetails()
+    {
+        if (_worldgenPreviewMode == WorldgenPreviewModeClimate)
+        {
+            DrawWorldgenClimatePreviewControls();
+        }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeOre)
+        {
+            DrawWorldgenOrePreviewControls();
+        }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeBlockPatch)
+        {
+            DrawWorldgenBlockPatchPreviewControls();
+        }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeTerrainShape)
+        {
+            DrawWorldgenTerrainShapePreviewControls();
+        }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeRockStrata)
+        {
+            DrawWorldgenRockStrataPreviewControls();
+        }
+        else if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
+        {
+            DrawWorldgenRegion3DPreviewControls();
+        }
+        else if (WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
+        {
+            DrawWorldgenMapLayerPreviewControls();
+        }
+    }
+
+    private string BuildWorldgenPreviewDetailsSummary()
+    {
+        return _worldgenPreviewMode switch
+        {
+            WorldgenPreviewModeClimate => "Live climate map from the active world config.",
+            WorldgenPreviewModeOre => TryGetWorldgenPreviewDepositVariant(out _, out string? code, out string source, out string status)
+                ? $"Ore preview: {source} {code ?? "unnamed"}."
+                : status,
+            WorldgenPreviewModeBlockPatch => TryGetSelectedWorldgenBlockPatchRow(out JObject? blockPatchRow) && blockPatchRow != null
+                ? $"Block patch: {GetWorldgenRowLabel(WorldgenAssetKind.BlockPatches, blockPatchRow, _worldgenRowIndex)}."
+                : "Select a block patch row to preview suitability.",
+            WorldgenPreviewModeTerrainShape => TryGetSelectedWorldgenLandformRow(out JObject? landformRow) && landformRow != null
+                ? $"Terrain shape: {GetWorldgenRowLabel(WorldgenAssetKind.Landforms, landformRow, _worldgenRowIndex)}."
+                : "Select a landform row to preview terrain shape.",
+            WorldgenPreviewModeRegion3D => _worldgenPreviewPeekProfile == null
+                ? "3D region: draft landform surface."
+                : $"3D region: real peek, pass {_worldgenPreviewPeekProfile.PassLabel}.",
+            WorldgenPreviewModeRockStrata => TryGetSelectedWorldgenRockStrataRow(out JObject? stratumRow) && stratumRow != null
+                ? $"Rock strata: {GetWorldgenRowLabel(WorldgenAssetKind.RockStrata, stratumRow, _worldgenRowIndex)}."
+                : "Select a rock-strata row to preview thickness.",
+            _ when WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode) => "Live GenMaps layer when an integrated server is available.",
+            _ => ""
+        } ?? "";
+    }
+
+    private void DrawWorldgenPreviewOverlay(
+        ImDrawListPtr drawList,
+        NVector2 min,
+        NVector2 max,
+        float viewportWidth,
+        string? modeStatus,
+        int hoverX,
+        int hoverZ,
+        string? hoverDetails,
+        string? serverLine,
+        string? previewError)
+    {
+        List<string> lines = [];
+        AddOverlayLine(modeStatus);
+        AddOverlayLine($"X {hoverX}, Z {hoverZ}");
+        AddOverlayLine(hoverDetails);
+        if (!string.IsNullOrWhiteSpace(previewError))
+        {
+            AddOverlayLine(previewError);
+        }
+        else if (WorldgenPreviewModeRequiresServer(_worldgenPreviewMode) || WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode))
+        {
+            AddOverlayLine(serverLine);
+        }
+        AddOverlayLine(_worldgenPreviewRasterStatus);
+        if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
+        {
+            AddOverlayLine(_worldgenPreviewPeekStatus);
+            if (_worldgenPreviewOracleProfile != null || !string.Equals(_worldgenPreviewOracleStatus, "No loaded-world comparison yet.", StringComparison.Ordinal))
+            {
+                AddOverlayLine(_worldgenPreviewOracleStatus);
+            }
+        }
+
+        if (lines.Count == 0) return;
+
+        int maxChars = Math.Clamp((int)(viewportWidth / 8f), 48, 160);
+        List<string> sanitized = lines.Select(line => SanitizeWorldgenPreviewText(line, maxChars)).Where(line => line.Length > 0).Take(5).ToList();
+        if (sanitized.Count == 0) return;
+
+        float lineHeight = ImGui.GetTextLineHeight() + 2f;
+        float panelWidth = Math.Min(max.X - min.X - 24f, Math.Max(260f, sanitized.Max(line => ImGui.CalcTextSize(line).X) + 18f));
+        float panelHeight = sanitized.Count * lineHeight + 14f;
+        NVector2 panelMin = new(min.X + 10f, min.Y + 10f);
+        NVector2 panelMax = new(panelMin.X + panelWidth, panelMin.Y + panelHeight);
+        uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0f, 0f, 0f, 0.64f));
+        uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 0.65f));
+        uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.88f, 0.84f, 0.74f, 1f));
+        uint error = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.34f, 0.25f, 1f));
+        drawList.AddRectFilled(panelMin, panelMax, background, 4f);
+        drawList.AddRect(panelMin, panelMax, border, 4f);
+
+        for (int index = 0; index < sanitized.Count; index++)
+        {
+            bool errorLine = !string.IsNullOrWhiteSpace(previewError) && sanitized[index].Contains("failed", StringComparison.OrdinalIgnoreCase);
+            AddWorldgenPreviewText(drawList, new NVector2(panelMin.X + 9f, panelMin.Y + 7f + index * lineHeight), errorLine ? error : text, sanitized[index]);
+        }
+
+        void AddOverlayLine(string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                lines.Add(value);
+            }
+        }
+    }
+
+    private static void AddWorldgenPreviewText(ImDrawListPtr drawList, NVector2 position, uint color, string? text)
+    {
+        string safe = SanitizeWorldgenPreviewText(text, 240);
+        if (safe.Length == 0) return;
+        drawList.AddText(position, color, safe);
+    }
+
+    private static string SanitizeWorldgenPreviewText(string? text, int maxChars)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        string safe = text.Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ');
+        while (safe.Contains("  ", StringComparison.Ordinal))
+        {
+            safe = safe.Replace("  ", " ", StringComparison.Ordinal);
+        }
+
+        safe = safe.Trim();
+        if (safe.Length <= maxChars) return safe;
+        return maxChars <= 3 ? safe[..maxChars] : safe[..(maxChars - 3)] + "...";
     }
 
     private void DrawWorldgenClimatePreviewControls()
