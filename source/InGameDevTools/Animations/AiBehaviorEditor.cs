@@ -963,8 +963,10 @@ public sealed partial class DebugWindowManager
             }
         }
 
+        int configDrawn = DrawAiBehaviorLiveConfigFields(task.TaskObject);
+
         changed = HasAiBehaviorLiveEditsForCurrentTarget();
-        if (drawn == 0 && taskSpecificDrawn == 0)
+        if (drawn == 0 && taskSpecificDrawn == 0 && configDrawn == 0)
         {
             ImGui.TextWrapped("No writable common live fields were found on this task.");
         }
@@ -975,6 +977,100 @@ public sealed partial class DebugWindowManager
             int removedCount = _aiBehaviorLiveRemovedTaskSnapshots.Count(snapshot => snapshot.EntityId == _aiBehaviorLiveEntityId);
             ImGui.TextWrapped($"{fieldCount} live field edit snapshot(s), {removedCount} removed task snapshot(s) are available for revert.");
         }
+    }
+
+    private int DrawAiBehaviorLiveConfigFields(object task)
+    {
+        List<AiBehaviorLiveConfigObject> configs = FindAiBehaviorLiveConfigObjects(task).ToList();
+        if (configs.Count == 0) return 0;
+
+        ImGui.SeparatorText("Config object fields");
+        int drawn = 0;
+        foreach (AiBehaviorLiveConfigObject config in configs.Take(4))
+        {
+            ImGui.TextWrapped($"{config.Name}: {config.Value.GetType().Name}");
+            int configDrawn = 0;
+            foreach (AiBehaviorLiveMember member in EnumerateAiBehaviorLiveEditableMembers(config.Value).Take(80))
+            {
+                if (DrawAiBehaviorLiveMemberControl(config.Value, member))
+                {
+                    drawn++;
+                    configDrawn++;
+                }
+            }
+
+            if (configDrawn == 0)
+            {
+                ImGui.TextWrapped("No writable primitive config fields found.");
+            }
+        }
+
+        return drawn;
+    }
+
+    private bool DrawAiBehaviorLiveMemberControl(object target, AiBehaviorLiveMember member)
+    {
+        if (!member.CanWrite || member.Value == null) return false;
+
+        string id = $"##entity-ai-live-config-{RuntimeHelpers.GetHashCode(target)}-{member.Name}";
+        if (member.Value is bool boolValue)
+        {
+            if (ImGui.Checkbox($"{member.Name}{id}", ref boolValue))
+            {
+                TrySetAiBehaviorLiveMember(target, member, boolValue);
+                RefreshAiBehaviorLiveSnapshot(recordTransitions: false);
+            }
+            return true;
+        }
+
+        if (member.Value is string textValue)
+        {
+            string edited = textValue;
+            if (ImGui.InputText($"{member.Name}{id}", ref edited, 1024))
+            {
+                TrySetAiBehaviorLiveMember(target, member, edited);
+                RefreshAiBehaviorLiveSnapshot(recordTransitions: false);
+            }
+            return true;
+        }
+
+        if (TryExtractAiBehaviorRange(member.Value, out NVector2 range))
+        {
+            (float min, float max) = InferAiBehaviorLiveRangeBounds(member.Name);
+            if (ImGui.SliderFloat2($"{member.Name}{id}", ref range, min, max, "%.3f"))
+            {
+                if (TryCreateAiBehaviorRangeValue(member.ValueType, range, out object? newValue))
+                {
+                    TrySetAiBehaviorLiveMember(target, member, newValue);
+                    RefreshAiBehaviorLiveSnapshot(recordTransitions: false);
+                }
+            }
+            return true;
+        }
+
+        if (TryConvertAiBehaviorNumber(member.Value, out double number))
+        {
+            if (IsAiBehaviorIntegerType(member.ValueType))
+            {
+                int edited = Math.Clamp((int)Math.Round(number), -1_000_000, 1_000_000);
+                if (ImGui.InputInt($"{member.Name}{id}", ref edited))
+                {
+                    TrySetAiBehaviorLiveMember(target, member, edited);
+                    RefreshAiBehaviorLiveSnapshot(recordTransitions: false);
+                }
+                return true;
+            }
+
+            float floatValue = (float)number;
+            if (ImGui.InputFloat($"{member.Name}{id}", ref floatValue, 0.01f, 0.1f, "%.3f"))
+            {
+                TrySetAiBehaviorLiveMember(target, member, floatValue);
+                RefreshAiBehaviorLiveSnapshot(recordTransitions: false);
+            }
+            return true;
+        }
+
+        return false;
     }
 
     private bool DrawAiBehaviorLiveIntField(object task, string label, int min, int max, params string[] memberNames)
@@ -2295,6 +2391,146 @@ public sealed partial class DebugWindowManager
         return false;
     }
 
+    private static IEnumerable<AiBehaviorLiveConfigObject> FindAiBehaviorLiveConfigObjects(object task)
+    {
+        HashSet<int> seen = [];
+        foreach ((string memberName, object? value, Type valueType, _) in EnumerateAiBehaviorLiveRawMembers(task))
+        {
+            if (value == null || value is string || valueType.IsValueType) continue;
+            if (value is IEnumerable) continue;
+
+            string typeName = valueType.Name;
+            bool looksLikeConfig = memberName.Contains("config", StringComparison.OrdinalIgnoreCase) ||
+                typeName.EndsWith("Config", StringComparison.OrdinalIgnoreCase) ||
+                typeName.Contains("Config", StringComparison.OrdinalIgnoreCase);
+            if (!looksLikeConfig) continue;
+
+            int id = RuntimeHelpers.GetHashCode(value);
+            if (!seen.Add(id)) continue;
+
+            yield return new AiBehaviorLiveConfigObject(memberName, value);
+        }
+    }
+
+    private static IEnumerable<AiBehaviorLiveMember> EnumerateAiBehaviorLiveEditableMembers(object value)
+    {
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string memberName, object? memberValue, Type valueType, bool canWrite) in EnumerateAiBehaviorLiveRawMembers(value))
+        {
+            if (!seen.Add(memberName) || !canWrite) continue;
+            if (!IsAiBehaviorLiveEditableValue(valueType, memberValue)) continue;
+            yield return new AiBehaviorLiveMember(memberName, valueType, memberValue, canWrite);
+        }
+    }
+
+    private static IEnumerable<(string Name, object? Value, Type ValueType, bool CanWrite)> EnumerateAiBehaviorLiveRawMembers(object value)
+    {
+        Type type = value.GetType();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+
+        for (Type? current = type; current != null; current = current.BaseType)
+        {
+            foreach (PropertyInfo property in current.GetProperties(flags))
+            {
+                if (property.GetIndexParameters().Length != 0) continue;
+                object? propertyValue;
+                try
+                {
+                    propertyValue = property.GetValue(value);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                yield return (property.Name, propertyValue, property.PropertyType, property.GetSetMethod(nonPublic: true) != null);
+            }
+
+            foreach (FieldInfo field in current.GetFields(flags))
+            {
+                if (field.IsStatic) continue;
+                object? fieldValue;
+                try
+                {
+                    fieldValue = field.GetValue(value);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                yield return (field.Name, fieldValue, field.FieldType, !field.IsInitOnly && !field.IsLiteral);
+            }
+        }
+    }
+
+    private static bool IsAiBehaviorLiveEditableValue(Type valueType, object? value)
+    {
+        Type type = Nullable.GetUnderlyingType(valueType) ?? valueType;
+        if (type == typeof(bool) || type == typeof(string)) return true;
+        if (IsAiBehaviorNumericType(type)) return true;
+        if (value != null && TryExtractAiBehaviorRange(value, out _)) return true;
+        return false;
+    }
+
+    private static bool IsAiBehaviorNumericType(Type type)
+    {
+        Type nullableType = Nullable.GetUnderlyingType(type) ?? type;
+        return nullableType == typeof(byte) ||
+            nullableType == typeof(sbyte) ||
+            nullableType == typeof(short) ||
+            nullableType == typeof(ushort) ||
+            nullableType == typeof(int) ||
+            nullableType == typeof(uint) ||
+            nullableType == typeof(long) ||
+            nullableType == typeof(ulong) ||
+            nullableType == typeof(float) ||
+            nullableType == typeof(double) ||
+            nullableType == typeof(decimal);
+    }
+
+    private static bool IsAiBehaviorIntegerType(Type type)
+    {
+        Type nullableType = Nullable.GetUnderlyingType(type) ?? type;
+        return nullableType == typeof(byte) ||
+            nullableType == typeof(sbyte) ||
+            nullableType == typeof(short) ||
+            nullableType == typeof(ushort) ||
+            nullableType == typeof(int) ||
+            nullableType == typeof(uint) ||
+            nullableType == typeof(long) ||
+            nullableType == typeof(ulong);
+    }
+
+    private static (float Min, float Max) InferAiBehaviorLiveRangeBounds(string memberName)
+    {
+        string name = memberName.ToLowerInvariant();
+        if (name.Contains("chance", StringComparison.Ordinal) ||
+            name.Contains("day", StringComparison.Ordinal) ||
+            name.Contains("hour", StringComparison.Ordinal))
+        {
+            return (0f, 1f);
+        }
+
+        if (name.Contains("light", StringComparison.Ordinal))
+        {
+            return (0f, 32f);
+        }
+
+        if (name.Contains("temp", StringComparison.Ordinal))
+        {
+            return (-50f, 100f);
+        }
+
+        if (name.Contains("range", StringComparison.Ordinal) ||
+            name.Contains("dist", StringComparison.Ordinal))
+        {
+            return (0f, 256f);
+        }
+
+        return (-1000f, 1000f);
+    }
+
     private static bool TrySetAiBehaviorMemberValue(object value, string memberName, object? newValue, out string error)
     {
         if (TryFindAiBehaviorProperty(value.GetType(), memberName, out PropertyInfo? property) && property != null)
@@ -2915,6 +3151,8 @@ public sealed partial class DebugWindowManager
     private sealed record AiBehaviorLiveGateInfo(string Summary, string Details);
 
     private readonly record struct AiBehaviorLiveMember(string Name, Type ValueType, object? Value, bool CanWrite);
+
+    private sealed record AiBehaviorLiveConfigObject(string Name, object Value);
 
     private sealed record AiBehaviorLiveFieldSnapshot(
         long EntityId,
