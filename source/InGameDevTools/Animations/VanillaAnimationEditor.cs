@@ -6779,6 +6779,7 @@ public sealed partial class DebugWindowManager
                     IAsset? shapeAsset = api.Assets.TryGet(shapeLocation, true);
                     Shape? modelShape = TryLoadShape(shapeAsset);
                     if (modelShape == null) continue;
+                    NormalizePlayerModelShapeTextures(modelShape, shapeLocation.Domain);
 
                     Shape? scoreShape = modelShape;
                     if (!string.IsNullOrWhiteSpace(config.BaseShapeCode) &&
@@ -6991,6 +6992,20 @@ public sealed partial class DebugWindowManager
                 catch
                 {
                     return null;
+                }
+            }
+
+            private static void NormalizePlayerModelShapeTextures(Shape shape, string defaultDomain)
+            {
+                if (shape.Textures == null) return;
+                string domain = string.IsNullOrWhiteSpace(defaultDomain) ? "game" : defaultDomain;
+                foreach (AssetLocation? texturePath in shape.Textures.Values)
+                {
+                    if (texturePath == null) continue;
+                    if (!texturePath.HasDomain())
+                    {
+                        texturePath.Domain = domain;
+                    }
                 }
             }
 
@@ -8551,10 +8566,7 @@ public sealed partial class DebugWindowManager
 
         private static CompositeShape? GetCompositeShape(VanillaBrowserRow row)
         {
-            if (row.Document.PlayerModelSource != null ||
-                row.ShapeAnimation?.Document.PlayerModelSource != null ||
-                row.MetadataEntry?.Document.PlayerModelSource != null ||
-                row.MetadataEntry?.LinkedShape?.Document.PlayerModelSource != null)
+            if (GetPlayerModelSource(row) != null)
             {
                 return null;
             }
@@ -8568,6 +8580,11 @@ public sealed partial class DebugWindowManager
 
         private static ITexPositionSource CreateTextureSource(ICoreClientAPI api, VanillaBrowserRow row, Shape shape)
         {
+            if (GetPlayerModelSource(row) != null && shape.Textures is { Count: > 0 })
+            {
+                return new VanillaEntityTextureSource(api, shape, row.Key, new Dictionary<string, CompositeTexture>());
+            }
+
             IDictionary<string, CompositeTexture>? textures = row.Document.EntityType?.Client?.Textures;
             if (textures != null && textures.Count > 0)
             {
@@ -8575,6 +8592,14 @@ public sealed partial class DebugWindowManager
             }
 
             return new ShapeTextureSource(api, shape, row.Key);
+        }
+
+        private static VanillaPlayerModelSource? GetPlayerModelSource(VanillaBrowserRow row)
+        {
+            return row.Document.PlayerModelSource
+                ?? row.ShapeAnimation?.Document.PlayerModelSource
+                ?? row.MetadataEntry?.Document.PlayerModelSource
+                ?? row.MetadataEntry?.LinkedShape?.Document.PlayerModelSource;
         }
     }
 
