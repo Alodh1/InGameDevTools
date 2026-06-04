@@ -6799,6 +6799,10 @@ public sealed partial class DebugWindowManager
 
         private sealed class VanillaPlayerModelSourceIndex
         {
+            private static string _cachedConfigSignature = "";
+            private static bool _cachedConfigInitialized;
+            private static Dictionary<string, VanillaPlayerModelConfig> _cachedConfigs = new(StringComparer.OrdinalIgnoreCase);
+
             public static IReadOnlyList<VanillaPlayerModelSource> Build(ICoreClientAPI api, IEnumerable<EntityProperties> entityTypes)
             {
                 Dictionary<string, VanillaPlayerModelConfig> configs = LoadConfigs(api);
@@ -6901,18 +6905,17 @@ public sealed partial class DebugWindowManager
 
             private static Dictionary<string, VanillaPlayerModelConfig> LoadConfigs(ICoreClientAPI api)
             {
-                Dictionary<string, VanillaPlayerModelConfig> configs = new(StringComparer.OrdinalIgnoreCase);
-                foreach (IAsset asset in api.Assets.AllAssets.Values)
+                List<IAsset> candidateAssets = EnumeratePlayerModelConfigAssets(api).ToList();
+                string signature = BuildPlayerModelConfigAssetSignature(candidateAssets);
+                if (_cachedConfigInitialized && string.Equals(signature, _cachedConfigSignature, StringComparison.Ordinal))
                 {
-                    if (asset?.Location == null) continue;
-                    string assetPath = asset.Location.Path.Replace('\\', '/');
-                    if (!assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
-                        (!assetPath.StartsWith("config/", StringComparison.OrdinalIgnoreCase) &&
-                         !assetPath.Contains("/config/", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        continue;
-                    }
+                    return new Dictionary<string, VanillaPlayerModelConfig>(_cachedConfigs, StringComparer.OrdinalIgnoreCase);
+                }
 
+                Dictionary<string, VanillaPlayerModelConfig> configs = new(StringComparer.OrdinalIgnoreCase);
+                foreach (IAsset asset in candidateAssets)
+                {
+                    string assetPath = asset.Location.Path.Replace('\\', '/');
                     JObject? source = TryParseJsonObject(ReadAssetText(asset));
                     if (source == null) continue;
 
@@ -6944,7 +6947,42 @@ public sealed partial class DebugWindowManager
                     }
                 }
 
-                return configs;
+                _cachedConfigSignature = signature;
+                _cachedConfigInitialized = true;
+                _cachedConfigs = new Dictionary<string, VanillaPlayerModelConfig>(configs, StringComparer.OrdinalIgnoreCase);
+                return new Dictionary<string, VanillaPlayerModelConfig>(configs, StringComparer.OrdinalIgnoreCase);
+            }
+
+            private static IEnumerable<IAsset> EnumeratePlayerModelConfigAssets(ICoreClientAPI api)
+            {
+                foreach (IAsset asset in api.Assets.AllAssets.Values)
+                {
+                    if (asset?.Location == null) continue;
+                    string assetPath = asset.Location.Path.Replace('\\', '/');
+                    if (!assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
+                        (!assetPath.StartsWith("config/", StringComparison.OrdinalIgnoreCase) &&
+                         !assetPath.Contains("/config/", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    yield return asset;
+                }
+            }
+
+            private static string BuildPlayerModelConfigAssetSignature(IEnumerable<IAsset> assets)
+            {
+                StringBuilder builder = new();
+                foreach (IAsset asset in assets.OrderBy(asset => asset.Location?.ToString() ?? "", StringComparer.OrdinalIgnoreCase))
+                {
+                    builder
+                        .Append(asset.Location?.ToString() ?? "")
+                        .Append('#')
+                        .Append(asset.GetHashCode())
+                        .Append('|');
+                }
+
+                return builder.ToString();
             }
 
             private static bool TryFindBestAnimationSource(
