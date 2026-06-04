@@ -838,6 +838,7 @@ public sealed partial class DebugWindowManager
         if (hasLiveTarget)
         {
             DrawAiBehaviorLiveSourceActions();
+            DrawAiBehaviorLiveEmotionPanel();
         }
 
         if (_aiBehaviorLiveActiveBySlot.Count > 0)
@@ -935,6 +936,68 @@ public sealed partial class DebugWindowManager
         if (!hasSourceTask)
         {
             ImGui.TextWrapped(sourceTaskStatus);
+        }
+    }
+
+    private void DrawAiBehaviorLiveEmotionPanel()
+    {
+        bool taskUsesEmotionGates = _aiBehaviorLiveTasks.Any(TaskHasAiBehaviorEmotionGate);
+        if (!TryGetCurrentAiBehaviorServerEntity(out Entity? serverEntity, out _) || serverEntity == null)
+        {
+            return;
+        }
+
+        if (!TryGetAiBehaviorEmotionStatesBehavior(serverEntity, out object? behavior, out string source) || behavior == null)
+        {
+            if (taskUsesEmotionGates)
+            {
+                ImGui.SeparatorText("Emotion states");
+                ImGui.TextWrapped("This entity has AI tasks with emotion gates, but no live emotionstates behavior was found.");
+            }
+            return;
+        }
+
+        List<AiBehaviorEmotionStateInfo> availableStates = BuildAiBehaviorAvailableEmotionStates(behavior);
+        List<AiBehaviorActiveEmotionStateInfo> activeStates = BuildAiBehaviorActiveEmotionStates(behavior);
+        if (availableStates.Count == 0 && activeStates.Count == 0 && !taskUsesEmotionGates)
+        {
+            return;
+        }
+
+        ImGui.SeparatorText("Emotion states");
+        ImGui.TextWrapped($"{activeStates.Count} active / {availableStates.Count} available from {source}.");
+
+        if (activeStates.Count > 0)
+        {
+            if (ImGui.BeginChild("##entity-ai-live-active-emotions", new NVector2(-float.Epsilon, Math.Clamp(activeStates.Count * 24f + 18f, 58f, 142f)), true))
+            {
+                foreach (AiBehaviorActiveEmotionStateInfo state in activeStates.OrderBy(state => state.Code, StringComparer.OrdinalIgnoreCase))
+                {
+                    ImGui.TextWrapped($"{state.Code}: {state.Duration}s remaining, source {state.SourceEntityId}");
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip($"state id: {state.StateId}");
+                    }
+                }
+            }
+            ImGui.EndChild();
+        }
+        else
+        {
+            ImGui.TextWrapped("No active emotion states.");
+        }
+
+        if (availableStates.Count > 0 && ImGui.TreeNode("Available emotion states##entity-ai-live-available-emotions"))
+        {
+            foreach (AiBehaviorEmotionStateInfo state in availableStates.OrderBy(state => state.Code, StringComparer.OrdinalIgnoreCase))
+            {
+                ImGui.TextWrapped($"{state.Code}: duration {state.Duration}s, chance {state.Chance}, slot {state.Slot}, priority {state.Priority}");
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip($"stress: {state.Stress}");
+                }
+            }
+            ImGui.TreePop();
         }
     }
 
@@ -2432,6 +2495,129 @@ public sealed partial class DebugWindowManager
             typeName.Contains("ai", StringComparison.Ordinal);
     }
 
+    private bool TryGetAiBehaviorEmotionStatesBehavior(Entity serverEntity, out object? behavior, out string source)
+    {
+        Type? behaviorType = FindAiBehaviorType("EntityBehaviorEmotionStates");
+        if (behaviorType != null)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            foreach (MethodInfo method in serverEntity.GetType().GetMethods(flags))
+            {
+                if (!string.Equals(method.Name, "GetBehavior", StringComparison.Ordinal) ||
+                    !method.IsGenericMethodDefinition ||
+                    method.GetGenericArguments().Length != 1 ||
+                    method.GetParameters().Length != 0)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    behavior = method.MakeGenericMethod(behaviorType).Invoke(serverEntity, null);
+                    if (behavior != null)
+                    {
+                        source = behavior.GetType().Name;
+                        return true;
+                    }
+                }
+                catch
+                {
+                    // Continue with the string lookup fallback below.
+                }
+            }
+        }
+
+        object? byCode = TryGetEntityBehaviorByCode(serverEntity, "emotionstates");
+        if (byCode != null)
+        {
+            behavior = byCode;
+            source = $"{byCode.GetType().Name} via behavior code";
+            return true;
+        }
+
+        behavior = null;
+        source = "";
+        return false;
+    }
+
+    private static object? TryGetEntityBehaviorByCode(Entity serverEntity, string behaviorCode)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        foreach (MethodInfo method in serverEntity.GetType().GetMethods(flags))
+        {
+            if (!string.Equals(method.Name, "GetBehavior", StringComparison.Ordinal)) continue;
+
+            ParameterInfo[] parameters = method.GetParameters();
+            if (parameters.Length != 1 || parameters[0].ParameterType != typeof(string)) continue;
+
+            try
+            {
+                object? behavior = method.Invoke(serverEntity, [behaviorCode]);
+                if (behavior != null) return behavior;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TaskHasAiBehaviorEmotionGate(AiBehaviorLiveTaskInfo task)
+    {
+        return IsMeaningfulAiBehaviorGateValue(TryGetMemberValue(task.TaskObject, "WhenInEmotionStates")) ||
+            IsMeaningfulAiBehaviorGateValue(TryGetMemberValue(task.TaskObject, "whenInEmotionStates")) ||
+            IsMeaningfulAiBehaviorGateValue(TryGetMemberValue(task.TaskObject, "WhenNotInEmotionStates")) ||
+            IsMeaningfulAiBehaviorGateValue(TryGetMemberValue(task.TaskObject, "whenNotInEmotionStates"));
+    }
+
+    private static List<AiBehaviorEmotionStateInfo> BuildAiBehaviorAvailableEmotionStates(object behavior)
+    {
+        List<AiBehaviorEmotionStateInfo> states = [];
+        object? rawStates = TryGetMemberValue(behavior, "availableStates");
+        if (rawStates is not IEnumerable enumerable) return states;
+
+        foreach (object? rawState in enumerable)
+        {
+            if (rawState == null) continue;
+            string? code = ReadAiBehaviorMemberString(rawState, "Code") ?? ReadAiBehaviorMemberString(rawState, "code");
+            if (string.IsNullOrWhiteSpace(code)) continue;
+
+            states.Add(new AiBehaviorEmotionStateInfo(
+                code,
+                ReadAiBehaviorMemberString(rawState, "Slot") ?? "?",
+                ReadAiBehaviorMemberString(rawState, "Priority") ?? "?",
+                ReadAiBehaviorMemberString(rawState, "Chance") ?? "?",
+                ReadAiBehaviorMemberString(rawState, "Duration") ?? "?",
+                ReadAiBehaviorMemberString(rawState, "StressLevel") ?? "?"));
+        }
+
+        return states;
+    }
+
+    private static List<AiBehaviorActiveEmotionStateInfo> BuildAiBehaviorActiveEmotionStates(object behavior)
+    {
+        List<AiBehaviorActiveEmotionStateInfo> states = [];
+        object? rawStates = TryGetMemberValue(behavior, "ActiveStatesByCode");
+        if (rawStates is not IDictionary dictionary) return states;
+
+        foreach (DictionaryEntry entry in dictionary)
+        {
+            string? code = entry.Key?.ToString();
+            object? rawState = entry.Value;
+            if (string.IsNullOrWhiteSpace(code) || rawState == null) continue;
+
+            states.Add(new AiBehaviorActiveEmotionStateInfo(
+                code,
+                ReadAiBehaviorMemberString(rawState, "Duration") ?? "?",
+                ReadAiBehaviorMemberString(rawState, "SourceEntityId") ?? "?",
+                ReadAiBehaviorMemberString(rawState, "StateId") ?? "?"));
+        }
+
+        return states;
+    }
+
     private static IReadOnlyList<object> GetAiBehaviorLiveTasks(object taskManager)
     {
         object? allTasks = TryGetMemberValue(taskManager, "AllTasks");
@@ -3596,6 +3782,20 @@ public sealed partial class DebugWindowManager
     private sealed record AiBehaviorLiveTransition(string Time, string Text);
 
     private sealed record AiBehaviorLiveGateInfo(string Summary, string Details);
+
+    private sealed record AiBehaviorEmotionStateInfo(
+        string Code,
+        string Slot,
+        string Priority,
+        string Chance,
+        string Duration,
+        string Stress);
+
+    private sealed record AiBehaviorActiveEmotionStateInfo(
+        string Code,
+        string Duration,
+        string SourceEntityId,
+        string StateId);
 
     private readonly record struct AiBehaviorLiveMember(string Name, Type ValueType, object? Value, bool CanWrite);
 
