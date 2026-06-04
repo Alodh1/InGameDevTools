@@ -888,8 +888,8 @@ public sealed partial class DebugWindowManager
         ImGui.TextWrapped(dirty ? "Draft: modified" : "Draft: clean");
         ImGui.TextWrapped(_aiBehaviorValidationStatus);
 
-        ImGui.Separator();
-        ImGui.TextWrapped("Source edits change the entity type for future spawns after authored files are loaded.");
+        ImGui.SeparatorText("Source scope");
+        ImGui.TextWrapped("Source edits change authored entity JSON. They affect future spawns after the saved file is loaded.");
         ImGui.Separator();
         DrawAiBehaviorLivePanel();
         ImGui.Separator();
@@ -925,7 +925,7 @@ public sealed partial class DebugWindowManager
     private void DrawAiBehaviorLivePanel()
     {
         ImGui.SeparatorText("Live single entity");
-        ImGui.TextWrapped("Read-only SP view. It shows the running task manager for one looked-at entity; source edits still need authored files.");
+        ImGui.TextWrapped("Live tuning affects only the looked-at running entity in this singleplayer session. It is temporary and reverts when you leave or close this editor.");
 
         ImGui.Checkbox("Auto refresh##entity-ai-live-auto-refresh", ref _aiBehaviorLiveAutoRefresh);
 
