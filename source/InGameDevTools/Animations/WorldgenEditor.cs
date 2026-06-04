@@ -8,6 +8,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using NVector2 = System.Numerics.Vector2;
+using NVector3 = System.Numerics.Vector3;
 using NVector4 = System.Numerics.Vector4;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -166,40 +167,30 @@ public sealed partial class DebugWindowManager
             NVector2 available = ImGui.GetContentRegionAvail();
             float scale = Math.Max(0.75f, _devToolsUiScale);
             float splitterThickness = Math.Max(5f, 6f * scale);
-            float topBottomAvailableHeight = Math.Max(1f, available.Y - splitterThickness);
-            float previewMin = Math.Min(topBottomAvailableHeight * 0.55f, 260f * scale);
-            float editorMin = Math.Min(topBottomAvailableHeight - previewMin, 260f * scale);
-            float previewMax = Math.Max(previewMin, topBottomAvailableHeight - editorMin);
-            float previewHeight = Math.Clamp(topBottomAvailableHeight * _worldgenPreviewBottomFraction, previewMin, previewMax);
-            float topHeight = Math.Max(editorMin, topBottomAvailableHeight - previewHeight);
-            _worldgenPreviewBottomFraction = Math.Clamp(previewHeight / topBottomAvailableHeight, 0.12f, 0.9f);
 
             ImGuiLayoutHelper.CalculateThreePanelWidths(
                 available.X,
                 splitterThickness,
                 _worldgenLayout,
-                260f * scale,
-                560f * scale,
+                240f * scale,
                 520f * scale,
-                340f * scale,
-                760f * scale,
+                640f * scale,
+                380f * scale,
+                820f * scale,
                 out float panelAvailableWidth,
                 out float leftWidth,
                 out float centerWidth,
                 out float rightWidth);
 
-            DrawWorldgenBrowser(new NVector2(leftWidth, topHeight));
+            DrawWorldgenBrowser(new NVector2(leftWidth, available.Y));
             ImGui.SameLine(0, 0);
-            ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-left-splitter", topHeight, splitterThickness, panelAvailableWidth, ref _worldgenLayout.LeftFraction, 260f * scale, Math.Max(260f * scale, panelAvailableWidth - rightWidth - 520f * scale));
+            ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _worldgenLayout.LeftFraction, 240f * scale, Math.Max(240f * scale, panelAvailableWidth - rightWidth - 640f * scale));
             ImGui.SameLine(0, 0);
-            DrawWorldgenEditorPanel(new NVector2(centerWidth, topHeight));
+            DrawWorldgenPreviewPanel(new NVector2(centerWidth, available.Y));
             ImGui.SameLine(0, 0);
-            ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-right-splitter", topHeight, splitterThickness, panelAvailableWidth, ref _worldgenLayout.RightFraction, 340f * scale, Math.Max(340f * scale, panelAvailableWidth - leftWidth - 520f * scale), invertDrag: true);
+            ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _worldgenLayout.RightFraction, 380f * scale, Math.Max(380f * scale, panelAvailableWidth - leftWidth - 640f * scale), invertDrag: true);
             ImGui.SameLine(0, 0);
-            DrawWorldgenInspector(new NVector2(rightWidth, topHeight), showDiagnostics);
-
-            ImGuiLayoutHelper.DrawHorizontalSplitter("##worldgen-preview-splitter", available.X, splitterThickness, topBottomAvailableHeight, ref _worldgenPreviewBottomFraction, previewMin, previewMax);
-            DrawWorldgenPreviewPanel(new NVector2(available.X, previewHeight));
+            DrawWorldgenRightPanel(new NVector2(rightWidth, available.Y), showDiagnostics);
             DrawWorldgenPoppedOutViewport();
         }
         catch (Exception exception)
@@ -216,7 +207,6 @@ public sealed partial class DebugWindowManager
     private void ResetWorldgenLayout()
     {
         _worldgenLayout.Reset();
-        _worldgenPreviewBottomFraction = 0.42f;
     }
 
     private void ApplyWorldgenRuntime(bool force = false)
@@ -501,6 +491,19 @@ public sealed partial class DebugWindowManager
         ImGui.EndChild();
     }
 
+    private void DrawWorldgenRightPanel(NVector2 size, bool showDiagnostics)
+    {
+        ImGui.BeginChild("##worldgen-right-panel", size, false);
+        float availableHeight = Math.Max(1f, ImGui.GetContentRegionAvail().Y);
+        float inspectorHeight = Math.Clamp(availableHeight * 0.28f, 170f * Math.Max(0.75f, _devToolsUiScale), Math.Max(170f, availableHeight * 0.45f));
+        float editorHeight = Math.Max(220f, availableHeight - inspectorHeight - 6f);
+
+        DrawWorldgenEditorPanel(new NVector2(-float.Epsilon, editorHeight));
+        ImGui.Separator();
+        DrawWorldgenInspector(new NVector2(-float.Epsilon, Math.Max(140f, ImGui.GetContentRegionAvail().Y)), showDiagnostics);
+        ImGui.EndChild();
+    }
+
     private void DrawWorldgenRowsEditor(WorldgenAssetEntry entry, JToken root, JArray rows, string rowsLabel)
     {
         ImGui.TextUnformatted($"{rowsLabel}: {rows.Count} row(s)");
@@ -586,9 +589,9 @@ public sealed partial class DebugWindowManager
         bool changed = false;
         changed |= DrawWorldgenStringField(row, "code", "Code");
         changed |= DrawWorldgenStringField(row, "generator", "Generator");
-        changed |= DrawWorldgenIntField(row, "triesPerChunk", "Tries/chunk");
-        changed |= DrawWorldgenFloatField(row, "chance", "Chance");
-        changed |= DrawWorldgenFloatField(row, "chanceMultiplier", "Chance multiplier");
+        changed |= DrawWorldgenIntDragField(row, "triesPerChunk", "Tries/chunk", 0, 10000, 1f);
+        changed |= DrawWorldgenProbabilityField(row, "chance", "Chance");
+        changed |= DrawWorldgenFloatDragField(row, "chanceMultiplier", "Chance multiplier", 0f, 100f, 0.01f, "%.3f");
         changed |= DrawWorldgenBoolField(row, "withOreMap", "With ore map");
         changed |= DrawWorldgenStringField(row, "handbookPageCode", "Handbook code");
         changed |= DrawWorldgenStringField(row, "oreMapCode", "Ore map code");
@@ -600,23 +603,18 @@ public sealed partial class DebugWindowManager
     {
         bool changed = false;
         changed |= DrawWorldgenStringArrayField(row, "blockCodes", "Block codes");
-        changed |= DrawWorldgenFloatField(row, "chance", "Chance");
+        changed |= DrawWorldgenProbabilityField(row, "chance", "Chance");
         changed |= DrawWorldgenNatFloatField(row, "quantity", "Quantity");
         changed |= DrawWorldgenNatFloatField(row, "offsetX", "Offset X");
         changed |= DrawWorldgenNatFloatField(row, "offsetY", "Offset Y");
         changed |= DrawWorldgenNatFloatField(row, "offsetZ", "Offset Z");
-        changed |= DrawWorldgenFloatField(row, "minTemp", "Min temp");
-        changed |= DrawWorldgenFloatField(row, "maxTemp", "Max temp");
-        changed |= DrawWorldgenFloatField(row, "minRain", "Min rain");
-        changed |= DrawWorldgenFloatField(row, "maxRain", "Max rain");
-        changed |= DrawWorldgenFloatField(row, "minForest", "Min forest");
-        changed |= DrawWorldgenFloatField(row, "maxForest", "Max forest");
-        changed |= DrawWorldgenFloatField(row, "minShrub", "Min shrub");
-        changed |= DrawWorldgenFloatField(row, "maxShrub", "Max shrub");
-        changed |= DrawWorldgenFloatField(row, "minFertility", "Min fertility");
-        changed |= DrawWorldgenFloatField(row, "maxFertility", "Max fertility");
-        changed |= DrawWorldgenFloatField(row, "minY", "Min Y");
-        changed |= DrawWorldgenFloatField(row, "maxY", "Max Y");
+        ImGui.SeparatorText("Climate and height");
+        changed |= DrawWorldgenRangeField(row, "minTemp", "maxTemp", "Temperature", -60f, 60f, "%.1f");
+        changed |= DrawWorldgenRangeField(row, "minRain", "maxRain", "Rain", 0f, 1f, "%.3f");
+        changed |= DrawWorldgenRangeField(row, "minForest", "maxForest", "Forest", 0f, 1f, "%.3f");
+        changed |= DrawWorldgenRangeField(row, "minShrub", "maxShrub", "Shrub", 0f, 1f, "%.3f");
+        changed |= DrawWorldgenRangeField(row, "minFertility", "maxFertility", "Fertility", 0f, 1f, "%.3f");
+        changed |= DrawWorldgenRangeField(row, "minY", "maxY", "Y", 0f, 1f, "%.3f");
         return changed;
     }
 
@@ -624,9 +622,9 @@ public sealed partial class DebugWindowManager
     {
         bool changed = false;
         changed |= DrawWorldgenStringField(row, "code", "Code");
-        changed |= DrawWorldgenFloatField(row, "weight", "Weight");
+        changed |= DrawWorldgenFloatDragField(row, "weight", "Weight", 0f, 100000f, 0.1f, "%.3f");
         changed |= DrawWorldgenStringField(row, "group", "Group");
-        changed |= DrawWorldgenStringField(row, "hexcolor", "Color");
+        changed |= DrawWorldgenHexColorField(row, "hexcolor", "Color");
         changed |= DrawWorldgenFloatArrayField(row, "terrainOctaves", "Terrain octaves");
         changed |= DrawWorldgenFloatArrayField(row, "terrainOctaveThresholds", "Octave thresholds");
         changed |= DrawWorldgenFloatArrayField(row, "terrainYKeyPositions", "Y key positions");
@@ -638,10 +636,10 @@ public sealed partial class DebugWindowManager
     {
         bool changed = false;
         changed |= DrawWorldgenStringField(row, "blockcode", "Block code");
-        changed |= DrawWorldgenFloatField(row, "weight", "Weight");
+        changed |= DrawWorldgenFloatDragField(row, "weight", "Weight", 0f, 100000f, 0.1f, "%.3f");
         changed |= DrawWorldgenStringField(row, "rockGroup", "Rock group");
         changed |= DrawWorldgenStringField(row, "genDir", "Generation direction");
-        changed |= DrawWorldgenStringField(row, "hexcolor", "Color");
+        changed |= DrawWorldgenHexColorField(row, "hexcolor", "Color");
         changed |= DrawWorldgenFloatArrayField(row, "amplitudes", "Amplitudes");
         changed |= DrawWorldgenFloatArrayField(row, "thresholds", "Thresholds");
         changed |= DrawWorldgenFloatArrayField(row, "frequencies", "Frequencies");
@@ -672,27 +670,64 @@ public sealed partial class DebugWindowManager
 
     private bool DrawWorldgenFloatArrayField(JObject row, string propertyName, string label)
     {
-        string value = row[propertyName] is JArray array
-            ? string.Join(", ", array.Select(token => FormatJsonNumber(token)))
-            : row[propertyName]?.ToString() ?? "";
-        if (!ImGui.InputText($"{label}##worldgen-{propertyName}", ref value, 4096)) return false;
+        JArray array = row[propertyName] as JArray ?? [];
+        bool exists = row[propertyName] is JArray;
+        bool changed = false;
 
-        JArray replacement = [];
-        foreach (string part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        ImGui.PushID($"worldgen-float-array-{propertyName}");
+        if (!exists)
         {
-            if (float.TryParse(part, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float parsed))
+            if (ImGui.Button($"Add {label}"))
             {
-                replacement.Add(parsed);
-                continue;
+                row[propertyName] = new JArray(0f);
+                changed = true;
             }
 
-            _worldgenTextValid = false;
-            _worldgenValidationStatus = $"{label} contains a non-numeric value: {part}";
-            return false;
+            ImGui.PopID();
+            return changed;
         }
 
-        row[propertyName] = replacement;
-        return true;
+        if (ImGui.CollapsingHeader($"{label} ({array.Count})"))
+        {
+            int removeIndex = -1;
+            for (int index = 0; index < array.Count; index++)
+            {
+                float value = TryReadJsonFloat(array[index], out float parsed) ? parsed : 0f;
+                ImGui.SetNextItemWidth(Math.Max(100f, ImGui.GetContentRegionAvail().X - 76f));
+                if (ImGui.DragFloat($"[{index}]##worldgen-array-value-{index}", ref value, 0.01f, -100000f, 100000f, "%.4f"))
+                {
+                    array[index] = value;
+                    changed = true;
+                }
+
+                ImGui.SameLine();
+                if (ImGui.Button($"-##worldgen-array-remove-{index}"))
+                {
+                    removeIndex = index;
+                }
+            }
+
+            if (removeIndex >= 0)
+            {
+                array.RemoveAt(removeIndex);
+                changed = true;
+            }
+
+            if (ImGui.Button($"Add value##worldgen-array-add-{propertyName}"))
+            {
+                array.Add(0f);
+                changed = true;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Clear##worldgen-array-clear-{propertyName}"))
+            {
+                row.Remove(propertyName);
+                changed = true;
+            }
+        }
+
+        ImGui.PopID();
+        return changed;
     }
 
     private bool DrawWorldgenIntField(JObject row, string propertyName, string label)
@@ -704,12 +739,99 @@ public sealed partial class DebugWindowManager
         return true;
     }
 
+    private bool DrawWorldgenIntDragField(JObject row, string propertyName, string label, int min, int max, float speed)
+    {
+        int value = row[propertyName]?.Value<int?>() ?? min;
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        if (!ImGui.DragInt($"{label}##worldgen-{propertyName}", ref value, speed, min, max)) return false;
+
+        row[propertyName] = Math.Clamp(value, min, max);
+        return true;
+    }
+
     private bool DrawWorldgenFloatField(JObject row, string propertyName, string label)
     {
         float value = row[propertyName]?.Value<float?>() ?? 0f;
         if (!ImGui.InputFloat($"{label}##worldgen-{propertyName}", ref value)) return false;
 
         row[propertyName] = value;
+        return true;
+    }
+
+    private bool DrawWorldgenFloatDragField(JObject row, string propertyName, string label, float min, float max, float speed, string format)
+    {
+        float value = row[propertyName]?.Value<float?>() ?? min;
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        if (!ImGui.DragFloat($"{label}##worldgen-{propertyName}", ref value, speed, min, max, format)) return false;
+
+        row[propertyName] = Math.Clamp(value, min, max);
+        return true;
+    }
+
+    private bool DrawWorldgenProbabilityField(JObject row, string propertyName, string label)
+    {
+        float value = row[propertyName]?.Value<float?>() ?? 0f;
+        float max = Math.Max(1f, value);
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        if (!ImGui.SliderFloat($"{label}##worldgen-{propertyName}", ref value, 0f, max, "%.3f")) return false;
+
+        row[propertyName] = Math.Clamp(value, 0f, max);
+        return true;
+    }
+
+    private bool DrawWorldgenRangeField(JObject row, string minPropertyName, string maxPropertyName, string label, float defaultMin, float defaultMax, string format)
+    {
+        float minValue = row[minPropertyName]?.Value<float?>() ?? defaultMin;
+        float maxValue = row[maxPropertyName]?.Value<float?>() ?? defaultMax;
+        float lower = Math.Min(defaultMin, Math.Min(minValue, maxValue));
+        float upper = Math.Max(defaultMax, Math.Max(minValue, maxValue));
+        bool changed = false;
+
+        ImGui.PushID($"worldgen-range-{minPropertyName}-{maxPropertyName}");
+        ImGui.TextUnformatted(label);
+        float width = Math.Max(90f, (ImGui.GetContentRegionAvail().X - 10f) * 0.5f);
+        ImGui.SetNextItemWidth(width);
+        changed |= ImGui.SliderFloat($"Min##{minPropertyName}", ref minValue, lower, upper, format);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(width);
+        changed |= ImGui.SliderFloat($"Max##{maxPropertyName}", ref maxValue, lower, upper, format);
+
+        if (changed)
+        {
+            if (minValue > maxValue)
+            {
+                if (Math.Abs((row[minPropertyName]?.Value<float?>() ?? minValue) - minValue) > Math.Abs((row[maxPropertyName]?.Value<float?>() ?? maxValue) - maxValue))
+                {
+                    maxValue = minValue;
+                }
+                else
+                {
+                    minValue = maxValue;
+                }
+            }
+
+            row[minPropertyName] = minValue;
+            row[maxPropertyName] = maxValue;
+        }
+
+        ImGui.PopID();
+        return changed;
+    }
+
+    private bool DrawWorldgenHexColorField(JObject row, string propertyName, string label)
+    {
+        string original = row[propertyName]?.ToString() ?? "";
+        NVector3 color = TryParseWorldgenHexColor(original, out NVector3 parsed)
+            ? parsed
+            : new NVector3(0.55f, 0.55f, 0.55f);
+
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        if (!ImGui.ColorEdit3($"{label}##worldgen-{propertyName}", ref color)) return false;
+
+        int r = Math.Clamp((int)MathF.Round(color.X * 255f), 0, 255);
+        int g = Math.Clamp((int)MathF.Round(color.Y * 255f), 0, 255);
+        int b = Math.Clamp((int)MathF.Round(color.Z * 255f), 0, 255);
+        row[propertyName] = $"{r:X2}{g:X2}{b:X2}";
         return true;
     }
 
@@ -746,10 +868,10 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.CollapsingHeader(label))
         {
-            changed |= DrawWorldgenStringField(natFloat, "dist", "Distribution");
-            changed |= DrawWorldgenFloatField(natFloat, "avg", "Average");
-            changed |= DrawWorldgenFloatField(natFloat, "var", "Variance");
-            changed |= DrawWorldgenFloatField(natFloat, "offset", "Offset");
+            changed |= DrawWorldgenNatFloatDistributionField(natFloat);
+            changed |= DrawWorldgenFloatDragField(natFloat, "avg", "Average", -100000f, 100000f, 0.01f, "%.4f");
+            changed |= DrawWorldgenFloatDragField(natFloat, "var", "Variance", 0f, 100000f, 0.01f, "%.4f");
+            changed |= DrawWorldgenFloatDragField(natFloat, "offset", "Offset", -100000f, 100000f, 0.01f, "%.4f");
             if (ImGui.Button("Remove"))
             {
                 row.Remove(propertyName);
@@ -759,6 +881,36 @@ public sealed partial class DebugWindowManager
 
         ImGui.PopID();
         return changed;
+    }
+
+    private bool DrawWorldgenNatFloatDistributionField(JObject natFloat)
+    {
+        string[] options = ["uniform", "gaussian", "narrowgaussian", "invexp", "triangle"];
+        string current = natFloat["dist"]?.ToString() ?? "uniform";
+        int index = Array.FindIndex(options, option => string.Equals(option, current, StringComparison.OrdinalIgnoreCase));
+        if (index < 0) index = 0;
+
+        ImGui.SetNextItemWidth(-float.Epsilon);
+        if (!ImGui.Combo("Distribution##worldgen-natfloat-dist", ref index, options, options.Length)) return false;
+
+        natFloat["dist"] = options[Math.Clamp(index, 0, options.Length - 1)];
+        return true;
+    }
+
+    private static bool TryParseWorldgenHexColor(string raw, out NVector3 color)
+    {
+        color = default;
+        string value = (raw ?? "").Trim().TrimStart('#');
+        if (value.Length != 6 ||
+            !int.TryParse(value[..2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int r) ||
+            !int.TryParse(value.Substring(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int g) ||
+            !int.TryParse(value.Substring(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int b))
+        {
+            return false;
+        }
+
+        color = new NVector3(r / 255f, g / 255f, b / 255f);
+        return true;
     }
 
     private bool DrawWorldgenObjectJsonField(JObject row, string propertyName, string label)
