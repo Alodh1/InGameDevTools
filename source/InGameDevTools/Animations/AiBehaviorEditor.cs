@@ -2,12 +2,16 @@ using InGameDevTools.Utils;
 using ImGuiNET;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using System.Collections;
+using System.Globalization;
+using System.Reflection;
 using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
 using Vintagestory.API.Datastructures;
+using Vintagestory.API.Server;
 
 namespace InGameDevTools.Animations;
 
@@ -38,6 +42,11 @@ public sealed partial class DebugWindowManager
     private string _aiBehaviorNewTaskCode = "wander";
     private int _aiBehaviorKnownTaskCodeIndex;
     private string[]? _aiBehaviorKnownTaskCodes;
+    private readonly List<AiBehaviorLiveTaskInfo> _aiBehaviorLiveTasks = [];
+    private long _aiBehaviorLiveEntityId;
+    private string _aiBehaviorLiveEntityCode = "";
+    private string _aiBehaviorLiveStatus = "No live entity target selected.";
+    private string _aiBehaviorLiveServerStatus = "Singleplayer server API has not been checked.";
 
     private void AiBehaviorEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -91,7 +100,11 @@ public sealed partial class DebugWindowManager
 
     private void ClearAiBehaviorLiveApplyState()
     {
-        // Live AI tuning is intentionally not implemented in the source-editor first pass.
+        _aiBehaviorLiveTasks.Clear();
+        _aiBehaviorLiveEntityId = 0;
+        _aiBehaviorLiveEntityCode = "";
+        _aiBehaviorLiveStatus = "No live entity target selected.";
+        _aiBehaviorLiveServerStatus = "Singleplayer server API has not been checked.";
     }
 
     private void EnsureAiBehaviorEntriesIndexed()
@@ -697,7 +710,9 @@ public sealed partial class DebugWindowManager
         ImGui.TextWrapped(_aiBehaviorValidationStatus);
 
         ImGui.Separator();
-        ImGui.TextWrapped("Source edits change the entity type for future spawns after authored files are loaded. Live single-entity tuning is not part of this first pass.");
+        ImGui.TextWrapped("Source edits change the entity type for future spawns after authored files are loaded.");
+        ImGui.Separator();
+        DrawAiBehaviorLivePanel();
         ImGui.Separator();
 
         bool canSave = dirty && _aiBehaviorTextValid;
@@ -725,6 +740,61 @@ public sealed partial class DebugWindowManager
 
         ImGui.Separator();
         _aiBehaviorDiagnostics.Draw("entity-ai-inspector-diagnostics", showDiagnostics);
+        ImGui.EndChild();
+    }
+
+    private void DrawAiBehaviorLivePanel()
+    {
+        ImGui.SeparatorText("Live single entity");
+        ImGui.TextWrapped("Read-only SP view. It shows the running task manager for one looked-at entity; source edits still need authored files.");
+
+        if (ImGui.Button("Use looked-at live target##entity-ai-live-looked-at", new NVector2(-1, 0)))
+        {
+            Entity? entity = TryGetLookedAtEntityForAiBehavior();
+            if (entity == null)
+            {
+                _aiBehaviorLiveStatus = "No looked-at entity target found.";
+                _aiBehaviorLiveTasks.Clear();
+            }
+            else
+            {
+                SetAiBehaviorLiveTarget(entity, refresh: true);
+            }
+        }
+
+        bool hasLiveTarget = _aiBehaviorLiveEntityId != 0;
+        if (!hasLiveTarget) ImGui.BeginDisabled();
+        if (ImGui.Button("Refresh live tasks##entity-ai-live-refresh", new NVector2(-1, 0)))
+        {
+            RefreshAiBehaviorLiveSnapshot();
+        }
+        if (!hasLiveTarget) ImGui.EndDisabled();
+
+        if (hasLiveTarget)
+        {
+            ImGui.TextWrapped($"Live target: {_aiBehaviorLiveEntityCode} #{_aiBehaviorLiveEntityId}");
+        }
+        ImGui.TextWrapped(_aiBehaviorLiveServerStatus);
+        ImGui.TextWrapped(_aiBehaviorLiveStatus);
+
+        if (_aiBehaviorLiveTasks.Count == 0) return;
+
+        if (ImGui.BeginChild("##entity-ai-live-task-list", new NVector2(-float.Epsilon, Math.Clamp(_aiBehaviorLiveTasks.Count * 24f + 18f, 96f, 260f)), true))
+        {
+            for (int index = 0; index < _aiBehaviorLiveTasks.Count; index++)
+            {
+                AiBehaviorLiveTaskInfo task = _aiBehaviorLiveTasks[index];
+                NVector4 color = task.IsActive
+                    ? new NVector4(0.55f, 1f, 0.50f, 1f)
+                    : new NVector4(0.72f, 0.72f, 0.72f, 1f);
+                string state = task.IsActive ? "active" : "idle";
+                ImGui.TextColored(color, $"{index}: {task.Code} [{state}]");
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip($"{task.TypeName}\npriority: {task.Priority}\nslot: {task.Slot}\ncooldown: {task.Cooldown}");
+                }
+            }
+        }
         ImGui.EndChild();
     }
 
@@ -906,6 +976,11 @@ public sealed partial class DebugWindowManager
     private void SelectLookedAtAiBehaviorEntity()
     {
         Entity? entity = TryGetLookedAtEntityForAiBehavior();
+        if (entity != null)
+        {
+            SetAiBehaviorLiveTarget(entity, refresh: true);
+        }
+
         AssetLocation? code = entity?.Properties?.Code;
         if (code == null)
         {
@@ -937,6 +1012,432 @@ public sealed partial class DebugWindowManager
         _aiBehaviorEntryIndex = index;
         LoadAiBehaviorEntry(_visibleAiBehaviorEntries[index], keepDirty: true);
         _aiBehaviorStatus = $"Selected looked-at entity {key}.";
+    }
+
+    private void SetAiBehaviorLiveTarget(Entity entity, bool refresh)
+    {
+        _aiBehaviorLiveEntityId = entity.EntityId;
+        AssetLocation? code = entity.Properties?.Code;
+        _aiBehaviorLiveEntityCode = code == null ? "<unknown entity>" : $"{code.Domain}:{code.Path}";
+        _aiBehaviorLiveStatus = refresh ? "Refreshing live AI task list." : "Live entity target selected.";
+        if (refresh)
+        {
+            RefreshAiBehaviorLiveSnapshot();
+        }
+    }
+
+    private void RefreshAiBehaviorLiveSnapshot()
+    {
+        _aiBehaviorLiveTasks.Clear();
+
+        ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
+        if (serverApi == null)
+        {
+            _aiBehaviorLiveServerStatus = "Singleplayer server API: unavailable; live AI read requires singleplayer.";
+            _aiBehaviorLiveStatus = "Source editing still works; no live task manager is available.";
+            return;
+        }
+
+        _aiBehaviorLiveServerStatus = "Singleplayer server API: available.";
+        if (_aiBehaviorLiveEntityId == 0)
+        {
+            _aiBehaviorLiveStatus = "No live entity target selected.";
+            return;
+        }
+
+        try
+        {
+            Entity? serverEntity = serverApi.World.GetEntityById(_aiBehaviorLiveEntityId);
+            if (serverEntity == null)
+            {
+                _aiBehaviorLiveStatus = $"Server entity #{_aiBehaviorLiveEntityId} was not found. Look at the entity again and refresh.";
+                return;
+            }
+
+            if (!TryGetAiTaskManager(serverEntity, out object? taskManager, out string managerSource) || taskManager == null)
+            {
+                _aiBehaviorLiveStatus = $"No live task manager found on {_aiBehaviorLiveEntityCode} #{_aiBehaviorLiveEntityId}.";
+                return;
+            }
+
+            IReadOnlyList<object> tasks = GetAiBehaviorLiveTasks(taskManager);
+            HashSet<object> activeTasks = GetAiBehaviorActiveTaskSet(taskManager);
+            foreach (object task in tasks)
+            {
+                _aiBehaviorLiveTasks.Add(BuildAiBehaviorLiveTaskInfo(task, activeTasks.Contains(task)));
+            }
+
+            _aiBehaviorLiveStatus = $"Live read: {_aiBehaviorLiveTasks.Count} task(s) from {managerSource}.";
+        }
+        catch (Exception exception)
+        {
+            _aiBehaviorLiveStatus = $"Live AI read failed: {exception.Message}";
+            _aiBehaviorDiagnostics.Exception("Entity AI live read failed", exception);
+        }
+    }
+
+    private bool TryGetAiTaskManager(Entity serverEntity, out object? taskManager, out string source)
+    {
+        foreach (object? behavior in EnumerateAiBehaviorCandidates(serverEntity))
+        {
+            taskManager = TryGetMemberValue(behavior, "TaskManager");
+            if (taskManager != null)
+            {
+                source = $"{behavior.GetType().Name}.TaskManager";
+                return true;
+            }
+        }
+
+        if (TryFindAiTaskManagerInObjectGraph(serverEntity, out taskManager, out source))
+        {
+            return true;
+        }
+
+        taskManager = null;
+        source = "";
+        return false;
+    }
+
+    private IEnumerable<object> EnumerateAiBehaviorCandidates(Entity serverEntity)
+    {
+        Type entityType = serverEntity.GetType();
+        Type? taskAiBehaviorType = FindAiBehaviorType("EntityBehaviorTaskAI");
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        if (taskAiBehaviorType != null)
+        {
+            foreach (MethodInfo method in entityType.GetMethods(flags))
+            {
+                if (!string.Equals(method.Name, "GetBehavior", StringComparison.Ordinal) ||
+                    !method.IsGenericMethodDefinition ||
+                    method.GetGenericArguments().Length != 1 ||
+                    method.GetParameters().Length != 0)
+                {
+                    continue;
+                }
+
+                object? behavior;
+                try
+                {
+                    behavior = method.MakeGenericMethod(taskAiBehaviorType).Invoke(serverEntity, null);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (behavior != null) yield return behavior;
+            }
+        }
+
+        foreach (MethodInfo method in entityType.GetMethods(flags))
+        {
+            if (!string.Equals(method.Name, "GetBehavior", StringComparison.Ordinal)) continue;
+
+            ParameterInfo[] parameters = method.GetParameters();
+            if (parameters.Length != 1 || parameters[0].ParameterType != typeof(string)) continue;
+
+            foreach (string behaviorCode in new[] { "taskai", "TaskAI", "ai", "entityai" })
+            {
+                object? behavior;
+                try
+                {
+                    behavior = method.Invoke(serverEntity, [behaviorCode]);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (behavior != null) yield return behavior;
+            }
+        }
+    }
+
+    private static Type? FindAiBehaviorType(string typeNameSuffix)
+    {
+        foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type? direct = assembly.GetType($"Vintagestory.GameContent.{typeNameSuffix}", throwOnError: false);
+            if (direct != null) return direct;
+
+            foreach (Type type in GetAiBehaviorLoadableTypes(assembly))
+            {
+                if (type.Name.Equals(typeNameSuffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return type;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<Type> GetAiBehaviorLoadableTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException exception)
+        {
+            return exception.Types.Where(type => type != null)!;
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static bool TryFindAiTaskManagerInObjectGraph(object root, out object? taskManager, out string source)
+    {
+        Queue<(object Value, string Source, int Depth)> queue = new();
+        HashSet<object> visited = new(ReferenceEqualityComparer.Instance);
+        queue.Enqueue((root, root.GetType().Name, 0));
+
+        while (queue.Count > 0 && visited.Count < 350)
+        {
+            (object value, string currentSource, int depth) = queue.Dequeue();
+            if (!visited.Add(value)) continue;
+
+            object? direct = TryGetMemberValue(value, "TaskManager");
+            if (direct != null)
+            {
+                taskManager = direct;
+                source = $"{currentSource}.TaskManager";
+                return true;
+            }
+
+            if (depth >= 3) continue;
+
+            foreach ((string memberName, object? child) in EnumerateAiBehaviorObjectChildren(value))
+            {
+                if (child == null || child is string || child.GetType().IsValueType) continue;
+
+                if (child is IEnumerable enumerable && child is not JObject && child is not JToken)
+                {
+                    int itemIndex = 0;
+                    foreach (object? item in enumerable)
+                    {
+                        if (item == null || item is string || item.GetType().IsValueType) continue;
+                        if (itemIndex++ > 64) break;
+                        queue.Enqueue((item, $"{currentSource}.{memberName}[{itemIndex - 1}]", depth + 1));
+                    }
+                    continue;
+                }
+
+                queue.Enqueue((child, $"{currentSource}.{memberName}", depth + 1));
+            }
+        }
+
+        taskManager = null;
+        source = "";
+        return false;
+    }
+
+    private static IEnumerable<(string Name, object? Value)> EnumerateAiBehaviorObjectChildren(object value)
+    {
+        Type type = value.GetType();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        foreach (FieldInfo field in type.GetFields(flags))
+        {
+            if (!ShouldProbeAiBehaviorMember(field.FieldType, field.Name)) continue;
+            object? child;
+            try
+            {
+                child = field.GetValue(value);
+            }
+            catch
+            {
+                continue;
+            }
+            yield return (field.Name, child);
+        }
+
+        foreach (PropertyInfo property in type.GetProperties(flags))
+        {
+            if (property.GetIndexParameters().Length != 0 || !ShouldProbeAiBehaviorMember(property.PropertyType, property.Name)) continue;
+            object? child;
+            try
+            {
+                child = property.GetValue(value);
+            }
+            catch
+            {
+                continue;
+            }
+            yield return (property.Name, child);
+        }
+    }
+
+    private static bool ShouldProbeAiBehaviorMember(Type memberType, string memberName)
+    {
+        if (memberType.IsPrimitive || memberType.IsEnum || memberType == typeof(string)) return false;
+        string name = memberName.ToLowerInvariant();
+        string typeName = memberType.FullName?.ToLowerInvariant() ?? "";
+        return name.Contains("behavior", StringComparison.Ordinal) ||
+            name.Contains("task", StringComparison.Ordinal) ||
+            name.Contains("ai", StringComparison.Ordinal) ||
+            typeName.Contains("behavior", StringComparison.Ordinal) ||
+            typeName.Contains("task", StringComparison.Ordinal) ||
+            typeName.Contains("ai", StringComparison.Ordinal);
+    }
+
+    private static IReadOnlyList<object> GetAiBehaviorLiveTasks(object taskManager)
+    {
+        object? allTasks = TryGetMemberValue(taskManager, "AllTasks");
+        if (allTasks is not IEnumerable enumerable) return [];
+
+        List<object> tasks = [];
+        foreach (object? task in enumerable)
+        {
+            if (task != null) tasks.Add(task);
+        }
+        return tasks;
+    }
+
+    private static HashSet<object> GetAiBehaviorActiveTaskSet(object taskManager)
+    {
+        HashSet<object> activeTasks = new(ReferenceEqualityComparer.Instance);
+        object? active = TryGetMemberValue(taskManager, "ActiveTasksBySlot");
+        if (active == null) return activeTasks;
+
+        if (active is IDictionary dictionary)
+        {
+            foreach (object? value in dictionary.Values)
+            {
+                AddAiBehaviorActiveTaskValue(activeTasks, value);
+            }
+            return activeTasks;
+        }
+
+        AddAiBehaviorActiveTaskValue(activeTasks, active);
+        return activeTasks;
+    }
+
+    private static void AddAiBehaviorActiveTaskValue(HashSet<object> activeTasks, object? value)
+    {
+        if (value == null || value is string) return;
+        if (value is IEnumerable enumerable)
+        {
+            foreach (object? item in enumerable)
+            {
+                if (item != null) activeTasks.Add(item);
+            }
+            return;
+        }
+
+        activeTasks.Add(value);
+    }
+
+    private AiBehaviorLiveTaskInfo BuildAiBehaviorLiveTaskInfo(object task, bool isActive)
+    {
+        string typeName = task.GetType().FullName ?? task.GetType().Name;
+        string code = GetAiBehaviorTaskRegistryCode(task.GetType())
+            ?? ReadAiBehaviorMemberString(task, "Code")
+            ?? ReadAiBehaviorMemberString(task, "code")
+            ?? task.GetType().Name;
+        string priority = ReadAiBehaviorMemberString(task, "Priority")
+            ?? ReadAiBehaviorMemberString(task, "priority")
+            ?? "?";
+        string slot = ReadAiBehaviorMemberString(task, "Slot")
+            ?? ReadAiBehaviorMemberString(task, "slot")
+            ?? "?";
+        string cooldown = BuildAiBehaviorCooldownText(task);
+        return new AiBehaviorLiveTaskInfo(code, typeName, priority, slot, cooldown, isActive);
+    }
+
+    private string? GetAiBehaviorTaskRegistryCode(Type taskType)
+    {
+        try
+        {
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type? registry = assembly.GetType("Vintagestory.GameContent.AiTaskRegistry", throwOnError: false);
+                object? taskCodes = registry?.GetField("TaskCodes", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                if (taskCodes is not IDictionary dictionary) continue;
+
+                foreach (DictionaryEntry entry in dictionary)
+                {
+                    if (entry.Key is Type registeredType && registeredType.IsAssignableFrom(taskType))
+                    {
+                        string? code = entry.Value?.ToString();
+                        if (!string.IsNullOrWhiteSpace(code)) return code;
+                    }
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            _aiBehaviorDiagnostics.Warning($"Could not read AiTaskRegistry task labels: {exception.Message}");
+        }
+
+        return null;
+    }
+
+    private static string BuildAiBehaviorCooldownText(object task)
+    {
+        string? min = ReadAiBehaviorMemberString(task, "MinCooldownMs") ?? ReadAiBehaviorMemberString(task, "mincooldown");
+        string? max = ReadAiBehaviorMemberString(task, "MaxCooldownMs") ?? ReadAiBehaviorMemberString(task, "maxcooldown");
+        if (!string.IsNullOrWhiteSpace(min) || !string.IsNullOrWhiteSpace(max))
+        {
+            return $"{min ?? "?"}-{max ?? "?"} ms";
+        }
+
+        return ReadAiBehaviorMemberString(task, "CooldownUntilMs") ??
+            ReadAiBehaviorMemberString(task, "cooldownUntilMs") ??
+            "?";
+    }
+
+    private static string? ReadAiBehaviorMemberString(object value, string memberName)
+    {
+        object? memberValue = TryGetMemberValue(value, memberName);
+        return memberValue switch
+        {
+            null => null,
+            float f => f.ToString("0.###", CultureInfo.InvariantCulture),
+            double d => d.ToString("0.###", CultureInfo.InvariantCulture),
+            decimal d => d.ToString("0.###", CultureInfo.InvariantCulture),
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+            _ => memberValue.ToString()
+        };
+    }
+
+    private static object? TryGetMemberValue(object? value, string memberName)
+    {
+        if (value == null) return null;
+
+        Type type = value.GetType();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.IgnoreCase;
+
+        PropertyInfo? property = type.GetProperty(memberName, flags);
+        if (property != null && property.GetIndexParameters().Length == 0)
+        {
+            try
+            {
+                return property.GetValue(value);
+            }
+            catch
+            {
+                // Try a field below.
+            }
+        }
+
+        FieldInfo? field = type.GetField(memberName, flags);
+        if (field != null)
+        {
+            try
+            {
+                return field.GetValue(value);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        return null;
     }
 
     private Entity? TryGetLookedAtEntityForAiBehavior()
@@ -1256,6 +1757,14 @@ public sealed partial class DebugWindowManager
     {
         public bool IsDirty => !string.Equals(Text, OriginalText, StringComparison.Ordinal);
     }
+
+    private sealed record AiBehaviorLiveTaskInfo(
+        string Code,
+        string TypeName,
+        string Priority,
+        string Slot,
+        string Cooldown,
+        bool IsActive);
 
     private sealed record AiBehaviorVariantGroup(string Code, IReadOnlyList<string> States);
 }
