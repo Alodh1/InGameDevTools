@@ -850,7 +850,36 @@ public sealed partial class DebugWindowManager
                 ImGui.TextColored(color, $"{index}: {task.Code} [{state}]");
                 if (ImGui.IsItemHovered())
                 {
-                    ImGui.SetTooltip($"{task.TypeName}\npriority: {task.Priority}\nslot: {task.Slot}\ncooldown: {task.Cooldown}");
+                    ImGui.SetTooltip($"{task.TypeName}\npriority: {task.Priority}\nslot: {task.Slot}\ncooldown: {task.Cooldown}\ngates: {task.GateSummary}");
+                }
+            }
+        }
+        ImGui.EndChild();
+
+        ImGui.SeparatorText("Why not / gates");
+        if (ImGui.BeginChild("##entity-ai-live-gate-list", new NVector2(-float.Epsilon, Math.Clamp(_aiBehaviorLiveTasks.Count * 30f + 20f, 120f, 260f)), true))
+        {
+            for (int index = 0; index < _aiBehaviorLiveTasks.Count; index++)
+            {
+                AiBehaviorLiveTaskInfo task = _aiBehaviorLiveTasks[index];
+                string slotBlock = BuildAiBehaviorSlotBlockText(task);
+                string summary = string.IsNullOrWhiteSpace(slotBlock)
+                    ? task.GateSummary
+                    : $"{slotBlock}; {task.GateSummary}";
+                NVector4 color = task.IsActive
+                    ? new NVector4(0.55f, 1f, 0.50f, 1f)
+                    : new NVector4(0.88f, 0.74f, 0.52f, 1f);
+                ImGui.TextColored(color, $"{task.Code}: {summary}");
+                if (ImGui.IsItemHovered())
+                {
+                    string details = string.IsNullOrWhiteSpace(task.GateDetails)
+                        ? "No readable gate fields were found on this task."
+                        : task.GateDetails;
+                    if (!string.IsNullOrWhiteSpace(slotBlock))
+                    {
+                        details = $"{slotBlock}\n{details}";
+                    }
+                    ImGui.SetTooltip(details);
                 }
             }
         }
@@ -1159,11 +1188,33 @@ public sealed partial class DebugWindowManager
 
             string slot = string.IsNullOrWhiteSpace(task.Slot) || task.Slot == "?"
                 ? $"task {++unnamedIndex}"
-                : $"slot {task.Slot}";
+                : BuildAiBehaviorSlotKey(task.Slot);
             activeBySlot[slot] = task.Code;
         }
 
         return activeBySlot;
+    }
+
+    private string BuildAiBehaviorSlotBlockText(AiBehaviorLiveTaskInfo task)
+    {
+        if (task.IsActive) return "";
+        string slotKey = BuildAiBehaviorSlotKey(task.Slot);
+        if (string.IsNullOrWhiteSpace(slotKey)) return "";
+
+        if (_aiBehaviorLiveActiveBySlot.TryGetValue(slotKey, out string? activeCode) &&
+            !string.Equals(activeCode, task.Code, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"{slotKey} is currently occupied by {activeCode}";
+        }
+
+        return "";
+    }
+
+    private static string BuildAiBehaviorSlotKey(string slot)
+    {
+        return string.IsNullOrWhiteSpace(slot) || slot == "?"
+            ? ""
+            : $"slot {slot}";
     }
 
     private void UpdateAiBehaviorLiveTransitions(IReadOnlyDictionary<string, string> activeBySlot, bool recordTransitions)
@@ -1477,7 +1528,66 @@ public sealed partial class DebugWindowManager
             ?? ReadAiBehaviorMemberString(task, "slot")
             ?? "?";
         string cooldown = BuildAiBehaviorCooldownText(task);
-        return new AiBehaviorLiveTaskInfo(code, typeName, priority, slot, cooldown, isActive);
+        AiBehaviorLiveGateInfo gateInfo = BuildAiBehaviorLiveGateInfo(task, isActive);
+        return new AiBehaviorLiveTaskInfo(code, typeName, priority, slot, cooldown, isActive, gateInfo.Summary, gateInfo.Details);
+    }
+
+    private static AiBehaviorLiveGateInfo BuildAiBehaviorLiveGateInfo(object task, bool isActive)
+    {
+        List<string> summary = [];
+        List<string> details = [];
+
+        if (isActive)
+        {
+            summary.Add("running now");
+        }
+
+        if (TryReadAiBehaviorNumber(task, out double executionChance, "ExecutionChance", "executionChance", "chance"))
+        {
+            details.Add($"Execution chance: {executionChance.ToString("0.###", CultureInfo.InvariantCulture)}");
+            if (executionChance >= 0 && executionChance < 0.999)
+            {
+                summary.Add($"chance {executionChance:P0}");
+            }
+        }
+
+        AddAiBehaviorGateDetail(task, details, summary, "Cooldown until", "cooldown pending",
+            "CooldownUntilMs", "cooldownUntilMs", "CooldownUntilTotalMs", "cooldownUntilTotalMs",
+            "CooldownUntilTotalHours", "cooldownUntilTotalHours", "cooldownUntilWorldTime", "nextExecuteTotalHours");
+        AddAiBehaviorGateDetail(task, details, summary, "Emotion required", "emotion gate",
+            "WhenInEmotionStates", "whenInEmotionStates");
+        AddAiBehaviorGateDetail(task, details, summary, "Emotion blocked", "emotion gate",
+            "WhenNotInEmotionStates", "whenNotInEmotionStates");
+        AddAiBehaviorGateDetail(task, details, summary, "Swimming", "swim gate",
+            "WhenSwimming", "whenSwimming");
+        AddAiBehaviorGateDetail(task, details, summary, "Day time frames", "time gate",
+            "duringDayTimeFrames", "DuringDayTimeFrames", "DayTimeFrames", "dayTimeFrames");
+        AddAiBehaviorGateDetail(task, details, summary, "Light levels", "light gate",
+            "EntityLightLevels", "entityLightLevels", "LightLevelRange", "lightLevelRange");
+        AddAiBehaviorGateDetail(task, details, summary, "Temperature range", "temperature gate",
+            "TemperatureRange", "temperatureRange");
+
+        if (details.Count == 0)
+        {
+            details.Add("No common gate fields were readable on this task. Exact ShouldExecute probing is not run automatically because task implementations can have side effects.");
+        }
+
+        if (summary.Count == 0)
+        {
+            summary.Add("inactive; no common blockers readable");
+        }
+
+        return new AiBehaviorLiveGateInfo(string.Join("; ", summary.Distinct(StringComparer.OrdinalIgnoreCase)), string.Join("\n", details));
+    }
+
+    private static void AddAiBehaviorGateDetail(object task, List<string> details, List<string> summary, string label, string summaryLabel, params string[] memberNames)
+    {
+        if (!TryReadAiBehaviorMember(task, out string memberName, out string text, memberNames)) return;
+        details.Add($"{label} ({memberName}): {text}");
+        if (!string.IsNullOrWhiteSpace(summaryLabel))
+        {
+            summary.Add(summaryLabel);
+        }
     }
 
     private string? GetAiBehaviorTaskRegistryCode(Type taskType)
@@ -1534,6 +1644,115 @@ public sealed partial class DebugWindowManager
             IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
             _ => memberValue.ToString()
         };
+    }
+
+    private static bool TryReadAiBehaviorNumber(object value, out double number, params string[] memberNames)
+    {
+        foreach (string memberName in memberNames)
+        {
+            object? memberValue = TryGetMemberValue(value, memberName);
+            if (memberValue == null) continue;
+
+            try
+            {
+                number = Convert.ToDouble(memberValue, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch
+            {
+                if (double.TryParse(memberValue.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out number))
+                {
+                    return true;
+                }
+            }
+        }
+
+        number = 0;
+        return false;
+    }
+
+    private static bool TryReadAiBehaviorMember(object value, out string memberName, out string text, params string[] memberNames)
+    {
+        foreach (string candidate in memberNames)
+        {
+            object? memberValue = TryGetMemberValue(value, candidate);
+            if (!IsMeaningfulAiBehaviorGateValue(memberValue)) continue;
+
+            memberName = candidate;
+            text = FormatAiBehaviorMemberValue(memberValue!, 180);
+            return true;
+        }
+
+        memberName = "";
+        text = "";
+        return false;
+    }
+
+    private static bool IsMeaningfulAiBehaviorGateValue(object? value)
+    {
+        if (value == null) return false;
+        if (value is string text) return !string.IsNullOrWhiteSpace(text);
+        if (value is bool) return true;
+        if (value is sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal)
+        {
+            try
+            {
+                return Math.Abs(Convert.ToDouble(value, CultureInfo.InvariantCulture)) > double.Epsilon;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        if (value is IEnumerable enumerable)
+        {
+            foreach (object? item in enumerable)
+            {
+                if (item != null) return true;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string FormatAiBehaviorMemberValue(object value, int maxLength)
+    {
+        string text;
+        if (value is string stringValue)
+        {
+            text = stringValue;
+        }
+        else if (value is IEnumerable enumerable)
+        {
+            List<string> items = [];
+            int count = 0;
+            foreach (object? item in enumerable)
+            {
+                if (count++ >= 8)
+                {
+                    items.Add("...");
+                    break;
+                }
+
+                items.Add(item == null ? "null" : Convert.ToString(item, CultureInfo.InvariantCulture) ?? item.ToString() ?? "?");
+            }
+
+            text = items.Count == 0 ? "[]" : $"[{string.Join(", ", items)}]";
+        }
+        else if (value is IFormattable formattable)
+        {
+            text = formattable.ToString(null, CultureInfo.InvariantCulture);
+        }
+        else
+        {
+            text = value.ToString() ?? "?";
+        }
+
+        text = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return text.Length <= maxLength ? text : $"{text[..Math.Max(0, maxLength - 3)]}...";
     }
 
     private static object? TryGetMemberValue(object? value, string memberName)
@@ -1896,9 +2115,13 @@ public sealed partial class DebugWindowManager
         string Priority,
         string Slot,
         string Cooldown,
-        bool IsActive);
+        bool IsActive,
+        string GateSummary,
+        string GateDetails);
 
     private sealed record AiBehaviorLiveTransition(string Time, string Text);
+
+    private sealed record AiBehaviorLiveGateInfo(string Summary, string Details);
 
     private sealed record AiBehaviorVariantGroup(string Code, IReadOnlyList<string> States);
 }
