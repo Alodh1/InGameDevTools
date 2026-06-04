@@ -1494,15 +1494,7 @@ public sealed partial class DebugWindowManager
 
     private static JToken? TryParseJsonToken(string text)
     {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-        try
-        {
-            return JToken.Parse(text);
-        }
-        catch
-        {
-            return null;
-        }
+        return DevToolsJson.TryParseToken(text, useVintageStoryFallback: false);
     }
 
     private JObject? TryReadLootDropAssetJson(IAsset? asset)
@@ -1519,39 +1511,7 @@ public sealed partial class DebugWindowManager
 
     private static bool TryParseJsonObjectDetailed(string text, out JObject? json, out string error)
     {
-        json = null;
-        error = "";
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            error = "empty JSON";
-            return false;
-        }
-
-        try
-        {
-            json = JObject.Parse(text);
-            return true;
-        }
-        catch (Exception firstException)
-        {
-            try
-            {
-                JsonObject? fallbackObject = JsonObject.FromJson(text);
-                if (fallbackObject?.Token is JObject fallback)
-                {
-                    json = fallback;
-                    return true;
-                }
-
-                error = "JSON root is not an object";
-                return false;
-            }
-            catch (Exception secondException)
-            {
-                error = string.IsNullOrWhiteSpace(secondException.Message) ? firstException.Message : secondException.Message;
-                return false;
-            }
-        }
+        return DevToolsJson.TryParseObject(text, out json, out error);
     }
 
     private static void SetTokenAtPath(JObject root, IReadOnlyList<string> path, JToken value)

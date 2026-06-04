@@ -443,23 +443,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
     private static JObject? TryParseJsonObject(string text)
     {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-
-        try
-        {
-            return JObject.Parse(text);
-        }
-        catch
-        {
-            try
-            {
-                return JsonObject.FromJson(text).Token as JObject;
-            }
-            catch
-            {
-                return null;
-            }
-        }
+        return DevToolsJson.TryParseObject(text);
     }
 
     private static string ReadAssetText(IAsset? asset)

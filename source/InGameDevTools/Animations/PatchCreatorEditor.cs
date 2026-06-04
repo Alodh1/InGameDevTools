@@ -1413,36 +1413,7 @@ public sealed partial class DebugWindowManager
 
     private static bool TryParsePatchCreatorJson(string text, out JToken? token, out string error)
     {
-        token = null;
-        error = "";
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            error = "empty JSON";
-            return false;
-        }
-
-        try
-        {
-            token = JToken.Parse(text);
-            return true;
-        }
-        catch (Exception first)
-        {
-            try
-            {
-                token = JsonObject.FromJson(text).Token;
-                return token != null;
-            }
-            catch (Exception second)
-            {
-                error = second.Message;
-                if (!string.IsNullOrWhiteSpace(first.Message) && !first.Message.Equals(second.Message, StringComparison.Ordinal))
-                {
-                    error = $"{first.Message}; {second.Message}";
-                }
-                return false;
-            }
-        }
+        return DevToolsJson.TryParseToken(text, out token, out error);
     }
 
     private enum PatchCreatorIndexState

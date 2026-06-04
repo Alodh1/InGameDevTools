@@ -100,7 +100,12 @@ public sealed partial class DebugWindowManager
             try
             {
                 string text = File.ReadAllText(filePath);
-                JToken root = JToken.Parse(text);
+                if (!DevToolsJson.TryParseToken(text, out JToken? root, out string error, useVintageStoryFallback: false) || root == null)
+                {
+                    _configLibDiagnostics.Warning($"Skipped {fileName}: {error}", text);
+                    continue;
+                }
+
                 string relativePath = Path.GetRelativePath(modConfigPath, filePath).Replace('\\', '/');
                 List<ConfigLibSettingDraft> settings = BuildConfigLibSettingDrafts(root);
                 if (settings.Count == 0) continue;

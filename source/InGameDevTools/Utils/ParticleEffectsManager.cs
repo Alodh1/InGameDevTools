@@ -71,8 +71,13 @@ public class ParticleEffectsManager
             try
             {
                 string domain = asset.Location.Domain;
-                JsonObject json = JsonObject.FromJson(asset.ToText());
-                if (json.Token is not JObject token) continue;
+                string text = asset.ToText();
+                if (!DevToolsJson.TryParseObject(text, out JObject? token, out string error) || token == null)
+                {
+                    _scanDiagnostics.ParseFailures++;
+                    _diagnostics.Warning($"Named particle asset parse failed for {asset.Location}: {error}", text);
+                    continue;
+                }
 
                 foreach ((string code, JToken? effect) in token)
                 {
@@ -156,11 +161,16 @@ public class ParticleEffectsManager
 
             try
             {
-                JsonObject json = JsonObject.FromJson(text);
-                if (json.Token == null) continue;
+                if (!DevToolsJson.TryParseToken(text, out JToken? root, out string error) || root == null)
+                {
+                    _scanDiagnostics.ParseFailures++;
+                    _diagnostics.Warning($"Particle asset parse failed: {asset.Location}: {error}", text);
+                    AddVerboseSample(_scanDiagnostics.SkippedSamples, $"parse failed: {asset.Location} ({error})");
+                    continue;
+                }
 
                 List<(string Path, JToken Token)> particleTokens = [];
-                CollectParticlePropertyTokens(json.Token, "", particleTokens);
+                CollectParticlePropertyTokens(root, "", particleTokens);
                 foreach ((string particlePath, JToken token) in particleTokens)
                 {
                     string key = $"{asset.Location.Domain}:{EnsureJsonPath(asset.Location.Path)}#{particlePath}";
@@ -2345,8 +2355,7 @@ public class ParticleEffectsManager
             IAsset? asset = _api.Assets.TryGet(assetLocation, true);
             if (asset == null) return null;
 
-            JsonObject json = JsonObject.FromJson(asset.ToText());
-            return json.Token is JObject obj ? obj["code"]?.ToString() : null;
+            return DevToolsJson.TryParseObject(asset.ToText())?["code"]?.ToString();
         }
         catch
         {

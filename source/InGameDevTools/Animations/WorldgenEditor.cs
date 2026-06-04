@@ -6451,42 +6451,14 @@ public sealed partial class DebugWindowManager
 
     private static bool TryParseJsonToken(string text, out JToken? token, out string error)
     {
-        token = null;
-        error = "";
+        if (!DevToolsJson.TryParseToken(text, out token, out error)) return false;
 
-        if (string.IsNullOrWhiteSpace(text))
+        if (token != null)
         {
-            error = "empty JSON";
-            return false;
-        }
-
-        try
-        {
-            token = JToken.Parse(text);
             SanitizeWorldgenToken(token);
-            return true;
         }
-        catch (Exception first)
-        {
-            try
-            {
-                token = JsonObject.FromJson(text).Token;
-                if (token != null)
-                {
-                    SanitizeWorldgenToken(token);
-                }
-                return token != null;
-            }
-            catch (Exception second)
-            {
-                error = second.Message;
-                if (!string.IsNullOrWhiteSpace(first.Message) && !first.Message.Equals(second.Message, StringComparison.Ordinal))
-                {
-                    error = $"{first.Message}; {second.Message}";
-                }
-                return false;
-            }
-        }
+
+        return token != null;
     }
 
     private static void SanitizeWorldgenToken(JToken token)
