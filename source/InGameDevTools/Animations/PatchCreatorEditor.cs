@@ -154,34 +154,20 @@ public sealed partial class DebugWindowManager
         _patchCreatorAssetIndex = 0;
 
         HashSet<string> locations = new(StringComparer.OrdinalIgnoreCase);
-        AddPatchCreatorIndexAssets(_api.Assets.AllAssets.Values.Where(IsPatchCreatorJsonAsset), locations);
+        DevToolsBatching.AddAssets(_api.Assets.AllAssets.Values, _patchCreatorIndexAssets, locations, IsPatchCreatorJsonAsset);
         foreach (string category in PatchCreatorKnownCategories)
         {
-            try
-            {
-                AddPatchCreatorIndexAssets(_api.Assets.GetManyInCategory(category, ""), locations);
-            }
-            catch (Exception exception)
-            {
-                _patchCreatorDiagnostics.Warning($"Skipped asset category '{category}': {exception.Message}", exception.ToString());
-            }
+            DevToolsBatching.AddAssetSource(
+                $"asset category '{category}'",
+                () => _api.Assets.GetManyInCategory(category, ""),
+                _patchCreatorIndexAssets,
+                locations,
+                IsPatchCreatorJsonAsset,
+                _patchCreatorDiagnostics);
         }
 
-        _patchCreatorIndexAssets.Sort((left, right) => string.Compare(left.Location.ToString(), right.Location.ToString(), StringComparison.OrdinalIgnoreCase));
+        DevToolsBatching.SortAssetsByLocation(_patchCreatorIndexAssets);
         _patchCreatorStatus = BuildPatchCreatorIndexProgressText();
-    }
-
-    private void AddPatchCreatorIndexAssets(IEnumerable<IAsset> assets, HashSet<string> indexedLocations)
-    {
-        foreach (IAsset asset in assets)
-        {
-            if (!IsPatchCreatorJsonAsset(asset)) continue;
-            string key = asset.Location.ToString();
-            if (indexedLocations.Add(key))
-            {
-                _patchCreatorIndexAssets.Add(asset);
-            }
-        }
     }
 
     private static bool IsPatchCreatorJsonAsset(IAsset? asset)

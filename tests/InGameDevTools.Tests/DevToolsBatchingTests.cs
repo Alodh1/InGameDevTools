@@ -47,4 +47,5 @@ public sealed class DevToolsBatchingTests
         Assert.Equal(1, completed);
         Assert.Equal(0, progressed);
     }
+
 }

@@ -172,13 +172,7 @@ public sealed partial class DebugWindowManager
             _aiBehaviorTaskIndex = 0;
         }
 
-        foreach (IAsset asset in _api.Assets.AllAssets.Values)
-        {
-            if (IsAiBehaviorEntityAsset(asset))
-            {
-                _aiBehaviorIndexAssets.Add(asset);
-            }
-        }
+        DevToolsBatching.AddAssets(_api.Assets.AllAssets.Values, _aiBehaviorIndexAssets, IsAiBehaviorEntityAsset);
 
         _aiBehaviorStatus = BuildAiBehaviorIndexProgressText();
     }

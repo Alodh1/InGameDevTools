@@ -260,47 +260,19 @@ public sealed partial class DebugWindowManager
         }
 
         HashSet<string> indexedLocations = new(StringComparer.OrdinalIgnoreCase);
-        AddWorldgenAssetSource("client worldgen category", () => _api.Assets.GetManyInCategory("worldgen", ""), indexedLocations);
-        AddWorldgenAssetSource("client loaded assets", () => _api.Assets.AllAssets.Values.Where(IsWorldgenJsonAsset), indexedLocations);
+        DevToolsBatching.AddAssetSource("client worldgen category", () => _api.Assets.GetManyInCategory("worldgen", ""), _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
+        DevToolsBatching.AddAssetSource("client loaded assets", () => _api.Assets.AllAssets.Values, _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
 
         ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
         if (serverApi != null)
         {
             _worldgenIndexIncludedServerAssets = true;
-            AddWorldgenAssetSource("server worldgen category", () => serverApi.Assets.GetManyInCategory("worldgen", ""), indexedLocations);
-            AddWorldgenAssetSource("server loaded assets", () => serverApi.Assets.AllAssets.Values.Where(IsWorldgenJsonAsset), indexedLocations);
+            DevToolsBatching.AddAssetSource("server worldgen category", () => serverApi.Assets.GetManyInCategory("worldgen", ""), _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
+            DevToolsBatching.AddAssetSource("server loaded assets", () => serverApi.Assets.AllAssets.Values, _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
         }
 
-        _worldgenIndexAssets.Sort((left, right) => string.Compare(left.Location.ToString(), right.Location.ToString(), StringComparison.OrdinalIgnoreCase));
+        DevToolsBatching.SortAssetsByLocation(_worldgenIndexAssets);
         _worldgenStatus = BuildWorldgenIndexProgressText();
-    }
-
-    private void AddWorldgenAssetSource(string label, Func<IEnumerable<IAsset>> getAssets, HashSet<string> indexedLocations)
-    {
-        try
-        {
-            AddWorldgenIndexAssets(getAssets(), indexedLocations);
-        }
-        catch (Exception exception)
-        {
-            _worldgenDiagnostics.Warning($"Skipped {label}: {exception.Message}", exception.ToString());
-        }
-    }
-
-    private void AddWorldgenIndexAssets(IEnumerable<IAsset> assets, HashSet<string> indexedLocations)
-    {
-        foreach (IAsset asset in assets)
-        {
-            if (asset?.Location == null) continue;
-
-            string path = asset.Location.Path.Replace('\\', '/');
-            if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
-            string key = asset.Location.ToString();
-            if (indexedLocations.Add(key))
-            {
-                _worldgenIndexAssets.Add(asset);
-            }
-        }
     }
 
     private void ProcessWorldgenIndexBatch()
