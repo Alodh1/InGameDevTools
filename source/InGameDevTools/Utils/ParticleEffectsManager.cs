@@ -1600,6 +1600,7 @@ public class ParticleEffectsManager
     private float _previewRuntimeSeconds;
     private string _previewEffectKey = "";
     private string _previewStatus = "";
+    private bool _previewScreenshotRequested;
     private string _selectedParticleFamilyKey = "";
     private string _selectedParticleVariantKey = "";
     private int _selectedParticleEmitterIndex;
@@ -1884,6 +1885,16 @@ public class ParticleEffectsManager
 
     private void DrawPreviewViewport(string id, string key, IReadOnlyList<ParticleEffectEntry> emitters, AdvancedParticleProperties? selectedParticleProperties, float deltaSeconds)
     {
+        if (ImGui.Button($"Screenshot viewport##particle-preview-screenshot-{id}"))
+        {
+            _previewScreenshotRequested = true;
+            _previewStatus = "Particle viewport screenshot queued.";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Save the current particle preview texture as a PNG.");
+        }
+
         System.Numerics.Vector2 available = ImGui.GetContentRegionAvail();
         System.Numerics.Vector2 size = new(Math.Max(320f, available.X), Math.Max(260f, available.Y));
         ImGui.InvisibleButton($"##particle-preview-viewport-{id}", size);
@@ -1954,9 +1965,15 @@ public class ParticleEffectsManager
         if (textureId > 0)
         {
             drawList.AddImage(new IntPtr(textureId), min, max, new System.Numerics.Vector2(0f, 1f), new System.Numerics.Vector2(1f, 0f));
+            SaveParticleViewportScreenshotIfRequested(textureId, max.X - min.X, max.Y - min.Y, key);
         }
         else if (!string.IsNullOrWhiteSpace(skipReason))
         {
+            if (_previewScreenshotRequested)
+            {
+                _previewScreenshotRequested = false;
+                _previewStatus = $"Particle viewport screenshot failed: preview skipped ({skipReason}).";
+            }
             drawList.AddText(min + new System.Numerics.Vector2(12f, 90f), text, $"Preview render skipped: {skipReason}");
         }
 
@@ -2000,6 +2017,13 @@ public class ParticleEffectsManager
             ? "Environment: current client world ParticlePhysics"
             : _previewStatus;
         drawList.AddText(min + new System.Numerics.Vector2(12f, 70f), text, previewStatus);
+    }
+
+    private void SaveParticleViewportScreenshotIfRequested(int textureId, float viewportWidth, float viewportHeight, string key)
+    {
+        if (!_previewScreenshotRequested) return;
+        _previewScreenshotRequested = false;
+        DevToolsTextureCapture.SaveTexture2D(textureId, (int)MathF.Ceiling(viewportWidth), (int)MathF.Ceiling(viewportHeight), $"particles-{key}", out _previewStatus);
     }
 
     private DevToolsPreviewCamera BuildPreviewCamera(System.Numerics.Vector2 min, System.Numerics.Vector2 max)

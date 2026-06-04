@@ -84,6 +84,7 @@ public sealed partial class DebugWindowManager
     private bool _vanillaViewportWorldLighting;
     private bool _vanillaVerbosePreviewLogs;
     private VanillaPreviewMode _vanillaViewportMode = VanillaPreviewMode.Orbit;
+    private bool _vanillaViewportScreenshotRequested;
     private TransformGizmoAxis _vanillaViewportGizmoDragAxis = TransformGizmoAxis.None;
     private TransformGizmoMode _vanillaViewportGizmoDragMode = TransformGizmoMode.None;
     private NVector2 _vanillaViewportGizmoDragMouseStart;

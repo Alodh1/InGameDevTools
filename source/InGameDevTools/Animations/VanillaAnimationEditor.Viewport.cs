@@ -241,6 +241,17 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SameLine();
+        if (ImGui.Button("Screenshot##vanilla-preview-screenshot"))
+        {
+            _vanillaViewportScreenshotRequested = true;
+            _vanillaStatus = "Viewport screenshot queued.";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Save the current animation viewport texture as a PNG.");
+        }
+
+        ImGui.SameLine();
         bool verbosePreviewLogs = _vanillaVerbosePreviewLogs;
         if (ImGui.Checkbox("Verbose preview logs##vanilla-preview-verbose", ref verbosePreviewLogs))
         {
@@ -504,9 +515,15 @@ public sealed partial class DebugWindowManager
         if (textureId > 0)
         {
             drawList.AddImage(new IntPtr(textureId), min, max, new NVector2(0f, 1f), new NVector2(1f, 0f));
+            SaveVanillaViewportScreenshotIfRequested(textureId, viewportWidth, viewportHeight, row);
         }
         else if (!string.IsNullOrWhiteSpace(previewSkipReason))
         {
+            if (_vanillaViewportScreenshotRequested)
+            {
+                _vanillaViewportScreenshotRequested = false;
+                _vanillaStatus = $"Viewport screenshot failed: preview skipped ({previewSkipReason}).";
+            }
             _animationDiagnostics.Warning($"Preview skipped: {previewSkipReason}", $"Scene: {scene.Key}\nMode: {effectiveMode}\nSize: {viewportWidth:0}x{viewportHeight:0}");
             uint warning = ImGui.ColorConvertFloat4ToU32(new NVector4(0.95f, 0.72f, 0.43f, 1f));
             float skipY = string.IsNullOrWhiteSpace(ghostOverlayStatus) ? 54f : 70f;
@@ -549,6 +566,13 @@ public sealed partial class DebugWindowManager
                 drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), hint, "Edit gizmos are available in Orbit mode.");
             }
         }
+    }
+
+    private void SaveVanillaViewportScreenshotIfRequested(int textureId, float viewportWidth, float viewportHeight, VanillaBrowserRow row)
+    {
+        if (!_vanillaViewportScreenshotRequested) return;
+        _vanillaViewportScreenshotRequested = false;
+        DevToolsTextureCapture.SaveTexture2D(textureId, (int)MathF.Ceiling(viewportWidth), (int)MathF.Ceiling(viewportHeight), $"animation-{row.Label}", out _vanillaStatus);
     }
 
     private static void DrawVanillaViewportGrid(ImDrawListPtr drawList, VanillaPreviewCameraState camera, VanillaAnimationPreviewScene scene, NVector2 min, float width, float height, uint color, uint majorColor)

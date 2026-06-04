@@ -55,6 +55,7 @@ public sealed partial class DebugWindowManager
     private float _transformPreviewDistance = 4.5f;
     private Vector3 _transformPreviewTarget = new(0.5f, 0.5f, 0.5f);
     private Vector3 _transformPreviewAnchor = Vector3.Zero;
+    private bool _transformViewportScreenshotRequested;
     private bool _transformViewportGizmoAtAnchor;
     private TransformGizmoAxis _transformViewportGizmoDragAxis = TransformGizmoAxis.None;
     private TransformGizmoMode _transformViewportGizmoDragMode = TransformGizmoMode.None;
@@ -887,6 +888,16 @@ public sealed partial class DebugWindowManager
                 return;
             }
 
+            if (ImGui.Button("Screenshot viewport##transforms-screenshot"))
+            {
+                _transformViewportScreenshotRequested = true;
+                _transformsStatus = "Transform viewport screenshot queued.";
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Save the current transform preview texture as a PNG.");
+            }
+
             ModelTransform transform = GetTransformDraft(asset, slot);
             DrawTransformPreviewSurface(asset, slot, transform);
         }
@@ -949,9 +960,15 @@ public sealed partial class DebugWindowManager
         if (textureId > 0)
         {
             drawList.AddImage(new IntPtr(textureId), min, max, new NVector2(0f, 1f), new NVector2(1f, 0f));
+            SaveTransformViewportScreenshotIfRequested(textureId, max.X - min.X, max.Y - min.Y, asset, slot);
         }
         else if (!string.IsNullOrWhiteSpace(skipReason))
         {
+            if (_transformViewportScreenshotRequested)
+            {
+                _transformViewportScreenshotRequested = false;
+                _transformsStatus = $"Transform viewport screenshot failed: preview skipped ({skipReason}).";
+            }
             drawList.AddText(min + new NVector2(12f, 54f), text, $"Preview skipped: {skipReason}");
         }
 
@@ -977,6 +994,13 @@ public sealed partial class DebugWindowManager
         {
             drawList.AddText(min + new NVector2(12f, 30f), text, _transformPreviewPlacementStatus);
         }
+    }
+
+    private void SaveTransformViewportScreenshotIfRequested(int textureId, float viewportWidth, float viewportHeight, TransformAssetEntry asset, TransformSlotSelection slot)
+    {
+        if (!_transformViewportScreenshotRequested) return;
+        _transformViewportScreenshotRequested = false;
+        DevToolsTextureCapture.SaveTexture2D(textureId, (int)MathF.Ceiling(viewportWidth), (int)MathF.Ceiling(viewportHeight), $"transform-{asset.Key}-{slot.AttributeCode}", out _transformsStatus);
     }
 
     private void DrawTransformsInspector(NVector2 size)

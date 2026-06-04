@@ -117,6 +117,7 @@ public sealed partial class DebugWindowManager
     private float _worldgenPreview3DYaw = MathF.PI * 0.25f;
     private float _worldgenPreview3DPitch = 0.70f;
     private bool _worldgenPreviewInitialized;
+    private bool _worldgenViewportScreenshotRequested;
     private ICoreServerAPI? _worldgenPreviewServerApi;
     private GenMaps? _worldgenPreviewGenMaps;
     private GenDeposits? _worldgenPreviewGenDeposits;
@@ -1166,6 +1167,11 @@ public sealed partial class DebugWindowManager
                 if (_worldgenPreviewMode == WorldgenPreviewModeRegion3D)
                 {
                     DrawWorldgenLandformSurfacePreview(drawList, min, max, seed, centerX, centerZ, pixelsPerBlock);
+                    if (_worldgenViewportScreenshotRequested)
+                    {
+                        _worldgenViewportScreenshotRequested = false;
+                        _worldgenStatus = "3D worldgen preview is drawn as ImGui geometry; switch to a 2D preview mode for PNG capture.";
+                    }
                 }
                 else
                 {
@@ -1184,6 +1190,11 @@ public sealed partial class DebugWindowManager
             _worldgenStatus = previewError;
             _worldgenDiagnostics.Exception("Worldgen preview failed", exception);
             DrawWorldgenPreviewUnavailable(drawList, min, max, previewError, "Fix the selected draft or switch preview mode.");
+        }
+        if (_worldgenViewportScreenshotRequested)
+        {
+            _worldgenViewportScreenshotRequested = false;
+            _worldgenStatus = "Worldgen screenshot failed: no preview texture was rendered this frame.";
         }
         drawList.PopClipRect();
 
@@ -1284,6 +1295,16 @@ public sealed partial class DebugWindowManager
         if (ImGui.Button("Reset view##worldgen-preview-reset"))
         {
             ResetWorldgenPreviewView();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Screenshot##worldgen-preview-screenshot"))
+        {
+            _worldgenViewportScreenshotRequested = true;
+            _worldgenStatus = "Worldgen preview screenshot queued.";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Save the current 2D worldgen preview texture as a PNG.");
         }
         ImGui.SameLine();
         bool poppedOut = _worldgenPreviewPoppedOut;
@@ -4528,11 +4549,25 @@ public sealed partial class DebugWindowManager
         if (TryEnsureWorldgenPreviewRasterTexture(rasterColors, cellsX, cellsZ, out int textureId, out string textureError))
         {
             drawList.AddImage(new IntPtr(textureId), min, max, NVector2.Zero, NVector2.One);
+            SaveWorldgenViewportScreenshotIfRequested(textureId, cellsX, cellsZ);
             return;
         }
 
         _worldgenPreviewRasterStatus = $"Raster texture unavailable ({textureError}); drawing {cellsX * cellsZ} cells.";
+        if (_worldgenViewportScreenshotRequested)
+        {
+            _worldgenViewportScreenshotRequested = false;
+            _worldgenStatus = $"Worldgen screenshot failed: raster texture unavailable ({textureError}).";
+        }
         DrawWorldgenPreviewRasterCells(drawList, min, max, rasterColors, cellsX, cellsZ, cellWidth, cellHeight);
+    }
+
+    private void SaveWorldgenViewportScreenshotIfRequested(int textureId, int width, int height)
+    {
+        if (!_worldgenViewportScreenshotRequested) return;
+        _worldgenViewportScreenshotRequested = false;
+        string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(_worldgenPreviewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
+        DevToolsTextureCapture.SaveTexture2D(textureId, width, height, $"worldgen-{modeLabel}", out _worldgenStatus);
     }
 
     private static void DrawWorldgenPreviewRasterCells(ImDrawListPtr drawList, NVector2 min, NVector2 max, uint[] rasterColors, int cellsX, int cellsZ, float cellWidth, float cellHeight)

@@ -165,6 +165,54 @@ public sealed partial class DebugWindowManager
             _recipeLiveAppliedHashes.Clear();
         }
 
+        public IEnumerable<(string Key, string Title, string Subtitle, string SearchText)> GetCommandPaletteEntries()
+        {
+            if (!_loaded) yield break;
+
+            foreach (RecipeEntry entry in _entries)
+            {
+                yield return (entry.Key, entry.DisplayName, $"{entry.KindLabel} | {entry.Document.DisplayPath}", entry.SearchText);
+            }
+        }
+
+        public bool JumpToRecipe(string key, out string status)
+        {
+            status = "";
+            RecipeEntry? entry = _entries.FirstOrDefault(candidate => candidate.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (entry == null)
+            {
+                status = $"Recipe {key} is not indexed yet.";
+                return false;
+            }
+
+            _filter = entry.DisplayName;
+            _domainFilter = entry.Document.Domain;
+            _kindFilter = 0;
+            _showDirtyOnly = false;
+            RebuildVisibleEntries();
+
+            int index = _visibleEntries.FindIndex(candidate => candidate.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                _filter = key;
+                _domainFilter = "";
+                RebuildVisibleEntries();
+                index = _visibleEntries.FindIndex(candidate => candidate.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (index < 0)
+            {
+                status = $"Recipe {key} is indexed but filtered out.";
+                return false;
+            }
+
+            _selectedIndex = index;
+            _patternLayer = 0;
+            SyncRawBuffer(_visibleEntries[index]);
+            _status = $"Selected {entry.ShortLabel} from command palette.";
+            return true;
+        }
+
         private void EnsureLoaded(ICoreClientAPI api)
         {
             if (_loaded) return;
