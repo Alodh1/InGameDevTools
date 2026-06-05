@@ -25,8 +25,9 @@ internal static class PlayerRenderingPatches
 
     public static float ResetOffset() => FpHandsOffset = DefaultFpHandsOffset;
     public static float SetOffset(float offset) => FpHandsOffset = offset;
-    public static float GetOffset(ModSystemFpHands modSys) => FpHandsOffset + GameMath.Max(0f, ClientSettings.FieldOfView / 90f - 1f) / 2f;
-    public static float GetOffsetAdjusted(ModSystemFpHands modSys) => FpHandsOffset + GameMath.Max(0f, ClientSettings.FieldOfView / 90f - 1f) / 2f;
+    public static float GetOffset(ModSystemFpHands modSys) => FpHandsOffset;
+    public static float GetOffsetAdjusted(ModSystemFpHands modSys) => FpHandsOffset;
+    public static float GetNetOffset() => FpHandsOffset - GameMath.Max(0f, ClientSettings.FieldOfView / 90f - 1f) / 2f;
     public static float GetMultiplier() => HandsFovMultiplier;
 
     [HarmonyPatch(typeof(EntityPlayerShapeRenderer), "DoRender3DOpaque")]

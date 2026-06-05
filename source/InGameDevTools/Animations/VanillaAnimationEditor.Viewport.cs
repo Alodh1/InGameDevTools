@@ -230,6 +230,11 @@ public sealed partial class DebugWindowManager
         }
         if (!immersiveFirstPersonAvailable) ImGui.EndDisabled();
 
+        if (_vanillaViewportMode == VanillaPreviewMode.FirstPerson || _vanillaViewportMode == VanillaPreviewMode.ImmersiveFirstPerson)
+        {
+            DrawVanillaFirstPersonPreviewControls(scene);
+        }
+
         ImGui.SameLine();
         if (ImGui.Button("Reset view##vanilla-preview-camera-reset"))
         {
@@ -238,6 +243,7 @@ public sealed partial class DebugWindowManager
             _vanillaViewportZoom = 1f;
             _vanillaViewportPanX = 0;
             _vanillaViewportPanY = 0;
+            _vanillaFirstPersonLookPitchDegrees = 0;
         }
 
         ImGui.SameLine();
@@ -267,6 +273,96 @@ public sealed partial class DebugWindowManager
         {
             ClearVanillaViewportGizmoDrag();
         }
+    }
+
+    private void DrawVanillaFirstPersonPreviewControls(VanillaAnimationPreviewScene scene)
+    {
+        ImGui.NewLine();
+        ImGui.SetNextItemWidth(132);
+        if (ImGui.SliderFloat("Look pitch##vanilla-fp-look-pitch", ref _vanillaFirstPersonLookPitchDegrees, -89f, 89f, "%.0f deg"))
+        {
+            _vanillaFirstPersonLookPitchDegrees = Math.Clamp(_vanillaFirstPersonLookPitchDegrees, -89f, 89f);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Game-accurate first-person pitch follow around the local eye position.");
+        }
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Inspect camera##vanilla-fp-inspect-camera", ref _vanillaFirstPersonInspectCamera);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Temporarily use orbit-style camera controls to inspect the first-person mesh. Off is the game-accurate view.");
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(220);
+        ImGui.InputTextWithHint("Right hand##vanilla-fp-right-item", "item/block code", ref _vanillaFirstPersonRightHandItemCode, 256);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Reference item or block rendered through the engine hand transform path.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Use held##vanilla-fp-use-held-right"))
+        {
+            SetVanillaFirstPersonItemFromHeldHand(rightHand: true);
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Clear##vanilla-fp-clear-right"))
+        {
+            _vanillaFirstPersonRightHandItemCode = "";
+        }
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Left##vanilla-fp-left-enabled", ref _vanillaFirstPersonRenderLeftHandItem);
+        if (_vanillaFirstPersonRenderLeftHandItem)
+        {
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(190);
+            ImGui.InputTextWithHint("Left hand##vanilla-fp-left-item", "item/block code", ref _vanillaFirstPersonLeftHandItemCode, 256);
+            ImGui.SameLine();
+            if (ImGui.Button("Use held##vanilla-fp-use-held-left"))
+            {
+                SetVanillaFirstPersonItemFromHeldHand(rightHand: false);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Clear##vanilla-fp-clear-left"))
+            {
+                _vanillaFirstPersonLeftHandItemCode = "";
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(_vanillaFirstPersonRightHandItemCode) && !scene.HasAttachmentPoint("RightHand"))
+        {
+            ImGui.TextDisabled("RightHand attachment point not found on this preview shape.");
+        }
+        if (_vanillaFirstPersonRenderLeftHandItem && !string.IsNullOrWhiteSpace(_vanillaFirstPersonLeftHandItemCode) && !scene.HasAttachmentPoint("LeftHand"))
+        {
+            ImGui.TextDisabled("LeftHand attachment point not found on this preview shape.");
+        }
+    }
+
+    private void SetVanillaFirstPersonItemFromHeldHand(bool rightHand)
+    {
+        ItemStack? stack = rightHand
+            ? _api.World.Player?.Entity?.RightHandItemSlot?.Itemstack
+            : _api.World.Player?.Entity?.LeftHandItemSlot?.Itemstack;
+        string code = stack?.Collectible?.Code?.ToString() ?? "";
+        if (rightHand)
+        {
+            _vanillaFirstPersonRightHandItemCode = code;
+        }
+        else
+        {
+            _vanillaFirstPersonLeftHandItemCode = code;
+            _vanillaFirstPersonRenderLeftHandItem = !string.IsNullOrWhiteSpace(code);
+        }
+
+        _vanillaStatus = string.IsNullOrWhiteSpace(code)
+            ? "No held item found for first-person reference."
+            : $"First-person reference set to {code}.";
     }
 
     private void DrawVanillaPoppedOutViewport()
@@ -508,6 +604,10 @@ public sealed partial class DebugWindowManager
             _vanillaViewportPanX,
             _vanillaViewportPanY,
             effectiveMode,
+            _vanillaFirstPersonInspectCamera,
+            _vanillaFirstPersonLookPitchDegrees,
+            _vanillaFirstPersonRightHandItemCode,
+            _vanillaFirstPersonRenderLeftHandItem ? _vanillaFirstPersonLeftHandItemCode : "",
             _vanillaViewportWorldLighting,
             ghosts,
             _vanillaVerbosePreviewLogs,
@@ -1763,10 +1863,22 @@ public sealed partial class DebugWindowManager
         return new NVector2(transformed.X, transformed.Y);
     }
 
-    private static VanillaPreviewCameraState BuildVanillaPreviewCamera(VanillaAnimationPreviewScene scene, float width, float height, float yaw, float pitch, float zoom, float panX, float panY, VanillaPreviewMode mode)
+    private static VanillaPreviewCameraState BuildVanillaPreviewCamera(
+        VanillaAnimationPreviewScene scene,
+        float width,
+        float height,
+        float yaw,
+        float pitch,
+        float zoom,
+        float panX,
+        float panY,
+        VanillaPreviewMode mode,
+        bool firstPersonInspectCamera = false,
+        float firstPersonLookPitchDegrees = 0f,
+        string firstPersonRightHandItemCode = "")
     {
         return mode == VanillaPreviewMode.FirstPerson || mode == VanillaPreviewMode.ImmersiveFirstPerson
-            ? BuildVanillaFirstPersonPreviewCamera(scene, width, height, yaw, pitch, zoom, panX, panY, mode)
+            ? BuildVanillaFirstPersonPreviewCamera(scene, width, height, yaw, pitch, zoom, panX, panY, mode, firstPersonInspectCamera, firstPersonLookPitchDegrees, firstPersonRightHandItemCode)
             : BuildVanillaOrbitPreviewCamera(scene, width, height, yaw, pitch, zoom, panX, panY);
     }
 
@@ -1810,32 +1922,56 @@ public sealed partial class DebugWindowManager
         return new(projection, view, projectionView, model, eye, target, distance);
     }
 
-    private static VanillaPreviewCameraState BuildVanillaFirstPersonPreviewCamera(VanillaAnimationPreviewScene scene, float width, float height, float yaw, float pitch, float zoom, float panX, float panY, VanillaPreviewMode mode)
+    private static VanillaPreviewCameraState BuildVanillaFirstPersonPreviewCamera(
+        VanillaAnimationPreviewScene scene,
+        float width,
+        float height,
+        float yaw,
+        float pitch,
+        float zoom,
+        float panX,
+        float panY,
+        VanillaPreviewMode mode,
+        bool inspectCamera,
+        float lookPitchDegrees,
+        string rightHandItemCode)
     {
         float aspect = Math.Max(0.1f, width / Math.Max(1f, height));
         float handsFov = Math.Clamp(scene.FirstPersonFovDegrees * PlayerRenderingPatches.HandsFovMultiplier, 25f, 130f);
-        float fov = Math.Clamp(handsFov / Math.Clamp(zoom, 0.25f, 3f), 25f, 130f) * GameMath.DEG2RAD;
+        float baseFovDegrees = mode == VanillaPreviewMode.FirstPerson ? handsFov : scene.MainFovDegrees;
+        float fov = Math.Clamp(inspectCamera ? baseFovDegrees / Math.Clamp(zoom, 0.25f, 3f) : baseFovDegrees, 25f, 130f) * GameMath.DEG2RAD;
         float entitySize = Math.Max(0.001f, scene.GuiEntitySize);
         float radius = Math.Max(Math.Max(scene.ModelWidth, scene.ModelHeight), scene.ModelDepth) * entitySize * 0.62f;
         radius = Math.Max(0.35f, radius);
 
         pitch = Math.Clamp(pitch, -1.52f, 1.52f);
-        float cosPitch = (float)Math.Cos(pitch);
-        NVector3 forward = NormalizeOrDefault(new NVector3(
-            (float)Math.Sin(yaw) * cosPitch,
-            -(float)Math.Sin(pitch),
-            -(float)Math.Cos(yaw) * cosPitch), new NVector3(0f, 0f, -1f));
-        NVector3 right = NormalizeOrDefault(NVector3.Cross(forward, NVector3.UnitY), NVector3.UnitX);
-        NVector3 up = NormalizeOrDefault(NVector3.Cross(right, forward), NVector3.UnitY);
+        NVector3 forward;
+        NVector3 up;
+        Matrixf view = new();
+        if (inspectCamera)
+        {
+            float cosPitch = (float)Math.Cos(pitch);
+            forward = NormalizeOrDefault(new NVector3(
+                (float)Math.Sin(yaw) * cosPitch,
+                -(float)Math.Sin(pitch),
+                -(float)Math.Cos(yaw) * cosPitch), new NVector3(0f, 0f, -1f));
+            NVector3 right = NormalizeOrDefault(NVector3.Cross(forward, NVector3.UnitY), NVector3.UnitX);
+            up = NormalizeOrDefault(NVector3.Cross(right, forward), NVector3.UnitY);
+            view.Set(Mat4f.LookAt(Mat4f.Create(), [0f, 0f, 0f], [forward.X, forward.Y, forward.Z], [up.X, up.Y, up.Z]));
+        }
+        else
+        {
+            forward = new NVector3(0f, 0f, -1f);
+            up = NVector3.UnitY;
+            view.Identity();
+        }
 
-        Matrixf model = BuildVanillaFirstPersonModelMatrix(scene, yaw, pitch, panX, panY, width, height, fov, mode);
+        Matrixf model = BuildVanillaFirstPersonModelMatrix(scene, yaw, pitch, panX, panY, width, height, fov, mode, inspectCamera, lookPitchDegrees, rightHandItemCode);
         NVector3 eye = NVector3.Zero;
         NVector3 target = forward * Math.Max(1f, radius * 2f);
 
         Matrixf projection = new();
         projection.Set(Mat4f.Perspective(Mat4f.Create(), fov, aspect, 0.005f, Math.Max(64f, radius * 18f + 16f)));
-        Matrixf view = new();
-        view.Set(Mat4f.LookAt(Mat4f.Create(), [eye.X, eye.Y, eye.Z], [target.X, target.Y, target.Z], [up.X, up.Y, up.Z]));
         Matrixf projectionView = new();
         projectionView.Set(view.Values);
         projectionView.ReverseMul(projection.Values);
@@ -1843,35 +1979,56 @@ public sealed partial class DebugWindowManager
         return new(projection, view, projectionView, model, eye, target, 0f);
     }
 
-    private static Matrixf BuildVanillaFirstPersonModelMatrix(VanillaAnimationPreviewScene scene, float yaw, float pitch, float panX, float panY, float width, float height, float fov, VanillaPreviewMode mode)
+    private static Matrixf BuildVanillaFirstPersonModelMatrix(
+        VanillaAnimationPreviewScene scene,
+        float yaw,
+        float pitch,
+        float panX,
+        float panY,
+        float width,
+        float height,
+        float fov,
+        VanillaPreviewMode mode,
+        bool inspectCamera,
+        float lookPitchDegrees,
+        string rightHandItemCode)
     {
         float entitySize = Math.Max(0.001f, scene.GuiEntitySize);
-        float localEyeHeight = scene.EntityEyeHeight / entitySize;
-        localEyeHeight = Math.Clamp(localEyeHeight, 0.05f, Math.Max(scene.ModelHeight + 1f, 0.25f));
+        float localEyeHeight = Math.Clamp(scene.EntityEyeHeight, 0.05f, Math.Max(scene.ModelHeight + 1f, 0.25f));
         float panScale = 2f * (float)Math.Tan(fov * 0.5f) / Math.Max(1f, Math.Min(width, height));
 
         Matrixf model = new();
         model.Identity();
-        model.Translate(-panX * panScale, panY * panScale, 0f);
+        if (inspectCamera)
+        {
+            model.Translate(-panX * panScale, panY * panScale, 0f);
+        }
         model.RotateX(scene.GuiShapeRotateX * GameMath.DEG2RAD);
-        model.RotateY(yaw + (90f + scene.GuiShapeRotateY) * GameMath.DEG2RAD);
+        model.RotateY((inspectCamera ? yaw : 0f) + (90f + scene.GuiShapeRotateY) * GameMath.DEG2RAD);
+        model.RotateZ(scene.GuiShapeRotateZ * GameMath.DEG2RAD);
 
         if (mode == VanillaPreviewMode.FirstPerson)
         {
-            model.RotateZ(scene.GuiShapeRotateZ * GameMath.DEG2RAD);
+            float pitchFollow = GetVanillaFirstPersonPitchFollow(scene, rightHandItemCode);
+            float posPitch = MathF.PI + Math.Clamp(lookPitchDegrees, -89f, 89f) * GameMath.DEG2RAD;
             model.Translate(0f, localEyeHeight, 0f);
-            model.RotateZ(pitch * 0.75f);
+            model.RotateZ((posPitch - MathF.PI) * pitchFollow);
             model.Translate(0f, -localEyeHeight, 0f);
             model.Translate(0f, scene.FirstPersonYOffset, 0f);
         }
-        else
-        {
-            model.RotateZ(scene.GuiShapeRotateZ * GameMath.DEG2RAD);
-        }
 
         model.Scale(entitySize, entitySize, entitySize);
-        model.Translate(-0.5f, -localEyeHeight, -0.5f);
+        model.Translate(-0.5f, 0f, -0.5f);
         return model;
+    }
+
+    private static float GetVanillaFirstPersonPitchFollow(VanillaAnimationPreviewScene scene, string rightHandItemCode)
+    {
+        if (string.IsNullOrWhiteSpace(rightHandItemCode)) return 0.75f;
+
+        return VanillaAnimationPreviewScene.TryBuildFirstPersonItemStack(scene.Api, rightHandItemCode, out ItemStack? stack, out _)
+            ? stack?.ItemAttributes?["heldItemPitchFollow"].AsFloat(0.75f) ?? 0.75f
+            : 0.75f;
     }
 
     private static Matrixf BuildVanillaPreviewModelMatrix(VanillaAnimationPreviewScene scene)

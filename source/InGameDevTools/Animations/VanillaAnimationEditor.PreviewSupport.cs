@@ -87,6 +87,7 @@ public sealed partial class DebugWindowManager
             GuiShapeRotateY = guiTransform.RotateY;
             GuiShapeRotateZ = guiTransform.RotateZ;
             FirstPersonFovDegrees = Math.Clamp(api.Settings.Int["fpHandsFoV"] > 0 ? api.Settings.Int["fpHandsFoV"] : 75, 25, 130);
+            MainFovDegrees = Math.Clamp(api.Settings.Int["fieldOfView"] > 0 ? api.Settings.Int["fieldOfView"] : 70, 25, 130);
             FirstPersonYOffset = api.Settings.Float["fpHandsYOffset"];
             QuantityFrames = Math.Max(1, animation.QuantityFrames);
             ApplyBounds(bounds);
@@ -97,6 +98,7 @@ public sealed partial class DebugWindowManager
 
         public string Key { get; }
         public string DisplayName { get; }
+        public ICoreClientAPI Api => _api;
         public MultiTextureMeshRef MeshRef => _meshRef;
         public int MeshVerticesCount { get; private set; }
         public int MeshIndicesCount { get; private set; }
@@ -120,6 +122,7 @@ public sealed partial class DebugWindowManager
         public float GuiShapeRotateY { get; private set; }
         public float GuiShapeRotateZ { get; private set; }
         public float FirstPersonFovDegrees { get; private set; } = 75f;
+        public float MainFovDegrees { get; private set; } = 70f;
         public float FirstPersonYOffset { get; private set; }
         public bool ClassicFirstPersonAvailable => IsUsableMesh(_firstPersonMeshRef) || (_classicFirstPersonSupported && !_classicFirstPersonBuildAttempted);
         public bool ImmersiveFirstPersonAvailable => IsUsableMesh(_immersiveFirstPersonMeshRef) || (_immersiveFirstPersonSupported && !_immersiveFirstPersonBuildAttempted);
@@ -135,6 +138,11 @@ public sealed partial class DebugWindowManager
                 VanillaPreviewMode.ImmersiveFirstPerson when IsUsableMesh(_immersiveFirstPersonMeshRef) => _immersiveFirstPersonMeshRef!,
                 _ => _meshRef
             };
+        }
+
+        public bool HasAttachmentPoint(string code)
+        {
+            return _animator.GetAttachmentPointPose(code) != null;
         }
 
         public static VanillaAnimationPreviewScene Create(ICoreClientAPI api, VanillaBrowserRow row)
@@ -176,6 +184,7 @@ public sealed partial class DebugWindowManager
             ApplyBounds(CalculateModelBounds(shape));
             ApplyGuiTransform(GetGuiTransform(row));
             FirstPersonFovDegrees = Math.Clamp(_api.Settings.Int["fpHandsFoV"] > 0 ? _api.Settings.Int["fpHandsFoV"] : 75, 25, 130);
+            MainFovDegrees = Math.Clamp(_api.Settings.Int["fieldOfView"] > 0 ? _api.Settings.Int["fieldOfView"] : 70, 25, 130);
             FirstPersonYOffset = _api.Settings.Float["fpHandsYOffset"];
             _activeAnimationsByAnimCode.Clear();
             _activeAnimationsByAnimCode[_activeAnimationCode] = _metadata;
@@ -361,6 +370,53 @@ public sealed partial class DebugWindowManager
         private static bool IsUsableMesh(MultiTextureMeshRef? meshRef)
         {
             return meshRef is { Disposed: false, Initialized: true };
+        }
+
+        public static bool TryBuildFirstPersonItemStack(ICoreClientAPI api, string code, out ItemStack? stack, out string normalizedCode)
+        {
+            stack = null;
+            normalizedCode = "";
+            string requested = code.Trim();
+            if (requested.Length == 0) return false;
+
+            bool itemOnly = requested.StartsWith("item:", StringComparison.OrdinalIgnoreCase);
+            bool blockOnly = requested.StartsWith("block:", StringComparison.OrdinalIgnoreCase);
+            if (itemOnly || blockOnly)
+            {
+                requested = requested[(requested.IndexOf(':') + 1)..];
+            }
+
+            static bool Matches(CollectibleObject collectible, string target)
+            {
+                string full = collectible.Code?.ToString() ?? "";
+                string shortCode = collectible.Code?.Path ?? "";
+                return string.Equals(full, target, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(shortCode, target, StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (!blockOnly)
+            {
+                foreach (Item item in api.World.Items)
+                {
+                    if (item?.Code == null || !Matches(item, requested)) continue;
+                    stack = new ItemStack(item, 1);
+                    normalizedCode = item.Code.ToString();
+                    return true;
+                }
+            }
+
+            if (!itemOnly)
+            {
+                foreach (Block block in api.World.Blocks)
+                {
+                    if (block?.Code == null || !Matches(block, requested)) continue;
+                    stack = new ItemStack(block, 1);
+                    normalizedCode = block.Code.ToString();
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void EnsureActive()
@@ -802,11 +858,10 @@ public sealed partial class DebugWindowManager
             }
 
             MeshData filtered = mesh.EmptyClone() ?? throw new InvalidOperationException("Could not create first-person preview mesh clone.");
-            filtered.AddMeshData(mesh, faceIndex =>
+            filtered.AddMeshData(mesh, vertexIndex =>
             {
-                int vertexIndex = faceIndex * MeshData.StandardVerticesPerFace;
                 if (vertexIndex < 0 || vertexIndex >= mesh.VerticesCount) return false;
-                int jointValueIndex = vertexIndex;
+                int jointValueIndex = vertexIndex * 4;
                 if (jointValueIndex < 0 || jointValueIndex >= mesh.CustomInts.Values.Length) return false;
                 bool inSet = jointIds.Contains(mesh.CustomInts.Values[jointValueIndex]);
                 return immersive ? !inSet : inSet;
@@ -1174,6 +1229,10 @@ public sealed partial class DebugWindowManager
         float PanX,
         float PanY,
         VanillaPreviewMode Mode,
+        bool FirstPersonInspectCamera,
+        float FirstPersonLookPitchDegrees,
+        string FirstPersonRightHandItemCode,
+        string FirstPersonLeftHandItemCode,
         bool WorldLighting,
         string GhostKey);
 
@@ -1221,6 +1280,10 @@ public sealed partial class DebugWindowManager
             float panX,
             float panY,
             VanillaPreviewMode mode,
+            bool firstPersonInspectCamera,
+            float firstPersonLookPitchDegrees,
+            string firstPersonRightHandItemCode,
+            string firstPersonLeftHandItemCode,
             bool worldLighting,
             IReadOnlyList<VanillaPreviewGhost> ghosts,
             bool verboseLogs,
@@ -1246,6 +1309,10 @@ public sealed partial class DebugWindowManager
                 panX,
                 panY,
                 mode,
+                firstPersonInspectCamera,
+                firstPersonLookPitchDegrees,
+                firstPersonRightHandItemCode.Trim(),
+                firstPersonLeftHandItemCode.Trim(),
                 worldLighting,
                 BuildGhostRenderKey(ghosts));
             if (_lastTextureId > 0 &&
@@ -1266,7 +1333,7 @@ public sealed partial class DebugWindowManager
                 return Skip(scene, mode, width, height, "preview framebuffer has no color texture", verboseLogs, out skipReason);
             }
 
-            VanillaPreviewCameraState camera = BuildVanillaPreviewCamera(scene, framebufferWidth, framebufferHeight, yaw, pitch, zoom, panX, panY, mode);
+            VanillaPreviewCameraState camera = BuildVanillaPreviewCamera(scene, framebufferWidth, framebufferHeight, yaw, pitch, zoom, panX, panY, mode, firstPersonInspectCamera, firstPersonLookPitchDegrees, firstPersonRightHandItemCode);
             IRenderAPI render = _api.Render;
             if (render == null)
             {
@@ -1379,9 +1446,16 @@ public sealed partial class DebugWindowManager
                     render.GlToggleBlend(false);
                     SetUniform(shader, "renderColor", ColorUtil.WhiteArgbVec);
                 }
-                glError = GL.GetError();
                 shader.Stop();
                 shader = null;
+
+                RenderFirstPersonHeldItem(scene, camera, mode, fpHands, worldLighting, firstPersonRightHandItemCode, rightHand: true);
+                if (!string.IsNullOrWhiteSpace(firstPersonLeftHandItemCode))
+                {
+                    RenderFirstPersonHeldItem(scene, camera, mode, fpHands, worldLighting, firstPersonLeftHandItemCode, rightHand: false);
+                }
+
+                glError = GL.GetError();
                 previous?.Use();
                 LogVerboseFrame(scene, mode, meshRef, frameBuffer, framebufferWidth, framebufferHeight, shaderName, frameBufferStatus, glError, verboseLogs);
                 _lastRenderKey = renderKey;
@@ -1414,6 +1488,108 @@ public sealed partial class DebugWindowManager
             }
         }
 
+        private void RenderFirstPersonHeldItem(
+            VanillaAnimationPreviewScene scene,
+            VanillaPreviewCameraState camera,
+            VanillaPreviewMode mode,
+            ModSystemFpHands? fpHands,
+            bool worldLighting,
+            string itemCode,
+            bool rightHand)
+        {
+            if (mode != VanillaPreviewMode.FirstPerson && mode != VanillaPreviewMode.ImmersiveFirstPerson) return;
+            if (string.IsNullOrWhiteSpace(itemCode)) return;
+            if (!VanillaAnimationPreviewScene.TryBuildFirstPersonItemStack(_api, itemCode, out ItemStack? stack, out _) || stack == null) return;
+
+            AttachmentPointAndPose? apap = scene.Animator.GetAttachmentPointPose(rightHand ? "RightHand" : "LeftHand");
+            AttachmentPoint? attachPoint = apap?.AttachPoint;
+            if (apap == null || attachPoint == null) return;
+
+            DummySlot slot = new(stack);
+            ItemRenderInfo renderInfo = _api.Render.GetItemStackRenderInfo(slot, (EnumItemRenderTarget)(rightHand ? 2 : 3), 0f);
+            if (renderInfo?.ModelRef == null || renderInfo.Transform == null) return;
+
+            ModelTransform transform = renderInfo.Transform.EnsureDefaultValues();
+            Matrixf itemModel = new();
+            itemModel.Set(camera.Model.Values)
+                .Mul(apap.AnimModelMatrix)
+                .Translate(transform.Origin.X, transform.Origin.Y, transform.Origin.Z)
+                .Scale(transform.ScaleXYZ.X, transform.ScaleXYZ.Y, transform.ScaleXYZ.Z)
+                .Translate(
+                    attachPoint.PosX / 16.0 + transform.Translation.X,
+                    attachPoint.PosY / 16.0 + transform.Translation.Y,
+                    attachPoint.PosZ / 16.0 + transform.Translation.Z)
+                .Rotate(
+                    (float)((attachPoint.RotationX + transform.Rotation.X) * GameMath.DEG2RAD),
+                    (float)((attachPoint.RotationY + transform.Rotation.Y) * GameMath.DEG2RAD),
+                    (float)((attachPoint.RotationZ + transform.Rotation.Z) * GameMath.DEG2RAD))
+                .Translate(-transform.Origin.X, -transform.Origin.Y, -transform.Origin.Z);
+
+            IRenderAPI render = _api.Render;
+            IShaderProgram? previous = render.CurrentActiveShader;
+            IShaderProgram? itemShader = mode == VanillaPreviewMode.FirstPerson && fpHands?.fpModeItemShader != null
+                ? fpHands.fpModeItemShader
+                : render.GetEngineShader(EnumShaderProgram.Standard);
+            if (itemShader == null) return;
+
+            try
+            {
+                previous?.Stop();
+                itemShader.Use();
+                SetUniform(itemShader, "depthOffset", mode == VanillaPreviewMode.FirstPerson ? GetFirstPersonDepthOffset(mode, fpHands) : 0f);
+                SetUniform(itemShader, "ssaoAttn", 1f);
+                SetUniform(itemShader, "dontWarpVertices", 2);
+                SetUniform(itemShader, "addRenderFlags", 0);
+                SetUniform(itemShader, "normalShaded", renderInfo.NormalShaded ? 1 : 0);
+                SetUniform(itemShader, "tempGlowMode", stack.ItemAttributes?["tempGlowMode"].AsInt(0) ?? 0);
+                SetUniform(itemShader, "rgbaTint", ColorUtil.WhiteArgbVec);
+                SetUniform(itemShader, "renderColor", ColorUtil.WhiteArgbVec);
+                SetUniform(itemShader, "alphaTest", renderInfo.AlphaTest);
+                SetUniform(itemShader, "damageEffect", renderInfo.DamageEffect);
+                SetUniform(itemShader, "overlayOpacity", renderInfo.OverlayOpacity);
+                SetUniform(itemShader, "rgbaAmbientIn", worldLighting ? render.AmbientColor : new Vec3f(1f, 1f, 1f));
+                SetUniform(itemShader, "rgbaLightIn", GetPreviewLight(render, worldLighting));
+                SetUniform(itemShader, "rgbaFogIn", worldLighting ? render.FogColor : new Vec4f(0f, 0f, 0f, 0f));
+                SetUniform(itemShader, "fogMinIn", worldLighting ? render.FogMin : 0f);
+                SetUniform(itemShader, "fogDensityIn", worldLighting ? render.FogDensity : 0f);
+                SetUniform(itemShader, "rgbaGlowIn", 1f, 1f, 1f, 0f);
+                SetUniform(itemShader, "extraGlow", 0);
+                SetUniform(itemShader, "averageColor", 1f, 1f, 1f, 1f);
+                SetUniformMatrix(itemShader, "projectionMatrix", camera.Projection.Values);
+                SetUniformMatrix(itemShader, "viewMatrix", camera.View.Values);
+                SetUniformMatrix(itemShader, "modelMatrix", itemModel.Values);
+
+                bool restoreCull = GL.IsEnabled(EnableCap.CullFace);
+                if (renderInfo.CullFaces)
+                {
+                    render.GlEnableCullFace();
+                }
+                else
+                {
+                    render.GlDisableCullFace();
+                }
+
+                render.RenderMultiTextureMesh(renderInfo.ModelRef, "tex", 0);
+
+                if (restoreCull)
+                {
+                    render.GlEnableCullFace();
+                }
+                else
+                {
+                    render.GlDisableCullFace();
+                }
+
+                SetUniform(itemShader, "damageEffect", 0f);
+                SetUniform(itemShader, "tempGlowMode", 0);
+            }
+            finally
+            {
+                itemShader.Stop();
+                previous?.Use();
+            }
+        }
+
         private Vec4f GetPreviewLight(IRenderAPI render, bool worldLighting)
         {
             if (!worldLighting)
@@ -1431,11 +1607,11 @@ public sealed partial class DebugWindowManager
 
             if (fpHands != null)
             {
-                return PlayerRenderingPatches.GetOffsetAdjusted(fpHands);
+                return PlayerRenderingPatches.GetNetOffset();
             }
 
             int fieldOfView = Math.Max(1, _api.Settings.Int["fieldOfView"]);
-            return PlayerRenderingPatches.DefaultFpHandsOffset + GameMath.Max(0f, fieldOfView / 90f - 1f) / 2f;
+            return PlayerRenderingPatches.FpHandsOffset - GameMath.Max(0f, fieldOfView / 90f - 1f) / 2f;
         }
 
         private FrameBufferRef EnsureFrameBuffer(int width, int height)
