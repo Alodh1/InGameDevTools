@@ -29,6 +29,7 @@ public sealed partial class DebugWindowManager
 
     private AiBehaviorIndexState _aiBehaviorIndexState;
     private int _aiBehaviorIndexAssetIndex;
+    private bool _aiBehaviorIndexIncludedServerAssets;
     private int _aiBehaviorEntryIndex;
     private int _aiBehaviorTaskIndex;
     private string _aiBehaviorFilter = "";
@@ -144,6 +145,14 @@ public sealed partial class DebugWindowManager
 
     private void EnsureAiBehaviorEntriesIndexed()
     {
+        if (_aiBehaviorIndexState == AiBehaviorIndexState.Ready &&
+            _aiBehaviorEntries.Count == 0 &&
+            !_aiBehaviorIndexIncludedServerAssets &&
+            InGameDevToolsModSystem.ActiveServerApi != null)
+        {
+            StartAiBehaviorIndexing(clearLoaded: false);
+        }
+
         if (_aiBehaviorIndexState == AiBehaviorIndexState.Ready || _aiBehaviorIndexState == AiBehaviorIndexState.Failed) return;
         if (_aiBehaviorIndexState == AiBehaviorIndexState.Idle)
         {
@@ -157,6 +166,7 @@ public sealed partial class DebugWindowManager
     {
         _aiBehaviorIndexState = AiBehaviorIndexState.Indexing;
         _aiBehaviorIndexAssetIndex = 0;
+        _aiBehaviorIndexIncludedServerAssets = false;
         _aiBehaviorEntries.Clear();
         _visibleAiBehaviorEntries.Clear();
         _aiBehaviorIndexAssets.Clear();
@@ -172,8 +182,19 @@ public sealed partial class DebugWindowManager
             _aiBehaviorTaskIndex = 0;
         }
 
-        DevToolsBatching.AddAssets(_api.Assets.AllAssets.Values, _aiBehaviorIndexAssets, IsAiBehaviorEntityAsset);
+        HashSet<string> indexedLocations = new(StringComparer.OrdinalIgnoreCase);
+        DevToolsBatching.AddAssetSource("client entity category", () => _api.Assets.GetManyInCategory("entities", ""), _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
+        DevToolsBatching.AddAssetSource("client loaded assets", () => _api.Assets.AllAssets.Values, _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
 
+        ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
+        if (serverApi != null)
+        {
+            _aiBehaviorIndexIncludedServerAssets = true;
+            DevToolsBatching.AddAssetSource("server entity category", () => serverApi.Assets.GetManyInCategory("entities", ""), _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
+            DevToolsBatching.AddAssetSource("server loaded assets", () => serverApi.Assets.AllAssets.Values, _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
+        }
+
+        DevToolsBatching.SortAssetsByLocation(_aiBehaviorIndexAssets);
         _aiBehaviorStatus = BuildAiBehaviorIndexProgressText();
     }
 
@@ -217,7 +238,8 @@ public sealed partial class DebugWindowManager
 
     private string BuildAiBehaviorIndexProgressText()
     {
-        return $"Indexing entity AI sources {_aiBehaviorIndexAssetIndex}/{_aiBehaviorIndexAssets.Count}.";
+        string serverSuffix = _aiBehaviorIndexIncludedServerAssets ? " including server assets" : " client assets only";
+        return $"Indexing entity AI sources {_aiBehaviorIndexAssetIndex}/{_aiBehaviorIndexAssets.Count}{serverSuffix}.";
     }
 
     private void IndexAiBehaviorAsset(IAsset asset)
@@ -3635,28 +3657,62 @@ public sealed partial class DebugWindowManager
         tasksByType = null;
         behaviorPath = "";
 
-        if (root["server"] is not JObject server || server["behaviors"] is not JArray behaviors)
+        if (root["server"] is not JObject server)
         {
             return false;
         }
 
-        for (int index = 0; index < behaviors.Count; index++)
+        if (server["behaviors"] is JArray behaviors)
         {
-            if (behaviors[index] is not JObject candidate) continue;
-            string? code = candidate["code"]?.ToString() ?? candidate["name"]?.ToString();
-            bool isTaskAi = string.Equals(code, "taskai", StringComparison.OrdinalIgnoreCase) ||
-                candidate["aitasks"] is JArray ||
-                candidate["aitasksByType"] is JObject;
-            if (!isTaskAi) continue;
+            for (int index = 0; index < behaviors.Count; index++)
+            {
+                if (behaviors[index] is not JObject candidate) continue;
+                string? code = candidate["code"]?.ToString() ?? candidate["name"]?.ToString();
+                bool isTaskAi = string.Equals(code, "taskai", StringComparison.OrdinalIgnoreCase) ||
+                    candidate["aitasks"] is JArray ||
+                    candidate["aitasksByType"] is JObject;
+                if (!isTaskAi) continue;
+
+                behavior = ResolveAiTaskBehaviorConfig(server, candidate, code, out string configPath);
+                tasks = behavior["aitasks"] as JArray;
+                tasksByType = behavior["aitasksByType"] as JObject;
+                behaviorPath = string.IsNullOrWhiteSpace(configPath) ? $"server.behaviors[{index}]" : configPath;
+                return true;
+            }
+        }
+
+        foreach (JProperty property in server.Properties())
+        {
+            if (property.Value is not JObject candidate) continue;
+            if (candidate["aitasks"] is not JArray && candidate["aitasksByType"] is not JObject) continue;
 
             behavior = candidate;
             tasks = candidate["aitasks"] as JArray;
             tasksByType = candidate["aitasksByType"] as JObject;
-            behaviorPath = $"server.behaviors[{index}]";
+            behaviorPath = $"server.{property.Name}";
             return true;
         }
 
         return false;
+    }
+
+    private static JObject ResolveAiTaskBehaviorConfig(JObject server, JObject behaviorStub, string? behaviorCode, out string path)
+    {
+        path = "";
+        if (behaviorStub["aitasks"] is JArray || behaviorStub["aitasksByType"] is JObject)
+        {
+            return behaviorStub;
+        }
+
+        if (!string.IsNullOrWhiteSpace(behaviorCode) &&
+            server[behaviorCode] is JObject sidecar &&
+            (sidecar["aitasks"] is JArray || sidecar["aitasksByType"] is JObject))
+        {
+            path = $"server.{behaviorCode}";
+            return sidecar;
+        }
+
+        return behaviorStub;
     }
 
     private static int CountAiBehaviorTasksByType(JObject? tasksByType)
