@@ -3101,8 +3101,8 @@ public sealed partial class DebugWindowManager
 
         object map = GetRuntimeObjectProperty(config, definition.PropertyPath)
             ?? throw new InvalidOperationException($"Runtime behavior map {string.Join(".", definition.PropertyPath)} was not found.");
-        object entry = GetRuntimeDictionaryValue(map, slot.TypedKey)
-            ?? throw new InvalidOperationException($"Runtime behavior map key {slot.TypedKey} was not found.");
+        object entry = GetOrCreateRuntimeDictionaryValue(map, slot.TypedKey)
+            ?? throw new InvalidOperationException($"Runtime behavior map key {slot.TypedKey} could not be created.");
         SetRuntimeObjectTransform(entry, [definition.RequiredLeafProperty], transform);
     }
 
@@ -3208,6 +3208,33 @@ public sealed partial class DebugWindowManager
         {
             return null;
         }
+    }
+
+    private static object? GetOrCreateRuntimeDictionaryValue(object dictionary, string key)
+    {
+        object? existing = GetRuntimeDictionaryValue(dictionary, key);
+        if (existing != null) return existing;
+
+        Type type = dictionary.GetType();
+        Type? valueType = type.GetInterfaces()
+            .Append(type)
+            .Where(candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(IDictionary<,>))
+            .Select(candidate => candidate.GetGenericArguments()[1])
+            .FirstOrDefault();
+        if (valueType == null) return null;
+
+        object? created = Activator.CreateInstance(valueType);
+        if (created == null) return null;
+
+        System.Reflection.MethodInfo? addMethod = type.GetMethods()
+            .FirstOrDefault(method =>
+            {
+                if (!method.Name.Equals("Add", StringComparison.Ordinal)) return false;
+                System.Reflection.ParameterInfo[] parameters = method.GetParameters();
+                return parameters.Length == 2 && parameters[0].ParameterType == typeof(string);
+            });
+        addMethod?.Invoke(dictionary, [key, created]);
+        return created;
     }
 
     private static string BuildTransformGroupSavePreview(IEnumerable<TransformSourceSaveFile> files, bool oldText)
