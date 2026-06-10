@@ -191,6 +191,7 @@ public sealed partial class DebugWindowManager
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Recipe Editor", "Tab", "recipe recipes crafting", DevToolsTab.RecipeEditor, () => RequestDevToolsTab(DevToolsTab.RecipeEditor));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Particles", "Tab", "particle particles effects", DevToolsTab.Particles, () => RequestDevToolsTab(DevToolsTab.Particles));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Transforms", "Tab", "transform item block model placement", DevToolsTab.Transforms, () => RequestDevToolsTab(DevToolsTab.Transforms));
+        AddCommandPaletteEntry(entries, normalizedFilter, "Open Models", "Tab", "model models shape shapes cube editor uv texture", DevToolsTab.Models, () => RequestDevToolsTab(DevToolsTab.Models));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open ConfigLib", "Tab", "config configlib modconfig", DevToolsTab.ConfigLib, () => RequestDevToolsTab(DevToolsTab.ConfigLib));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Loot/Drops", "Tab", "loot drops trade table", DevToolsTab.LootDrops, () => RequestDevToolsTab(DevToolsTab.LootDrops));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Worldgen", "Tab", "worldgen deposits block patches landforms strata", DevToolsTab.Worldgen, () => RequestDevToolsTab(DevToolsTab.Worldgen));
@@ -224,14 +225,15 @@ public sealed partial class DebugWindowManager
     {
         DevToolsTab.Animations => 0,
         DevToolsTab.Transforms => 1,
-        DevToolsTab.Particles => 2,
-        DevToolsTab.RecipeEditor => 3,
-        DevToolsTab.LootDrops => 4,
-        DevToolsTab.Worldgen => 5,
-        DevToolsTab.Patches => 6,
-        DevToolsTab.EntityAi => 7,
-        DevToolsTab.ConfigLib => 8,
-        DevToolsTab.Settings => 9,
+        DevToolsTab.Models => 2,
+        DevToolsTab.Particles => 3,
+        DevToolsTab.RecipeEditor => 4,
+        DevToolsTab.LootDrops => 5,
+        DevToolsTab.Worldgen => 6,
+        DevToolsTab.Patches => 7,
+        DevToolsTab.EntityAi => 8,
+        DevToolsTab.ConfigLib => 9,
+        DevToolsTab.Settings => 10,
         _ => 99
     };
 

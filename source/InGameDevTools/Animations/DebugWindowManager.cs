@@ -60,6 +60,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ClearLiveApplyState();
         RestoreWorldgenPreviewForEditorTeardown("devtools disposed");
         DisposeWorldgenPreviewRasterTexture();
+        ModelDisposePreviewResources();
         FlushDevToolsConfigSave(force: true);
         if (!_drawSubscribed || _imguiModSystem == null) return;
 
@@ -605,6 +606,7 @@ public sealed partial class DebugWindowManager : IDisposable
         RecipeEditor,
         Particles,
         Transforms,
+        Models,
         ConfigLib,
         BlockItemJson,
         LootDrops,
@@ -810,6 +812,13 @@ public sealed partial class DebugWindowManager : IDisposable
                 {
                     AcceptMainTabSelection(DevToolsTab.Transforms);
                     DrawGuardedEditorTab("Transforms", _transformDiagnostics, () => TransformsEditorTab(deltaSeconds));
+                    ImGui.EndTabItem();
+                }
+                bool modelsTabOpen = true;
+                if (ImGui.BeginTabItem("Models##tab", ref modelsTabOpen, GetMainTabFlags(DevToolsTab.Models)))
+                {
+                    AcceptMainTabSelection(DevToolsTab.Models);
+                    DrawGuardedEditorTab("Models", _modelDiagnostics, () => ModelEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool configLibTabOpen = true;
@@ -1027,6 +1036,9 @@ public sealed partial class DebugWindowManager : IDisposable
             case DevToolsTab.Transforms:
                 ApplySelectedTransformLive(force);
                 break;
+            case DevToolsTab.Models:
+                ApplyModelRuntimeForActiveTab(force);
+                break;
             case DevToolsTab.ConfigLib:
                 _liveApplyManager.LastStatus = "ConfigLib generator writes authored files; it has no runtime apply target.";
                 break;
@@ -1060,6 +1072,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _recipeEditor.ClearRecipeLiveApplyState();
         _particleEffectsManager.ClearParticleLiveApplyState();
         ClearTransformLiveApplyState();
+        ClearModelLiveApplyState();
         ClearBlockItemJsonLiveApplyState();
         ClearLootDropLiveApplyState();
         ClearWorldgenLiveApplyState();
@@ -1076,6 +1089,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _recipeEditor.ResetLayout();
         _particleEffectsManager.ResetLayout();
         ResetTransformsLayout();
+        ResetModelEditorLayout();
         ResetConfigLibGeneratorLayout();
         ResetBlockItemJsonLayout();
         ResetLootDropLayout();
