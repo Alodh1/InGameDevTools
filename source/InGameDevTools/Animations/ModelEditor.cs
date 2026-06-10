@@ -162,7 +162,16 @@ public sealed partial class DebugWindowManager
         public string SearchText { get; } = $"{Domain}:{AssetPath}".ToLowerInvariant();
     }
 
-    private sealed record ModelHistoryEntry(string Label, string Json, int[]? SelectionPath, int SelectedFace);
+    private sealed record ModelHistoryEntry(string Label, string Json, int[]? SelectionPath, int SelectedFace, int[][]? SelectionPaths = null);
+
+    private sealed record ModelGizmoDragElementState(
+        ModelElementData Element,
+        double[] From,
+        double[] To,
+        double[]? RotationOrigin,
+        double RotationX,
+        double RotationY,
+        double RotationZ);
 
     private readonly ImGuiThreePanelLayoutState _modelLayout = new(0.21f, 0.30f);
     private readonly DevToolsEditorDiagnostics _modelDiagnostics = new("Models");
@@ -172,6 +181,8 @@ public sealed partial class DebugWindowManager
     private float _modelTreePanelFraction = 0.55f;
     private ModelDocumentData? _modelDoc;
     private ModelElementData? _modelSelectedElement;
+    private readonly HashSet<ModelElementData> _modelSelectedElements = [];
+    private readonly List<ModelElementData> _modelSelectionOrder = [];
     private int _modelSelectedFace = -1;
     private string _modelSelectedTextureCode = "";
     private string _modelStatus = "";
@@ -457,6 +468,8 @@ public sealed partial class DebugWindowManager
         }
         DrawModelShortcutsPopup();
 
+        DrawModelSelectionToolbar();
+
         ImGui.SameLine();
         ImGui.TextDisabled("|");
         ImGui.SameLine();
@@ -503,6 +516,73 @@ public sealed partial class DebugWindowManager
         ImGui.Separator();
     }
 
+    private void DrawModelSelectionToolbar()
+    {
+        if (_modelDoc == null) return;
+
+        List<ModelElementData> selected = ModelSelectedElementsInDocument();
+        bool hasSelection = selected.Count > 0;
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("|");
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{selected.Count} selected");
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Plain click selects one element. Ctrl+click toggles multi-selection. The inspector edits the active element.");
+        }
+
+        ImGui.SameLine();
+        if (!hasSelection) ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Clear##model-selection-clear"))
+        {
+            ModelSelectElement(null);
+        }
+        if (!hasSelection) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("All##model-selection-all"))
+        {
+            ModelSelectElements(_modelDoc.EnumerateElements(), _modelDoc.Roots.FirstOrDefault());
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Select every element in this shape.");
+        }
+
+        ImGui.SameLine();
+        if (!hasSelection) ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Duplicate##model-selection-duplicate"))
+        {
+            ModelDuplicateSelectedElements();
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Delete##model-selection-delete"))
+        {
+            ModelDeleteSelectedElements();
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Mirror X##model-selection-mirror-x"))
+        {
+            ModelMirrorSelectedElements(0);
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Mirror Y##model-selection-mirror-y"))
+        {
+            ModelMirrorSelectedElements(1);
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Mirror Z##model-selection-mirror-z"))
+        {
+            ModelMirrorSelectedElements(2);
+        }
+        if (!hasSelection) ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Mirror selected top-level elements around the model origin on this axis. Selected descendants of selected parents are skipped to avoid double mirroring.");
+        }
+    }
+
     private void DrawModelShortcutsPopup()
     {
         if (!ImGui.BeginPopup("##model-shortcuts-popup")) return;
@@ -520,6 +600,7 @@ public sealed partial class DebugWindowManager
 
             ImGui.SeparatorText("Viewport mouse");
             ImGui.TextUnformatted("Left click        Select element / drag gizmo");
+            ImGui.TextUnformatted("Ctrl+Left click   Toggle element in multi-selection");
             ImGui.TextUnformatted("Right drag        Orbit camera");
             ImGui.TextUnformatted("Middle or Shift+Right drag   Pan camera");
             ImGui.TextUnformatted("Mouse wheel       Zoom");
@@ -690,10 +771,14 @@ public sealed partial class DebugWindowManager
 
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags.OpenOnArrow | ImGuiTreeNodeFlags.OpenOnDoubleClick | ImGuiTreeNodeFlags.SpanAvailWidth;
             if (element.Children.Count == 0) flags |= ImGuiTreeNodeFlags.Leaf;
-            if (ReferenceEquals(element, _modelSelectedElement)) flags |= ImGuiTreeNodeFlags.Selected;
+            if (ModelIsElementSelected(element)) flags |= ImGuiTreeNodeFlags.Selected;
             if (depth < 2 && element.Children.Count > 0) flags |= ImGuiTreeNodeFlags.DefaultOpen;
 
             string name = string.IsNullOrWhiteSpace(element.Name) ? "(unnamed)" : element.Name;
+            if (ReferenceEquals(element, _modelSelectedElement) && _modelSelectedElements.Count > 1)
+            {
+                name = "> " + name;
+            }
             bool open = ImGui.TreeNodeEx($"{name}###model-node", flags);
             if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && !ImGui.IsItemToggledOpen())
             {
@@ -707,24 +792,34 @@ public sealed partial class DebugWindowManager
                 }
                 else
                 {
-                    ModelSelectElement(element);
+                    ModelSelectElement(element, additive: ImGui.GetIO().KeyCtrl);
                 }
             }
 
             if (ImGui.BeginPopupContextItem("##model-node-context"))
             {
-                ModelSelectElement(element);
+                if (!ModelIsElementSelected(element))
+                {
+                    ModelSelectElement(element);
+                }
                 if (ImGui.MenuItem("Add child cube"))
                 {
                     ModelAddElement(element);
                 }
                 if (ImGui.MenuItem("Duplicate", "Ctrl+D"))
                 {
-                    ModelDuplicateElement(element);
+                    ModelDuplicateSelectedElements();
                 }
                 if (ImGui.MenuItem("Delete", "Del"))
                 {
-                    ModelDeleteElement(element);
+                    ModelDeleteSelectedElements();
+                }
+                if (ImGui.BeginMenu("Mirror selected"))
+                {
+                    if (ImGui.MenuItem("Around X origin")) ModelMirrorSelectedElements(0);
+                    if (ImGui.MenuItem("Around Y origin")) ModelMirrorSelectedElements(1);
+                    if (ImGui.MenuItem("Around Z origin")) ModelMirrorSelectedElements(2);
+                    ImGui.EndMenu();
                 }
                 ImGui.Separator();
                 if (ImGui.MenuItem("Move up"))
@@ -1025,18 +1120,19 @@ public sealed partial class DebugWindowManager
             ImGui.SetTooltip("Element in another shape this element attaches to when step-parented (e.g. a seraph bone for wearables). Options come from this shape and loaded entity shapes; type in the filter for anything else.");
         }
 
-        if (ImGui.SmallButton("Duplicate##model-elem-duplicate"))
+        int selectedCount = ModelSelectedElementsInDocument().Count;
+        if (ImGui.SmallButton(selectedCount > 1 ? "Duplicate selected##model-elem-duplicate" : "Duplicate##model-elem-duplicate"))
         {
-            ModelDuplicateElement(element);
+            ModelDuplicateSelectedElements();
         }
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Duplicate the selected element and its children (Ctrl+D).");
         }
         ImGui.SameLine();
-        if (ImGui.SmallButton("Delete##model-elem-delete"))
+        if (ImGui.SmallButton(selectedCount > 1 ? "Delete selected##model-elem-delete" : "Delete##model-elem-delete"))
         {
-            ModelDeleteElement(element);
+            ModelDeleteSelectedElements();
         }
         if (ImGui.IsItemHovered())
         {
@@ -1217,11 +1313,11 @@ public sealed partial class DebugWindowManager
         }
         else if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.D) && _modelSelectedElement != null)
         {
-            ModelDuplicateElement(_modelSelectedElement);
+            ModelDuplicateSelectedElements();
         }
         else if (ImGui.IsKeyPressed(ImGuiKey.Delete) && _modelSelectedElement != null)
         {
-            ModelDeleteElement(_modelSelectedElement);
+            ModelDeleteSelectedElements();
         }
         else if (io.KeyCtrl && io.KeyShift && ImGui.IsKeyPressed(ImGuiKey._1))
         {
@@ -1252,13 +1348,139 @@ public sealed partial class DebugWindowManager
         _modelUvFitPending = true;
     }
 
-    private void ModelSelectElement(ModelElementData? element)
+    private void ModelSelectElement(ModelElementData? element, bool additive = false)
     {
-        if (!ReferenceEquals(_modelSelectedElement, element))
+        if (_modelDoc == null || element == null)
         {
+            _modelSelectedElement = null;
+            _modelSelectedElements.Clear();
+            _modelSelectionOrder.Clear();
+            _modelSelectedFace = -1;
+            return;
+        }
+
+        if (!additive)
+        {
+            bool changed = !ReferenceEquals(_modelSelectedElement, element) || _modelSelectedElements.Count != 1 || !_modelSelectedElements.Contains(element);
+            _modelSelectedElement = element;
+            _modelSelectedElements.Clear();
+            _modelSelectionOrder.Clear();
+            _modelSelectedElements.Add(element);
+            _modelSelectionOrder.Add(element);
+            if (changed) _modelSelectedFace = -1;
+            return;
+        }
+
+        if (_modelSelectedElements.Contains(element))
+        {
+            _modelSelectedElements.Remove(element);
+            _modelSelectionOrder.RemoveAll(candidate => ReferenceEquals(candidate, element));
+            if (ReferenceEquals(_modelSelectedElement, element))
+            {
+                _modelSelectedElement = _modelSelectionOrder.LastOrDefault();
+                _modelSelectedFace = -1;
+            }
+        }
+        else
+        {
+            _modelSelectedElements.Add(element);
+            _modelSelectionOrder.RemoveAll(candidate => ReferenceEquals(candidate, element));
+            _modelSelectionOrder.Add(element);
             _modelSelectedElement = element;
             _modelSelectedFace = -1;
         }
+
+        if (_modelSelectedElement == null && _modelSelectionOrder.Count > 0)
+        {
+            _modelSelectedElement = _modelSelectionOrder[^1];
+        }
+    }
+
+    private void ModelSelectElements(IEnumerable<ModelElementData> elements, ModelElementData? active)
+    {
+        _modelSelectedElements.Clear();
+        _modelSelectionOrder.Clear();
+        if (_modelDoc == null)
+        {
+            _modelSelectedElement = null;
+            _modelSelectedFace = -1;
+            return;
+        }
+
+        foreach (ModelElementData element in elements)
+        {
+            if (!_modelSelectedElements.Add(element)) continue;
+            _modelSelectionOrder.Add(element);
+        }
+
+        _modelSelectedElement = active != null && _modelSelectedElements.Contains(active)
+            ? active
+            : _modelSelectionOrder.FirstOrDefault();
+        _modelSelectedFace = -1;
+    }
+
+    private bool ModelIsElementSelected(ModelElementData element)
+    {
+        ModelPruneSelection();
+        return _modelSelectedElements.Contains(element);
+    }
+
+    private List<ModelElementData> ModelSelectedElementsInDocument()
+    {
+        ModelPruneSelection();
+        return [.. _modelSelectionOrder];
+    }
+
+    private void ModelPruneSelection()
+    {
+        if (_modelDoc == null)
+        {
+            _modelSelectedElement = null;
+            _modelSelectedElements.Clear();
+            _modelSelectionOrder.Clear();
+            return;
+        }
+
+        HashSet<ModelElementData> live = _modelDoc.EnumerateElements().ToHashSet();
+        _modelSelectionOrder.RemoveAll(element => !live.Contains(element));
+        _modelSelectedElements.RemoveWhere(element => !live.Contains(element));
+
+        if (_modelSelectedElement != null && !live.Contains(_modelSelectedElement))
+        {
+            _modelSelectedElement = _modelSelectionOrder.LastOrDefault();
+            _modelSelectedFace = -1;
+        }
+        if (_modelSelectedElement != null && !_modelSelectedElements.Contains(_modelSelectedElement))
+        {
+            _modelSelectedElement = _modelSelectionOrder.LastOrDefault();
+            _modelSelectedFace = -1;
+        }
+    }
+
+    private List<ModelElementData> ModelEffectiveSelectedRoots()
+    {
+        List<ModelElementData> selected = ModelSelectedElementsInDocument();
+        if (selected.Count == 0 && _modelSelectedElement != null)
+        {
+            selected.Add(_modelSelectedElement);
+        }
+
+        HashSet<ModelElementData> selectedSet = new(selected);
+        List<ModelElementData> roots = [];
+        foreach (ModelElementData element in selected)
+        {
+            bool hasSelectedAncestor = false;
+            for (ModelElementData? parent = element.Parent; parent != null; parent = parent.Parent)
+            {
+                if (!selectedSet.Contains(parent)) continue;
+                hasSelectedAncestor = true;
+                break;
+            }
+
+            if (!hasSelectedAncestor) roots.Add(element);
+        }
+
+        return roots;
     }
 
     private void EnsureModelShapeIndex()
@@ -1440,8 +1662,7 @@ public sealed partial class DebugWindowManager
     private void ModelSetDocument(ModelDocumentData doc)
     {
         _modelDoc = doc;
-        _modelSelectedElement = doc.Roots.FirstOrDefault();
-        _modelSelectedFace = -1;
+        ModelSelectElement(doc.Roots.FirstOrDefault());
         _modelSelectedTextureCode = doc.Textures.FirstOrDefault()?.Code ?? "";
         _modelUndoStack.Clear();
         _modelRedoStack.Clear();
@@ -1516,6 +1737,39 @@ public sealed partial class DebugWindowManager
         _modelStatus = $"Deleted element {element.Name}.";
     }
 
+    private void ModelDeleteSelectedElements()
+    {
+        if (_modelDoc == null) return;
+
+        List<ModelElementData> targets = ModelEffectiveSelectedRoots();
+        if (targets.Count == 0) return;
+        if (targets.Count == 1)
+        {
+            ModelDeleteElement(targets[0]);
+            return;
+        }
+
+        ModelBeginEdit();
+        int removed = 0;
+        foreach (ModelElementData element in targets)
+        {
+            List<ModelElementData> siblings = element.Parent?.Children ?? _modelDoc.Roots;
+            if (siblings.Remove(element)) removed++;
+            if (ReferenceEquals(_modelReparentSource, element)) _modelReparentSource = null;
+        }
+
+        ModelSelectElement(_modelDoc.Roots.FirstOrDefault());
+        if (removed == 0)
+        {
+            ModelCancelEdit();
+            return;
+        }
+
+        ModelMarkChanged();
+        ModelEndEdit("Delete selected elements");
+        _modelStatus = $"Deleted {removed} selected element(s).";
+    }
+
     private void ModelDuplicateElement(ModelElementData element)
     {
         if (_modelDoc == null) return;
@@ -1530,6 +1784,103 @@ public sealed partial class DebugWindowManager
         ModelMarkChanged();
         ModelEndEdit("Duplicate element");
         _modelStatus = $"Duplicated {element.Name} as {clone.Name}.";
+    }
+
+    private void ModelDuplicateSelectedElements()
+    {
+        if (_modelDoc == null || _modelSelectedElement == null) return;
+
+        List<ModelElementData> targets = ModelEffectiveSelectedRoots();
+        if (targets.Count <= 1)
+        {
+            ModelDuplicateElement(_modelSelectedElement);
+            return;
+        }
+
+        ModelBeginEdit();
+        List<ModelElementData> clones = [];
+        foreach (ModelElementData element in targets)
+        {
+            ModelElementData clone = element.CloneSubtree();
+            clone.Parent = element.Parent;
+            clone.Name = ModelGenerateElementName(element.Name);
+            List<ModelElementData> siblings = element.Parent?.Children ?? _modelDoc.Roots;
+            int insertIndex = siblings.IndexOf(element);
+            if (insertIndex < 0) continue;
+            siblings.Insert(insertIndex + 1, clone);
+            clones.Add(clone);
+        }
+
+        if (clones.Count == 0)
+        {
+            ModelCancelEdit();
+            return;
+        }
+
+        ModelSelectElements(clones, clones[^1]);
+        ModelMarkChanged();
+        ModelEndEdit("Duplicate selected elements");
+        _modelStatus = $"Duplicated {clones.Count} selected element(s).";
+    }
+
+    private void ModelMirrorSelectedElements(int axis)
+    {
+        if (_modelDoc == null) return;
+
+        List<ModelElementData> targets = ModelEffectiveSelectedRoots();
+        if (targets.Count == 0) return;
+
+        ModelBeginEdit();
+        foreach (ModelElementData element in targets)
+        {
+            ModelMirrorElementSubtree(element, axis);
+        }
+        ModelMarkChanged();
+        ModelEndEdit($"Mirror selected on {ModelAxisName(axis)}");
+        _modelStatus = $"Mirrored {targets.Count} selected top-level element(s) around {ModelAxisName(axis)} origin.";
+    }
+
+    private static string ModelAxisName(int axis) => axis switch
+    {
+        0 => "X",
+        1 => "Y",
+        _ => "Z"
+    };
+
+    private void ModelMirrorElementSubtree(ModelElementData element, int axis)
+    {
+        double oldFrom = element.From[axis];
+        double oldTo = element.To[axis];
+        element.From[axis] = -oldTo;
+        element.To[axis] = -oldFrom;
+        if (element.RotationOrigin != null)
+        {
+            element.RotationOrigin[axis] = -element.RotationOrigin[axis];
+        }
+
+        switch (axis)
+        {
+            case 0:
+                element.RotationY = ModelWrapDegrees(-element.RotationY);
+                element.RotationZ = ModelWrapDegrees(-element.RotationZ);
+                (element.Faces[1], element.Faces[3]) = (element.Faces[3], element.Faces[1]);
+                break;
+            case 1:
+                element.RotationX = ModelWrapDegrees(-element.RotationX);
+                element.RotationZ = ModelWrapDegrees(-element.RotationZ);
+                (element.Faces[4], element.Faces[5]) = (element.Faces[5], element.Faces[4]);
+                break;
+            default:
+                element.RotationX = ModelWrapDegrees(-element.RotationX);
+                element.RotationY = ModelWrapDegrees(-element.RotationY);
+                (element.Faces[0], element.Faces[2]) = (element.Faces[2], element.Faces[0]);
+                break;
+        }
+
+        for (int child = 0; child < element.Children.Count; child++)
+        {
+            ModelMirrorElementSubtree(element.Children[child], axis);
+        }
     }
 
     private void ModelMoveElement(ModelElementData element, int direction)
@@ -1671,7 +2022,7 @@ public sealed partial class DebugWindowManager
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
             if (!string.Equals(current, _modelPendingEditSnapshot, StringComparison.Ordinal))
             {
-                _modelUndoStack.Add(new ModelHistoryEntry(label, _modelPendingEditSnapshot, ModelGetSelectionPath(), _modelSelectedFace));
+                _modelUndoStack.Add(new ModelHistoryEntry(label, _modelPendingEditSnapshot, ModelGetSelectionPath(), _modelSelectedFace, ModelGetSelectionPaths()));
                 if (_modelUndoStack.Count > ModelHistoryLimit)
                 {
                     _modelUndoStack.RemoveAt(0);
@@ -1698,7 +2049,7 @@ public sealed partial class DebugWindowManager
         try
         {
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
-            _modelRedoStack.Add(new ModelHistoryEntry(entry.Label, current, ModelGetSelectionPath(), _modelSelectedFace));
+            _modelRedoStack.Add(new ModelHistoryEntry(entry.Label, current, ModelGetSelectionPath(), _modelSelectedFace, ModelGetSelectionPaths()));
             ModelRestoreFromHistory(entry);
             _modelStatus = $"Undid: {entry.Label}.";
         }
@@ -1717,7 +2068,7 @@ public sealed partial class DebugWindowManager
         try
         {
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
-            _modelUndoStack.Add(new ModelHistoryEntry(entry.Label, current, ModelGetSelectionPath(), _modelSelectedFace));
+            _modelUndoStack.Add(new ModelHistoryEntry(entry.Label, current, ModelGetSelectionPath(), _modelSelectedFace, ModelGetSelectionPaths()));
             ModelRestoreFromHistory(entry);
             _modelStatus = $"Redid: {entry.Label}.";
         }
@@ -1740,7 +2091,11 @@ public sealed partial class DebugWindowManager
         restored.SourceText = _modelDoc.SourceText;
         restored.Dirty = true;
         _modelDoc = restored;
-        _modelSelectedElement = ModelResolveSelectionPath(entry.SelectionPath);
+        ModelSelectElements(ModelResolveSelectionPaths(entry.SelectionPaths), ModelResolveSelectionPath(entry.SelectionPath));
+        if (_modelSelectedElement == null)
+        {
+            ModelSelectElement(restored.Roots.FirstOrDefault());
+        }
         _modelSelectedFace = entry.SelectedFace;
         _modelPreviewDirty = true;
         _modelJsonBufferStale = true;
@@ -1767,6 +2122,36 @@ public sealed partial class DebugWindowManager
         return [.. path];
     }
 
+    private int[][] ModelGetSelectionPaths()
+    {
+        List<int[]> paths = [];
+        foreach (ModelElementData element in ModelSelectedElementsInDocument())
+        {
+            int[]? path = ModelGetElementPath(element);
+            if (path != null) paths.Add(path);
+        }
+
+        return [.. paths];
+    }
+
+    private int[]? ModelGetElementPath(ModelElementData element)
+    {
+        if (_modelDoc == null) return null;
+
+        List<int> path = [];
+        ModelElementData? current = element;
+        while (current != null)
+        {
+            List<ModelElementData> siblings = current.Parent?.Children ?? _modelDoc.Roots;
+            int index = siblings.IndexOf(current);
+            if (index < 0) return null;
+            path.Insert(0, index);
+            current = current.Parent;
+        }
+
+        return [.. path];
+    }
+
     private ModelElementData? ModelResolveSelectionPath(int[]? path)
     {
         if (_modelDoc == null || path == null || path.Length == 0) return _modelDoc?.Roots.FirstOrDefault();
@@ -1781,5 +2166,17 @@ public sealed partial class DebugWindowManager
         }
 
         return current;
+    }
+
+    private IEnumerable<ModelElementData> ModelResolveSelectionPaths(int[][]? paths)
+    {
+        if (paths == null) yield break;
+        HashSet<ModelElementData> seen = [];
+        foreach (int[] path in paths)
+        {
+            ModelElementData? element = ModelResolveSelectionPath(path);
+            if (element == null || !seen.Add(element)) continue;
+            yield return element;
+        }
     }
 }

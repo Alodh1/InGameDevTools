@@ -451,8 +451,7 @@ public sealed partial class DebugWindowManager
         parsed.SourceText = _modelDoc.SourceText;
         parsed.Dirty = true;
         _modelDoc = parsed;
-        _modelSelectedElement = parsed.Roots.FirstOrDefault();
-        _modelSelectedFace = -1;
+        ModelSelectElement(parsed.Roots.FirstOrDefault());
         _modelReparentSource = null;
         ModelMarkChanged();
         ModelEndEdit("Apply JSON");
