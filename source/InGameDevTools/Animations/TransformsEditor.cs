@@ -42,10 +42,14 @@ public sealed partial class DebugWindowManager
     private bool _transformsOnlyApplicable = true;
     private bool _transformsShowUncertain;
     private bool _transformGroupEdit;
+    private int _transformSlotModeIndex;
     private bool _transformUseTypedSlot;
     private int _transformDirectSlotIndex;
     private int _transformTypedMapIndex;
     private string _transformTypedKey = "";
+    private int _transformBehaviorTransformIndex;
+    private int _transformBehaviorMapIndex;
+    private string _transformBehaviorMapKey = "";
     private string _transformReferenceFilter = "";
     private string _transformReferenceBlockCode = "";
     private int _transformReferenceBlockIndex;
@@ -73,6 +77,27 @@ public sealed partial class DebugWindowManager
     private string _transformViewportGizmoDragSlotKey = "";
     private string _transformsStatus = "";
     private bool _transformsIndexed;
+
+    private static readonly string[] TransformSlotModeLabels = ["Attribute", "Typed map", "Behavior", "Behavior map"];
+
+    private static readonly BehaviorTransformDefinition[] BehaviorTransformDefinitions =
+    [
+        new(
+            "behavior.quivers.backSling.transform",
+            "QuiversAndSheaths:BackSlingRenderConfig",
+            ["transform"],
+            "Back sling stored weapon transform")
+    ];
+
+    private static readonly BehaviorTransformDefinition[] BehaviorMapTransformDefinitions =
+    [
+        new(
+            "behavior.quivers.backSling.transformByStoredItem",
+            "QuiversAndSheaths:BackSlingRenderConfig",
+            ["transformByStoredItem"],
+            "Back sling stored weapon override",
+            "transform")
+    ];
 
     private void TransformsEditorTab(float deltaSeconds)
     {
@@ -269,7 +294,7 @@ public sealed partial class DebugWindowManager
     private TransformApplicabilityResult GetTransformApplicability(TransformAssetEntry entry, string attributeCode)
     {
         string baseAttribute = GetTransformBaseAttributeCode(attributeCode);
-        string cacheKey = $"{entry.Key}|{baseAttribute}";
+        string cacheKey = $"{entry.Key}|{baseAttribute}|{(TryGetBehaviorMapTransformDefinition(baseAttribute, out _) ? _transformBehaviorMapKey : "")}";
         if (_transformApplicabilityCache.TryGetValue(cacheKey, out TransformApplicabilityResult? cached)) return cached;
 
         TransformApplicabilityResult result = ComputeTransformApplicability(entry, baseAttribute);
@@ -279,6 +304,23 @@ public sealed partial class DebugWindowManager
 
     private TransformApplicabilityResult ComputeTransformApplicability(TransformAssetEntry entry, string baseAttribute)
     {
+        if (TryGetBehaviorTransformDefinition(baseAttribute, out BehaviorTransformDefinition behaviorDefinition))
+        {
+            JObject? behaviorSourceJson = GetTransformSourceJson(entry);
+            return BehaviorTransformSlotExists(behaviorSourceJson, behaviorDefinition, typedKey: null)
+                ? TransformApplicabilityResult.Applicable($"{behaviorDefinition.DisplayName} behavior property exists.")
+                : TransformApplicabilityResult.NotApplicable($"{behaviorDefinition.DisplayName} behavior property was not found.");
+        }
+
+        if (TryGetBehaviorMapTransformDefinition(baseAttribute, out BehaviorTransformDefinition behaviorMapDefinition))
+        {
+            JObject? behaviorMapSourceJson = GetTransformSourceJson(entry);
+            string? typedKey = string.IsNullOrWhiteSpace(_transformBehaviorMapKey) ? null : _transformBehaviorMapKey.Trim();
+            return BehaviorTransformSlotExists(behaviorMapSourceJson, behaviorMapDefinition, typedKey)
+                ? TransformApplicabilityResult.Applicable($"{behaviorMapDefinition.DisplayName} behavior map entry exists.")
+                : TransformApplicabilityResult.NotApplicable($"{behaviorMapDefinition.DisplayName} behavior map entry was not found.");
+        }
+
         if (IsGeneralTransformContext(baseAttribute))
         {
             return TransformApplicabilityResult.Applicable("General held/inventory transform context.");
@@ -771,10 +813,10 @@ public sealed partial class DebugWindowManager
                 EnsureTransformAssetsIndexed();
             }
 
-            bool useTypedSlot = _transformUseTypedSlot;
-            if (ImGui.Checkbox("Typed map##transform-use-typed-global", ref useTypedSlot))
+            _transformSlotModeIndex = Math.Clamp(_transformSlotModeIndex, 0, TransformSlotModeLabels.Length - 1);
+            if (ImGui.Combo("Slot type##transform-slot-mode-global", ref _transformSlotModeIndex, TransformSlotModeLabels, TransformSlotModeLabels.Length))
             {
-                _transformUseTypedSlot = useTypedSlot;
+                _transformUseTypedSlot = CurrentTransformSlotMode == TransformSlotMode.TypedAttribute;
                 _transformPreviewCacheKey = "";
                 RebuildVisibleTransformAssets();
             }
@@ -859,20 +901,63 @@ public sealed partial class DebugWindowManager
     private bool DrawTransformContextSelector()
     {
         bool changed = false;
-        if (!_transformUseTypedSlot)
+        switch (CurrentTransformSlotMode)
         {
-            _transformDirectSlotIndex = Math.Clamp(_transformDirectSlotIndex, 0, DirectTransformAttributeCodes.Length - 1);
-            ImGui.SetNextItemWidth(-1);
-            changed |= ImGui.Combo("Context##transform-direct-slot-global", ref _transformDirectSlotIndex, DirectTransformAttributeCodes, DirectTransformAttributeCodes.Length);
-            return changed;
+            case TransformSlotMode.Attribute:
+                _transformDirectSlotIndex = Math.Clamp(_transformDirectSlotIndex, 0, DirectTransformAttributeCodes.Length - 1);
+                ImGui.SetNextItemWidth(-1);
+                changed |= ImGui.Combo("Context##transform-direct-slot-global", ref _transformDirectSlotIndex, DirectTransformAttributeCodes, DirectTransformAttributeCodes.Length);
+                break;
+
+            case TransformSlotMode.TypedAttribute:
+                _transformTypedMapIndex = Math.Clamp(_transformTypedMapIndex, 0, TypedTransformAttributeCodes.Length - 1);
+                ImGui.SetNextItemWidth(-1);
+                changed |= ImGui.Combo("Context map##transform-typed-map-global", ref _transformTypedMapIndex, TypedTransformAttributeCodes, TypedTransformAttributeCodes.Length);
+                ImGui.SetNextItemWidth(-1);
+                changed |= ImGui.InputTextWithHint("Key##transform-typed-key-global", "type key", ref _transformTypedKey, 120);
+                break;
+
+            case TransformSlotMode.Behavior:
+                _transformBehaviorTransformIndex = Math.Clamp(_transformBehaviorTransformIndex, 0, BehaviorTransformDefinitions.Length - 1);
+                ImGui.SetNextItemWidth(-1);
+                changed |= ImGui.Combo(
+                    "Behavior transform##transform-behavior-global",
+                    ref _transformBehaviorTransformIndex,
+                    BehaviorTransformDefinitions.Select(definition => definition.DisplayName).ToArray(),
+                    BehaviorTransformDefinitions.Length);
+                break;
+
+            case TransformSlotMode.BehaviorMap:
+                _transformBehaviorMapIndex = Math.Clamp(_transformBehaviorMapIndex, 0, BehaviorMapTransformDefinitions.Length - 1);
+                ImGui.SetNextItemWidth(-1);
+                changed |= ImGui.Combo(
+                    "Behavior map##transform-behavior-map-global",
+                    ref _transformBehaviorMapIndex,
+                    BehaviorMapTransformDefinitions.Select(definition => definition.DisplayName).ToArray(),
+                    BehaviorMapTransformDefinitions.Length);
+                DrawBehaviorMapKeySelector(SelectedTransformAsset, BehaviorMapTransformDefinitions[_transformBehaviorMapIndex], ref changed);
+                break;
         }
 
-        _transformTypedMapIndex = Math.Clamp(_transformTypedMapIndex, 0, TypedTransformAttributeCodes.Length - 1);
-        ImGui.SetNextItemWidth(-1);
-        changed |= ImGui.Combo("Context map##transform-typed-map-global", ref _transformTypedMapIndex, TypedTransformAttributeCodes, TypedTransformAttributeCodes.Length);
-        ImGui.SetNextItemWidth(-1);
-        changed |= ImGui.InputTextWithHint("Key##transform-typed-key-global", "type key", ref _transformTypedKey, 120);
         return changed;
+    }
+
+    private void DrawBehaviorMapKeySelector(TransformAssetEntry? asset, BehaviorTransformDefinition definition, ref bool changed)
+    {
+        string[] keys = asset == null ? [] : GetBehaviorTransformMapKeys(asset, definition).ToArray();
+        if (keys.Length > 0)
+        {
+            int keyIndex = Math.Max(0, Array.IndexOf(keys, _transformBehaviorMapKey));
+            ImGui.SetNextItemWidth(-1);
+            if (ImGui.Combo("Existing key##transform-behavior-map-key-combo", ref keyIndex, keys, keys.Length))
+            {
+                _transformBehaviorMapKey = keys[keyIndex];
+                changed = true;
+            }
+        }
+
+        ImGui.SetNextItemWidth(-1);
+        changed |= ImGui.InputTextWithHint("Key##transform-behavior-map-key-global", "stored item wildcard", ref _transformBehaviorMapKey, 180);
     }
 
     private void DrawTransformsViewport(NVector2 size)
@@ -1304,10 +1389,11 @@ public sealed partial class DebugWindowManager
         string status = _liveApplyManager.Apply(
             liveKey,
             asset.Label,
-            () => CaptureTransformLiveSnapshot(asset),
+            () => CaptureTransformLiveSnapshot(asset, slot),
             () =>
             {
-                if (slot.TypedKey == null) ApplyDirectTransformAttribute(asset.Collectible, slot.AttributeCode, transform);
+                if (IsBehaviorTransformSlot(slot)) ApplyBehaviorTransformRuntime(asset.Collectible, slot, transform);
+                else if (slot.TypedKey == null) ApplyDirectTransformAttribute(asset.Collectible, slot.AttributeCode, transform);
                 else ApplyTypedTransformAttribute(asset.Collectible, slot.AttributeCode, slot.TypedKey, transform);
             },
             $"Live applied {slot.DisplayName} for {asset.Label}.");
@@ -1351,8 +1437,21 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private LivePatchSnapshot CaptureTransformLiveSnapshot(TransformAssetEntry asset)
+    private LivePatchSnapshot CaptureTransformLiveSnapshot(TransformAssetEntry asset, TransformSlotSelection slot)
     {
+        if (IsBehaviorTransformSlot(slot))
+        {
+            ModelTransform? originalTransform = ReadTransform(asset, slot)?.Clone();
+            return new(
+                () =>
+                {
+                    if (originalTransform != null) ApplyBehaviorTransformRuntime(asset.Collectible, slot, originalTransform);
+                },
+                Path.Combine("assets", asset.Domain, "runtime-transforms", asset.Collectible.Code.Path.Replace('/', '_') + ".json"),
+                () => JsonUtil.ToPrettyString(originalTransform ?? CreateDefaultTransform()),
+                "transforms");
+        }
+
         JToken? original = asset.Collectible.Attributes?.Token?.DeepClone();
         return new(
             () => asset.Collectible.Attributes = original == null ? null : new JsonObject(original.DeepClone()),
@@ -2524,6 +2623,11 @@ public sealed partial class DebugWindowManager
 
     private ModelTransform? ReadTransform(TransformAssetEntry asset, TransformSlotSelection slot)
     {
+        if (TryReadBehaviorTransform(asset, slot, out ModelTransform? behaviorTransform))
+        {
+            return behaviorTransform;
+        }
+
         if (slot.TypedKey == null)
         {
             return asset.Collectible.Attributes?[slot.AttributeCode].AsObject<ModelTransform>()?.Clone();
@@ -2535,8 +2639,151 @@ public sealed partial class DebugWindowManager
 
     private bool TransformSlotExists(TransformAssetEntry asset, TransformSlotSelection slot)
     {
+        if (TryGetBehaviorTransformDefinition(slot.AttributeCode, out BehaviorTransformDefinition behaviorDefinition))
+        {
+            return BehaviorTransformSlotExists(GetTransformSourceJson(asset), behaviorDefinition, typedKey: null);
+        }
+
+        if (TryGetBehaviorMapTransformDefinition(slot.AttributeCode, out BehaviorTransformDefinition behaviorMapDefinition))
+        {
+            return BehaviorTransformSlotExists(GetTransformSourceJson(asset), behaviorMapDefinition, slot.TypedKey);
+        }
+
         if (slot.TypedKey == null) return asset.Collectible.Attributes?[slot.AttributeCode].Exists == true;
         return asset.Collectible.Attributes?[slot.AttributeCode].Token is JObject map && map[slot.TypedKey] != null;
+    }
+
+    private bool TryReadBehaviorTransform(TransformAssetEntry asset, TransformSlotSelection slot, out ModelTransform? transform)
+    {
+        transform = null;
+        JObject? sourceJson = GetTransformSourceJson(asset);
+        if (TryGetBehaviorTransformDefinition(slot.AttributeCode, out BehaviorTransformDefinition behaviorDefinition))
+        {
+            return TryReadBehaviorTransform(sourceJson, behaviorDefinition, typedKey: null, out transform);
+        }
+
+        if (TryGetBehaviorMapTransformDefinition(slot.AttributeCode, out BehaviorTransformDefinition behaviorMapDefinition))
+        {
+            return TryReadBehaviorTransform(sourceJson, behaviorMapDefinition, slot.TypedKey, out transform);
+        }
+
+        return false;
+    }
+
+    private static bool TryReadBehaviorTransform(JObject? sourceJson, BehaviorTransformDefinition definition, string? typedKey, out ModelTransform? transform)
+    {
+        transform = null;
+        if (!TryGetBehaviorTransformToken(sourceJson, definition, typedKey, out JToken? token)) return false;
+
+        transform = new JsonObject(token).AsObject<ModelTransform>()?.Clone();
+        transform?.EnsureDefaultValues();
+        return transform != null;
+    }
+
+    private static bool BehaviorTransformSlotExists(JObject? sourceJson, BehaviorTransformDefinition definition, string? typedKey)
+    {
+        if (definition.IsMap && string.IsNullOrWhiteSpace(typedKey))
+        {
+            string leafProperty = definition.RequiredLeafProperty;
+            return TryGetBehaviorProperties(sourceJson, definition.BehaviorName, out JObject properties) &&
+                   TryGetNestedObject(properties, definition.PropertyPath, out JObject map) &&
+                   map.Properties().Any(property => property.Value is JObject value && value[leafProperty] != null);
+        }
+
+        return TryGetBehaviorTransformToken(sourceJson, definition, typedKey, out _);
+    }
+
+    private static bool TryGetBehaviorTransformToken(JObject? sourceJson, BehaviorTransformDefinition definition, string? typedKey, out JToken? token)
+    {
+        token = null;
+        if (!TryGetBehaviorProperties(sourceJson, definition.BehaviorName, out JObject properties)) return false;
+
+        if (!definition.IsMap)
+        {
+            token = GetNestedToken(properties, definition.PropertyPath);
+            return token != null;
+        }
+
+        if (string.IsNullOrWhiteSpace(typedKey)) return false;
+        if (!TryGetNestedObject(properties, definition.PropertyPath, out JObject map)) return false;
+        if (map[typedKey] is not JObject entry) return false;
+
+        token = entry[definition.RequiredLeafProperty];
+        return token != null;
+    }
+
+    private IEnumerable<string> GetBehaviorTransformMapKeys(TransformAssetEntry asset, BehaviorTransformDefinition definition)
+    {
+        JObject? sourceJson = GetTransformSourceJson(asset);
+        if (!TryGetBehaviorProperties(sourceJson, definition.BehaviorName, out JObject properties)) yield break;
+        if (!TryGetNestedObject(properties, definition.PropertyPath, out JObject map)) yield break;
+
+        foreach (JProperty property in map.Properties())
+        {
+            if (property.Value is JObject value && value[definition.RequiredLeafProperty] != null)
+            {
+                yield return property.Name;
+            }
+        }
+    }
+
+    private static bool TryGetBehaviorProperties(JObject? sourceJson, string behaviorName, out JObject properties)
+    {
+        properties = null!;
+        if (sourceJson?["behaviors"] is not JArray behaviors) return false;
+
+        foreach (JToken behaviorToken in behaviors)
+        {
+            if (behaviorToken is not JObject behaviorObject) continue;
+            string? name = TryGetProperty(behaviorObject, "name", out JToken? nameToken) ? nameToken.Value<string>() : null;
+            if (!BehaviorNameEquals(name, behaviorName)) continue;
+
+            if (behaviorObject["properties"] is not JObject behaviorProperties) return false;
+            properties = behaviorProperties;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetNestedObject(JObject? root, IReadOnlyList<string> path, out JObject result)
+    {
+        result = null!;
+        JToken? token = GetNestedToken(root, path);
+        if (token is not JObject obj) return false;
+
+        result = obj;
+        return true;
+    }
+
+    private static JToken? GetNestedToken(JObject? root, IReadOnlyList<string> path)
+    {
+        if (root == null) return null;
+        JToken? current = root;
+        foreach (string segment in path)
+        {
+            if (current is not JObject obj) return null;
+            current = obj[segment];
+        }
+
+        return current;
+    }
+
+    private static JObject EnsureNestedObject(JObject root, IReadOnlyList<string> path)
+    {
+        JObject current = root;
+        foreach (string segment in path)
+        {
+            if (current[segment] is not JObject child)
+            {
+                child = new JObject();
+                current[segment] = child;
+            }
+
+            current = child;
+        }
+
+        return current;
     }
 
     private void MarkTransformDirty(TransformAssetEntry asset, TransformSlotSelection slot)
@@ -2608,11 +2855,41 @@ public sealed partial class DebugWindowManager
     {
         if (!_transformGroupEdit)
         {
+            if (IsBehaviorTransformSlot(slot))
+            {
+                return TrySaveBehaviorTransformToSource(asset, slot, GetTransformDraft(asset, slot));
+            }
+
             return TrySaveTransformToSource(asset.Collectible, slot.AttributeCode, GetTransformDraft(asset, slot), slot.TypedKey);
         }
 
         List<(TransformAssetEntry Asset, TransformSlotSelection Slot)> targets = GetTransformEditTargets(asset, slot, out int skipped);
         return TrySaveTransformTargetsToSource(asset, slot, targets, skipped);
+    }
+
+    private SourceSaveResult TrySaveBehaviorTransformToSource(TransformAssetEntry asset, TransformSlotSelection slot, ModelTransform transform)
+    {
+        try
+        {
+            TransformSourceSaveFile file = GetOrCreateTransformSourceSaveFile([], asset);
+            if (!TryApplyBehaviorTransformToSourceDocument(file.Json, slot, transform))
+            {
+                return SourceSaveResult.Fail($"Save failed for {asset.Collectible.Code}: behavior transform slot was not recognized.");
+            }
+
+            file.NewText = JsonUtil.ToPrettyString(file.Json);
+            SourceSaveRequest request = new(
+                file.OutputPath,
+                file.OldText,
+                file.NewText,
+                $"Saved authored {slot.DisplayName} to {file.OutputPath}.",
+                () => WriteAuthoredFile(file.OutputPath, file.NewText));
+            return SourceSaveResult.Preview(request);
+        }
+        catch (Exception exception)
+        {
+            return SourceSaveResult.Fail($"Save failed for {asset.Collectible.Code}: {exception.Message}");
+        }
     }
 
     private SourceSaveResult TrySaveTransformTargetsToSource(
@@ -2632,7 +2909,7 @@ public sealed partial class DebugWindowManager
             foreach ((TransformAssetEntry targetAsset, TransformSlotSelection targetSlot) in targets)
             {
                 TransformSourceSaveFile file = GetOrCreateTransformSourceSaveFile(files, targetAsset);
-                ApplyTransformToSourceDocument(file.Json, targetSlot.AttributeCode, GetTransformDraft(targetAsset, targetSlot), targetSlot.TypedKey);
+                ApplyTransformToSourceDocument(file.Json, targetSlot, GetTransformDraft(targetAsset, targetSlot));
             }
 
             if (files.Count == 0)
@@ -2706,6 +2983,73 @@ public sealed partial class DebugWindowManager
         return file;
     }
 
+    private static void ApplyTransformToSourceDocument(JObject json, TransformSlotSelection slot, ModelTransform transform)
+    {
+        if (TryApplyBehaviorTransformToSourceDocument(json, slot, transform))
+        {
+            return;
+        }
+
+        ApplyTransformToSourceDocument(json, slot.AttributeCode, transform, slot.TypedKey);
+    }
+
+    private static bool TryApplyBehaviorTransformToSourceDocument(JObject json, TransformSlotSelection slot, ModelTransform transform)
+    {
+        BehaviorTransformDefinition definition;
+        if (TryGetBehaviorTransformDefinition(slot.AttributeCode, out BehaviorTransformDefinition directDefinition))
+        {
+            definition = directDefinition;
+        }
+        else if (TryGetBehaviorMapTransformDefinition(slot.AttributeCode, out BehaviorTransformDefinition mapDefinition))
+        {
+            definition = mapDefinition;
+        }
+        else
+        {
+            return false;
+        }
+
+        JObject behaviorObject = EnsureBehaviorObject(json, definition.BehaviorName);
+        JObject properties = behaviorObject["properties"] as JObject ?? new JObject();
+        behaviorObject["properties"] = properties;
+
+        if (!definition.IsMap)
+        {
+            JObject parent = EnsureNestedObject(properties, definition.PropertyPath[..^1]);
+            parent[definition.PropertyPath[^1]] = TransformToToken(transform);
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(slot.TypedKey)) return false;
+
+        JObject map = EnsureNestedObject(properties, definition.PropertyPath);
+        JObject entry = map[slot.TypedKey] as JObject ?? new JObject();
+        entry[definition.RequiredLeafProperty] = TransformToToken(transform);
+        map[slot.TypedKey] = entry;
+        return true;
+    }
+
+    private static JObject EnsureBehaviorObject(JObject json, string behaviorName)
+    {
+        JArray behaviors = json["behaviors"] as JArray ?? new JArray();
+        json["behaviors"] = behaviors;
+
+        foreach (JToken behaviorToken in behaviors)
+        {
+            if (behaviorToken is not JObject behaviorObject) continue;
+            string? name = TryGetProperty(behaviorObject, "name", out JToken? nameToken) ? nameToken.Value<string>() : null;
+            if (BehaviorNameEquals(name, behaviorName)) return behaviorObject;
+        }
+
+        JObject created = new()
+        {
+            ["name"] = behaviorName,
+            ["properties"] = new JObject()
+        };
+        behaviors.Add(created);
+        return created;
+    }
+
     private static void ApplyTransformToSourceDocument(JObject json, string attributeCode, ModelTransform transform, string? typedKey)
     {
         JObject attributes = json["attributes"] as JObject ?? new JObject();
@@ -2721,6 +3065,149 @@ public sealed partial class DebugWindowManager
         }
 
         json["attributes"] = attributes;
+    }
+
+    private static void ApplyBehaviorTransformRuntime(CollectibleObject collectible, TransformSlotSelection slot, ModelTransform transform)
+    {
+        BehaviorTransformDefinition definition;
+        if (TryGetBehaviorTransformDefinition(slot.AttributeCode, out BehaviorTransformDefinition directDefinition))
+        {
+            definition = directDefinition;
+        }
+        else if (TryGetBehaviorMapTransformDefinition(slot.AttributeCode, out BehaviorTransformDefinition mapDefinition))
+        {
+            definition = mapDefinition;
+        }
+        else
+        {
+            throw new InvalidOperationException($"Unknown behavior transform slot {slot.AttributeCode}.");
+        }
+
+        object behavior = FindRuntimeBehavior(collectible, definition.BehaviorName)
+            ?? throw new InvalidOperationException($"Runtime behavior {definition.BehaviorName} was not found on {collectible.Code}.");
+        object config = behavior.GetType().GetProperty("Config")?.GetValue(behavior)
+            ?? throw new InvalidOperationException($"Runtime behavior {definition.BehaviorName} has no Config object.");
+
+        if (!definition.IsMap)
+        {
+            SetRuntimeObjectTransform(config, definition.PropertyPath, transform);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(slot.TypedKey))
+        {
+            throw new InvalidOperationException("Behavior map transform requires a key.");
+        }
+
+        object map = GetRuntimeObjectProperty(config, definition.PropertyPath)
+            ?? throw new InvalidOperationException($"Runtime behavior map {string.Join(".", definition.PropertyPath)} was not found.");
+        object entry = GetRuntimeDictionaryValue(map, slot.TypedKey)
+            ?? throw new InvalidOperationException($"Runtime behavior map key {slot.TypedKey} was not found.");
+        SetRuntimeObjectTransform(entry, [definition.RequiredLeafProperty], transform);
+    }
+
+    private static object? FindRuntimeBehavior(CollectibleObject collectible, string behaviorName)
+    {
+        object? behaviors = collectible.GetType().GetProperty("CollectibleBehaviors")?.GetValue(collectible)
+            ?? collectible.GetType().GetField("CollectibleBehaviors")?.GetValue(collectible);
+
+        if (behaviors is System.Collections.IEnumerable enumerable)
+        {
+            foreach (object? behavior in enumerable)
+            {
+                if (behavior != null && RuntimeBehaviorNameMatches(behavior, behaviorName))
+                {
+                    return behavior;
+                }
+            }
+        }
+
+        string simpleName = GetBehaviorSimpleName(behaviorName);
+        Type? behaviorType = AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(SafeGetAssemblyTypes)
+            .FirstOrDefault(type => RuntimeBehaviorTypeMatches(type, simpleName));
+        return behaviorType == null ? null : collectible.GetCollectibleBehavior(behaviorType, true);
+    }
+
+    private static IEnumerable<Type> SafeGetAssemblyTypes(System.Reflection.Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (System.Reflection.ReflectionTypeLoadException exception)
+        {
+            return exception.Types.OfType<Type>();
+        }
+    }
+
+    private static bool RuntimeBehaviorNameMatches(object behavior, string behaviorName)
+    {
+        return RuntimeBehaviorTypeMatches(behavior.GetType(), GetBehaviorSimpleName(behaviorName));
+    }
+
+    private static bool RuntimeBehaviorTypeMatches(Type type, string simpleName)
+    {
+        return type.Name.Equals(simpleName, StringComparison.OrdinalIgnoreCase) ||
+               type.Name.Equals(simpleName + "Behavior", StringComparison.OrdinalIgnoreCase) ||
+               (type.FullName?.EndsWith("." + simpleName, StringComparison.OrdinalIgnoreCase) ?? false) ||
+               (type.FullName?.EndsWith("." + simpleName + "Behavior", StringComparison.OrdinalIgnoreCase) ?? false);
+    }
+
+    private static string GetBehaviorSimpleName(string behaviorName)
+    {
+        int colon = behaviorName.IndexOf(':');
+        return colon >= 0 ? behaviorName[(colon + 1)..] : behaviorName;
+    }
+
+    private static object? GetRuntimeObjectProperty(object instance, IReadOnlyList<string> path)
+    {
+        object? current = instance;
+        foreach (string segment in path)
+        {
+            if (current == null) return null;
+            System.Reflection.PropertyInfo? property = current.GetType().GetProperties()
+                .FirstOrDefault(candidate => candidate.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
+            current = property?.GetValue(current);
+        }
+
+        return current;
+    }
+
+    private static void SetRuntimeObjectTransform(object instance, IReadOnlyList<string> path, ModelTransform transform)
+    {
+        if (path.Count == 0) throw new InvalidOperationException("Runtime transform path is empty.");
+
+        object? parent = path.Count == 1 ? instance : GetRuntimeObjectProperty(instance, path.Take(path.Count - 1).ToArray());
+        if (parent == null) throw new InvalidOperationException($"Runtime transform path {string.Join(".", path)} was not found.");
+
+        string propertyName = path[^1];
+        System.Reflection.PropertyInfo property = parent.GetType().GetProperties()
+            .FirstOrDefault(candidate => candidate.Name.Equals(propertyName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"Runtime transform property {propertyName} was not found.");
+        property.SetValue(parent, transform.Clone());
+    }
+
+    private static object? GetRuntimeDictionaryValue(object dictionary, string key)
+    {
+        Type type = dictionary.GetType();
+        System.Reflection.MethodInfo? tryGetValue = type.GetMethod("TryGetValue");
+        if (tryGetValue != null)
+        {
+            object?[] parameters = [key, null];
+            bool found = (bool)(tryGetValue.Invoke(dictionary, parameters) ?? false);
+            return found ? parameters[1] : null;
+        }
+
+        System.Reflection.PropertyInfo? indexer = type.GetProperty("Item");
+        try
+        {
+            return indexer?.GetValue(dictionary, [key]);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string BuildTransformGroupSavePreview(IEnumerable<TransformSourceSaveFile> files, bool oldText)
@@ -2779,26 +3266,52 @@ public sealed partial class DebugWindowManager
         if (asset == null) return null;
         string attributeCode = GetSelectedTransformAttributeCode();
         string? typedKey = GetSelectedTransformTypedKey();
-        return _transformUseTypedSlot && string.IsNullOrWhiteSpace(typedKey)
+        return RequiresTransformTypedKey(attributeCode) && string.IsNullOrWhiteSpace(typedKey)
             ? null
             : new TransformSlotSelection(asset, attributeCode, typedKey);
     }
 
     private string GetSelectedTransformAttributeCode()
     {
-        if (!_transformUseTypedSlot)
+        switch (CurrentTransformSlotMode)
         {
-            _transformDirectSlotIndex = Math.Clamp(_transformDirectSlotIndex, 0, DirectTransformAttributeCodes.Length - 1);
-            return DirectTransformAttributeCodes[_transformDirectSlotIndex];
-        }
+            case TransformSlotMode.Attribute:
+                _transformDirectSlotIndex = Math.Clamp(_transformDirectSlotIndex, 0, DirectTransformAttributeCodes.Length - 1);
+                return DirectTransformAttributeCodes[_transformDirectSlotIndex];
 
-        _transformTypedMapIndex = Math.Clamp(_transformTypedMapIndex, 0, TypedTransformAttributeCodes.Length - 1);
-        return TypedTransformAttributeCodes[_transformTypedMapIndex];
+            case TransformSlotMode.TypedAttribute:
+                _transformTypedMapIndex = Math.Clamp(_transformTypedMapIndex, 0, TypedTransformAttributeCodes.Length - 1);
+                return TypedTransformAttributeCodes[_transformTypedMapIndex];
+
+            case TransformSlotMode.Behavior:
+                _transformBehaviorTransformIndex = Math.Clamp(_transformBehaviorTransformIndex, 0, BehaviorTransformDefinitions.Length - 1);
+                return BehaviorTransformDefinitions[_transformBehaviorTransformIndex].Code;
+
+            case TransformSlotMode.BehaviorMap:
+                _transformBehaviorMapIndex = Math.Clamp(_transformBehaviorMapIndex, 0, BehaviorMapTransformDefinitions.Length - 1);
+                return BehaviorMapTransformDefinitions[_transformBehaviorMapIndex].Code;
+
+            default:
+                return DirectTransformAttributeCodes[0];
+        }
     }
 
     private string? GetSelectedTransformTypedKey()
     {
-        return _transformUseTypedSlot && !string.IsNullOrWhiteSpace(_transformTypedKey) ? _transformTypedKey.Trim() : null;
+        return CurrentTransformSlotMode switch
+        {
+            TransformSlotMode.TypedAttribute when !string.IsNullOrWhiteSpace(_transformTypedKey) => _transformTypedKey.Trim(),
+            TransformSlotMode.BehaviorMap when !string.IsNullOrWhiteSpace(_transformBehaviorMapKey) => _transformBehaviorMapKey.Trim(),
+            _ => null
+        };
+    }
+
+    private TransformSlotMode CurrentTransformSlotMode => (TransformSlotMode)Math.Clamp(_transformSlotModeIndex, 0, TransformSlotModeLabels.Length - 1);
+
+    private static bool RequiresTransformTypedKey(string attributeCode)
+    {
+        return TypedTransformAttributeCodes.Contains(attributeCode, StringComparer.OrdinalIgnoreCase) ||
+               TryGetBehaviorMapTransformDefinition(attributeCode, out _);
     }
 
     private IEnumerable<string> GetTypedTransformKeys(TransformAssetEntry asset, string attributeCode)
@@ -3100,8 +3613,68 @@ public sealed partial class DebugWindowManager
     private sealed record TransformSlotSelection(TransformAssetEntry Asset, string AttributeCode, string? TypedKey)
     {
         public string Key => $"{Asset.Key}|{AttributeCode}|{TypedKey ?? ""}";
-        public string DisplayName => TypedKey == null ? AttributeCode : $"{AttributeCode} / {TypedKey}";
+        public string DisplayName
+        {
+            get
+            {
+                if (TryGetBehaviorTransformDefinition(AttributeCode, out BehaviorTransformDefinition behaviorDefinition))
+                {
+                    return behaviorDefinition.DisplayName;
+                }
+
+                if (TryGetBehaviorMapTransformDefinition(AttributeCode, out BehaviorTransformDefinition behaviorMapDefinition))
+                {
+                    return TypedKey == null ? behaviorMapDefinition.DisplayName : $"{behaviorMapDefinition.DisplayName} / {TypedKey}";
+                }
+
+                return TypedKey == null ? AttributeCode : $"{AttributeCode} / {TypedKey}";
+            }
+        }
         public bool CanSaveToSource => true;
+    }
+
+    private enum TransformSlotMode
+    {
+        Attribute,
+        TypedAttribute,
+        Behavior,
+        BehaviorMap
+    }
+
+    private sealed record BehaviorTransformDefinition(
+        string Code,
+        string BehaviorName,
+        string[] PropertyPath,
+        string DisplayName,
+        string? LeafProperty = null)
+    {
+        public bool IsMap => LeafProperty != null;
+        public string RequiredLeafProperty => LeafProperty ?? throw new InvalidOperationException($"Behavior transform definition {Code} has no leaf property.");
+    }
+
+    private static bool IsBehaviorTransformSlot(TransformSlotSelection slot)
+    {
+        return TryGetBehaviorTransformDefinition(slot.AttributeCode, out _) ||
+               TryGetBehaviorMapTransformDefinition(slot.AttributeCode, out _);
+    }
+
+    private static bool TryGetBehaviorTransformDefinition(string code, out BehaviorTransformDefinition definition)
+    {
+        BehaviorTransformDefinition? found = BehaviorTransformDefinitions.FirstOrDefault(definition => definition.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+        definition = found!;
+        return found != null;
+    }
+
+    private static bool TryGetBehaviorMapTransformDefinition(string code, out BehaviorTransformDefinition definition)
+    {
+        BehaviorTransformDefinition? found = BehaviorMapTransformDefinitions.FirstOrDefault(definition => definition.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+        definition = found!;
+        return found != null;
+    }
+
+    private static bool BehaviorNameEquals(string? left, string right)
+    {
+        return left != null && left.Equals(right, StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed record TransformReferenceResolution(Block? Block, string Code, string Reason, bool IsManual, TransformPreviewGuideKind GuideKind);

@@ -2,7 +2,7 @@
   <PropertyGroup>
     <ModName>ingamedevtools</ModName>
     <ModType>code</ModType>
-    <ModVersion>0.3.0</ModVersion>
+    <ModVersion>0.3.1</ModVersion>
     <ModId>ingamedevtools</ModId>
     <Description>Standalone client-side animation and in-game development tools.</Description>
     <Side>universal</Side>
@@ -49,6 +49,7 @@
     <ReleaseFile>$(ModId)_$(ModVersion)</ReleaseFile>
     <ReleasePath>$(ReleasesDir)\$(ReleaseFile).zip</ReleasePath>
     <ReleasePathDev>$(ReleasesDir)\$(ReleaseFile)_dev.zip</ReleasePathDev>
+    <Packager>$(ProjectDir)\scripts\package_zip.py</Packager>
     <GameDirectory Condition="'$(GameDirectory)' == ''">$(VINTAGE_STORY)</GameDirectory>
     <GameDirectory Condition="'$(GameDirectory)' == ''">$(AppData)\Vintagestory</GameDirectory>
     <ExternalLibDir>$(ProjectDir)\external</ExternalLibDir>
@@ -113,13 +114,13 @@
     <Message Text="Packaging into '$(ReleaseFile)'" Importance="high" />
     <MakeDir Directories="$(ReleasesDir)" />
     <Delete Files="$(ReleasePath)" />
-    <ZipDirectory SourceDirectory="$(OutputPath)" DestinationFile="$(ReleasePath)" />
+    <Exec Command="python &quot;$(Packager)&quot; &quot;$(OutputPath).&quot; &quot;$(ReleasePath)&quot;" />
   </Target>
 
   <Target Name="ZipFilesDev" AfterTargets="Build" Condition=" '$(Configuration)' == 'Debug' ">
     <Message Text="Packaging into '$(ReleaseFile)_dev'" Importance="high" />
     <MakeDir Directories="$(ReleasesDir)" />
     <Delete Files="$(ReleasePathDev)" />
-    <ZipDirectory SourceDirectory="$(OutputPath)" DestinationFile="$(ReleasePathDev)" />
+    <Exec Command="python &quot;$(Packager)&quot; &quot;$(OutputPath).&quot; &quot;$(ReleasePathDev)&quot;" />
   </Target>
 </Project>
