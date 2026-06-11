@@ -1577,6 +1577,7 @@ public class ParticleEffectsManager
 
     private string _particleFilter = "";
     private bool _previewLoop = true;
+    private bool _previewPaused;
     private ParticlePreviewMode _previewMode = ParticlePreviewMode.RuntimeBlockTick;
     private float _previewEmitRate = 1f;
     private float _previewIntensity = 1f;
@@ -1749,6 +1750,9 @@ public class ParticleEffectsManager
         }
 
         ImGui.SameLine();
+        ImGui.Checkbox($"Paused##particle-preview-{id}", ref _previewPaused);
+
+        ImGui.SameLine();
         ImGui.Checkbox($"Loop##particle-preview-{id}", ref _previewLoop);
 
         ImGui.Checkbox($"Reference model##particle-reference-{id}", ref _previewShowReferenceModel);
@@ -1760,24 +1764,22 @@ public class ParticleEffectsManager
 
         DrawManualReferencePicker(id, key);
 
-        bool runtimeRateControlsDisabled = useRuntimePreview;
+        bool runtimeEmitterControlsDisabled = useRuntimePreview;
         ImGui.SetNextItemWidth(110);
-        if (runtimeRateControlsDisabled) ImGui.BeginDisabled();
+        if (runtimeEmitterControlsDisabled) ImGui.BeginDisabled();
         ImGui.SliderFloat($"Rate##particle-preview-{id}", ref _previewEmitRate, 0.05f, 20f, "%.2f/s");
-        if (runtimeRateControlsDisabled) ImGui.EndDisabled();
+        if (runtimeEmitterControlsDisabled) ImGui.EndDisabled();
         ImGui.SameLine();
         ImGui.SetNextItemWidth(110);
-        if (runtimeRateControlsDisabled) ImGui.BeginDisabled();
+        if (runtimeEmitterControlsDisabled) ImGui.BeginDisabled();
         ImGui.SliderFloat($"Intensity##particle-preview-{id}", ref _previewIntensity, 0.05f, 8f, "%.2f");
-        if (runtimeRateControlsDisabled) ImGui.EndDisabled();
+        if (runtimeEmitterControlsDisabled) ImGui.EndDisabled();
         ImGui.SameLine();
         ImGui.SetNextItemWidth(110);
-        if (runtimeRateControlsDisabled) ImGui.BeginDisabled();
         ImGui.SliderFloat($"Speed##particle-preview-{id}", ref _previewTimeScale, 0.05f, 4f, "%.2fx");
-        if (runtimeRateControlsDisabled) ImGui.EndDisabled();
         if (useRuntimePreview)
         {
-            ImGui.TextDisabled($"Runtime block tick uses the engine {RuntimePreviewTickIntervalSeconds:0.000}s async cadence; rate, intensity, and speed are ignored.");
+            ImGui.TextDisabled($"Runtime block tick uses the engine {RuntimePreviewTickIntervalSeconds:0.000}s async cadence; rate and intensity are ignored.");
         }
 
         ImGui.SetNextItemWidth(110);
@@ -1811,29 +1813,25 @@ public class ParticleEffectsManager
             ImGui.TextDisabled("Uses Vintage Story ParticlePhysics against the current client world.");
         }
 
-        float dt = Math.Clamp(deltaSeconds, 0f, 0.1f) * (useRuntimePreview ? 1f : _previewTimeScale);
+        float dt = ParticlePreviewTiming.ScaleDelta(deltaSeconds, _previewTimeScale, _previewPaused);
         if (_previewLoop && dt > 0)
         {
             if (useRuntimePreview && runtimePreviewBlock != null)
             {
-                _previewEmitAccumulator += dt;
-                int ticks = 0;
-                while (_previewEmitAccumulator >= RuntimePreviewTickIntervalSeconds && ticks < 8)
+                int ticks = ParticlePreviewTiming.TakeRuntimeTicks(dt, ref _previewEmitAccumulator, RuntimePreviewTickIntervalSeconds, 8);
+                for (int tick = 0; tick < ticks; tick++)
                 {
                     EmitRuntimeBlockPreviewTick(selectedVariant, emitters, runtimePreviewBlock, _previewIntensity, runtimePreviewSource);
                     _previewRuntimeSeconds += RuntimePreviewTickIntervalSeconds;
-                    _previewEmitAccumulator -= RuntimePreviewTickIntervalSeconds;
-                    ticks++;
                 }
             }
             else
             {
                 Vector3 particleOrigin = GetPreviewParticleOrigin(key);
-                _previewEmitAccumulator += dt * _previewEmitRate;
-                while (_previewEmitAccumulator >= 1f)
+                int bursts = ParticlePreviewTiming.TakeEmitterBursts(dt, _previewEmitRate, ref _previewEmitAccumulator);
+                for (int burst = 0; burst < bursts; burst++)
                 {
                     EmitPreviewParticles(emitters, _previewIntensity, particleOrigin);
-                    _previewEmitAccumulator -= 1f;
                 }
             }
         }

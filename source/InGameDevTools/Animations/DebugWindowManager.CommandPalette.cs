@@ -224,6 +224,7 @@ public sealed partial class DebugWindowManager
 
         AddRuntimeCollectibleCommands(entries, normalizedFilter);
         AddRuntimeEntityCommands(entries, normalizedFilter);
+        AddModelShapeCommands(entries, normalizedFilter);
         AddRecipeCommands(entries, normalizedFilter);
         AddLootDropCommands(entries, normalizedFilter);
         AddWorldgenCommands(entries, normalizedFilter);
@@ -247,7 +248,7 @@ public sealed partial class DebugWindowManager
         foreach (DevToolsCommandPaletteEntry recent in _commandPaletteRecentEntries)
         {
             if (!DevToolsFuzzyMatch.Matches(recent.SearchText, filter)) continue;
-            combined.Add(recent with { Subtitle = $"Recent · {recent.Subtitle}".TrimEnd(' ', '·') });
+            combined.Add(recent with { Subtitle = $"Recent - {recent.Subtitle}".TrimEnd(' ', '-') });
         }
 
         foreach (DevToolsCommandPaletteEntry entry in entries)
@@ -324,6 +325,31 @@ public sealed partial class DebugWindowManager
             TryAddCommandPaletteEntry(entries, filter, $"Patch entity JSON {compact}", code, $"patch entity json {code}", DevToolsTab.Patches, () => JumpToPatchCreatorAsset($"entities/{entityType.Code.Path}.json", entityType.Code.Domain));
             if (entries.Count > 210) return;
         }
+    }
+
+    private void AddModelShapeCommands(List<DevToolsCommandPaletteEntry> entries, string filter)
+    {
+        EnsureModelShapeIndex();
+        foreach (ModelShapeAssetEntry entry in _modelShapeIndex ?? [])
+        {
+            string suffix = entry.Authored ? " [authored]" : "";
+            TryAddCommandPaletteEntry(
+                entries,
+                filter,
+                $"Model shape {entry.Domain}:{entry.AssetPath}{suffix}",
+                entry.Authored ? "Authored shape file" : "Shape asset",
+                $"model shape {entry.Domain}:{entry.AssetPath}",
+                DevToolsTab.Models,
+                () => JumpToModelShape(entry));
+            if (entries.Count > 210) return;
+        }
+    }
+
+    private void JumpToModelShape(ModelShapeAssetEntry entry)
+    {
+        RequestDevToolsTab(DevToolsTab.Models);
+        ModelRequestOpenDocument(entry);
+        _modelStatus = $"Opening {entry.Domain}:{entry.AssetPath} from command palette.";
     }
 
     private void AddRecipeCommands(List<DevToolsCommandPaletteEntry> entries, string filter)
