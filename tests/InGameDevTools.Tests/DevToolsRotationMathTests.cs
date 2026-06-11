@@ -130,6 +130,62 @@ public sealed class DevToolsRotationMathTests
         Assert.True(difference < Tolerance);
     }
 
+    [Theory]
+    [InlineData(0, 0, 0)]
+    [InlineData(0, 0, 90)]
+    [InlineData(30, 45, 60)]
+    [InlineData(-130, 25, 95)]
+    public void PivotCompensation_KeepsRenderedBoxFixedAndCentersPivot(double rotX, double rotY, double rotZ)
+    {
+        double[] rotation = DevToolsRotationMath.ComposeXyz(rotX, rotY, rotZ);
+        double[] from = [3, 1, -2];
+        double[] size = [4, 2, 6];
+        double[] oldOrigin = [0.5, -1, 2];
+        double[] center = [from[0] + size[0] / 2, from[1] + size[1] / 2, from[2] + size[2] / 2];
+
+        (double dx, double dy, double dz) = DevToolsRotationMath.PivotCompensation(
+            rotation,
+            oldOrigin[0], oldOrigin[1], oldOrigin[2],
+            center[0], center[1], center[2]);
+        double[] newFrom = [from[0] + dx, from[1] + dy, from[2] + dz];
+        double[] newOrigin = [center[0] + dx, center[1] + dy, center[2] + dz];
+
+        // The new pivot is exactly the center of the moved box fields.
+        Assert.Equal(newFrom[0] + size[0] / 2, newOrigin[0], 9);
+        Assert.Equal(newFrom[1] + size[1] / 2, newOrigin[1], 9);
+        Assert.Equal(newFrom[2] + size[2] / 2, newOrigin[2], 9);
+
+        // Every box corner renders at the same world position before and after.
+        for (int corner = 0; corner < 8; corner++)
+        {
+            double px = (corner & 1) == 0 ? 0 : size[0];
+            double py = (corner & 2) == 0 ? 0 : size[1];
+            double pz = (corner & 4) == 0 ? 0 : size[2];
+
+            (double ox, double oy, double oz) = DevToolsRotationMath.Apply(
+                rotation,
+                from[0] - oldOrigin[0] + px,
+                from[1] - oldOrigin[1] + py,
+                from[2] - oldOrigin[2] + pz);
+            (double nx, double ny, double nz) = DevToolsRotationMath.Apply(
+                rotation,
+                newFrom[0] - newOrigin[0] + px,
+                newFrom[1] - newOrigin[1] + py,
+                newFrom[2] - newOrigin[2] + pz);
+
+            Assert.Equal(oldOrigin[0] + ox, newOrigin[0] + nx, 9);
+            Assert.Equal(oldOrigin[1] + oy, newOrigin[1] + ny, 9);
+            Assert.Equal(oldOrigin[2] + oz, newOrigin[2] + nz, 9);
+        }
+
+        if (rotX == 0 && rotY == 0 && rotZ == 0)
+        {
+            Assert.Equal(0.0, dx, 9);
+            Assert.Equal(0.0, dy, 9);
+            Assert.Equal(0.0, dz, 9);
+        }
+    }
+
     [Fact]
     public void RotateAboutLocalAxis_SequentialDragsStayOnTheDrawnAxis()
     {

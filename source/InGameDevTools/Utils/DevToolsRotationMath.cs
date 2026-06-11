@@ -108,6 +108,42 @@ internal static class DevToolsRotationMath
         return DecomposeXyz(Multiply(start, delta));
     }
 
+    /// <summary>Applies the rotation matrix to a column vector.</summary>
+    public static (double X, double Y, double Z) Apply(double[] m, double x, double y, double z)
+    {
+        return (
+            m[0] * x + m[1] * y + m[2] * z,
+            m[3] * x + m[4] * y + m[5] * z,
+            m[6] * x + m[7] * y + m[8] * z);
+    }
+
+    /// <summary>Applies the transposed (= inverse, for rotations) matrix to a column vector.</summary>
+    public static (double X, double Y, double Z) ApplyTransposed(double[] m, double x, double y, double z)
+    {
+        return (
+            m[0] * x + m[3] * y + m[6] * z,
+            m[1] * x + m[4] * y + m[7] * z,
+            m[2] * x + m[5] * y + m[8] * z);
+    }
+
+    /// <summary>
+    /// From/To compensation for re-pivoting an element without moving its rendered box. The local
+    /// placement is x(p) = origin + R·(from − origin + p); shifting From/To by the returned d and
+    /// setting the origin to <paramref name="newOriginX"/>/Y/Z + d keeps every rendered point
+    /// fixed, with d = (R − I)·(newOrigin − oldOrigin).
+    /// </summary>
+    public static (double X, double Y, double Z) PivotCompensation(
+        double[] rotation,
+        double oldOriginX, double oldOriginY, double oldOriginZ,
+        double newOriginX, double newOriginY, double newOriginZ)
+    {
+        double vx = newOriginX - oldOriginX;
+        double vy = newOriginY - oldOriginY;
+        double vz = newOriginZ - oldOriginZ;
+        (double rx, double ry, double rz) = Apply(rotation, vx, vy, vz);
+        return (rx - vx, ry - vy, rz - vz);
+    }
+
     /// <summary>Largest absolute element difference between two 3x3 matrices.</summary>
     public static double MaxDifference(double[] a, double[] b)
     {

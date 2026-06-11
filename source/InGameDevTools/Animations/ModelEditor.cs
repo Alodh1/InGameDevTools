@@ -576,9 +576,27 @@ public sealed partial class DebugWindowManager
             ModelDuplicateSelectedElements();
         }
         ImGui.SameLine();
+        if (ImGui.SmallButton("Copy##model-selection-copy"))
+        {
+            ModelCopySelectedElementsToClipboard();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Copy selected element subtrees to the clipboard as shape JSON (Ctrl+C). Paste into this or another shape.");
+        }
+        ImGui.SameLine();
         if (ImGui.SmallButton("Delete##model-selection-delete"))
         {
             ModelDeleteSelectedElements();
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Center pivot##model-selection-center-pivot"))
+        {
+            ModelCenterPivotSelectedElements();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Move each selected element's rotation origin to its box center without moving the rendered box.");
         }
         ImGui.SameLine();
         if (ImGui.SmallButton("Mirror X##model-selection-mirror-x"))
@@ -600,6 +618,44 @@ public sealed partial class DebugWindowManager
         {
             ImGui.SetTooltip("Mirror selected top-level elements around the model origin on this axis. Selected descendants of selected parents are skipped to avoid double mirroring.");
         }
+
+        ImGui.SameLine();
+        if (!hasSelection) ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Isolate##model-selection-isolate"))
+        {
+            ModelIsolateSelectedElements();
+        }
+        if (!hasSelection) ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Hide everything except the selected subtrees in the viewport. Hidden elements still save.");
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Show all##model-selection-show-all"))
+        {
+            ModelShowAllElements();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Paste##model-selection-paste"))
+        {
+            ModelPasteElementsFromClipboard(_modelSelectedElement?.Parent);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Paste elements from clipboard shape JSON next to the selection, or at root level (Ctrl+V).");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Rename...##model-selection-rename"))
+        {
+            ImGui.OpenPopup("##model-batch-rename-popup");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Find/replace text in element names (selection or whole shape).");
+        }
+        DrawModelBatchRenamePopup();
     }
 
     private void DrawModelShortcutsPopup()
@@ -612,6 +668,8 @@ public sealed partial class DebugWindowManager
             ImGui.TextUnformatted("Ctrl+Shift+1..4   Select / Move / Resize / Rotate tool");
             ImGui.TextUnformatted("Ctrl+Z / Ctrl+Y   Undo / Redo");
             ImGui.TextUnformatted("Ctrl+D            Duplicate selected element");
+            ImGui.TextUnformatted("Ctrl+C            Copy selected elements as JSON");
+            ImGui.TextUnformatted("Ctrl+V            Paste elements from clipboard JSON");
             ImGui.TextUnformatted("Delete            Delete selected element");
             ImGui.TextUnformatted("Home              Focus camera on selection");
             ImGui.TextUnformatted("Hold Alt          Bypass snapping while dragging");
@@ -895,9 +953,21 @@ public sealed partial class DebugWindowManager
                 {
                     ModelDuplicateSelectedElements();
                 }
+                if (ImGui.MenuItem("Copy", "Ctrl+C"))
+                {
+                    ModelCopySelectedElementsToClipboard();
+                }
+                if (ImGui.MenuItem("Paste as child"))
+                {
+                    ModelPasteElementsFromClipboard(element);
+                }
                 if (ImGui.MenuItem("Delete", "Del"))
                 {
                     ModelDeleteSelectedElements();
+                }
+                if (ImGui.MenuItem("Center pivot (keep position)"))
+                {
+                    ModelCenterPivotSelectedElements();
                 }
                 if (ImGui.BeginMenu("Mirror selected"))
                 {
@@ -1477,6 +1547,14 @@ public sealed partial class DebugWindowManager
         else if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.D) && _modelSelectedElement != null)
         {
             ModelDuplicateSelectedElements();
+        }
+        else if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.C) && _modelSelectedElement != null)
+        {
+            ModelCopySelectedElementsToClipboard();
+        }
+        else if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.V) && _modelDoc != null)
+        {
+            ModelPasteElementsFromClipboard(_modelSelectedElement?.Parent);
         }
         else if (ImGui.IsKeyPressed(ImGuiKey.Delete) && _modelSelectedElement != null)
         {
