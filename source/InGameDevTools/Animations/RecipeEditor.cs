@@ -63,6 +63,54 @@ public sealed partial class DebugWindowManager
             "Other"
         ];
 
+        private static readonly string[] KnownVariantPlaceholderNames =
+        [
+            "ore",
+            "metal",
+            "wood",
+            "rock",
+            "color",
+            "lining",
+            "coating",
+            "plank",
+            "species",
+            "line",
+            "clayCovered"
+        ];
+
+        private static readonly HashSet<string> KnownRecipeSchemaProperties = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "name",
+            "code",
+            "enabled",
+            "requiresTrait",
+            "recipeGroup",
+            "recipegroup",
+            "shapeless",
+            "averageDurability",
+            "copyAttributesFrom",
+            "allowedVariants",
+            "skipVariants",
+            "ingredient",
+            "input",
+            "output",
+            "ingredients",
+            "inputs",
+            "outputs",
+            "ingredientPattern",
+            "pattern",
+            "width",
+            "height",
+            "duration",
+            "litres",
+            "sealHours",
+            "temperature",
+            "cooksInto",
+            "shape",
+            "perishableProps",
+            "isFood"
+        };
+
         private readonly List<RecipeDocument> _documents = [];
         private readonly List<RecipeEntry> _entries = [];
         private readonly List<RecipeEntry> _visibleEntries = [];
@@ -77,12 +125,14 @@ public sealed partial class DebugWindowManager
         private int _patternLayer;
         private string _newDomain = "game";
         private string _newName = "new-recipe";
+        private string _newVariantPlaceholderName = "";
         private int _newKindIndex;
         private string _rawBuffer = "";
         private string _rawBufferKey = "";
         private string[] _itemCodes = [];
         private string[] _blockCodes = [];
         private string[] _liquidCodes = [];
+        private readonly Dictionary<string, string> _jsonFieldBuffers = new(StringComparer.Ordinal);
         private readonly ImGuiThreePanelLayoutState _layout = new(0.24f, 0.30f);
         private readonly Dictionary<string, string> _stackCodeFilters = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _recipeLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
@@ -468,10 +518,29 @@ public sealed partial class DebugWindowManager
                 changed |= EditString(entry.Recipe, "name", "Name##recipe-common-name", 240);
                 changed |= EditString(entry.Recipe, "code", "Code##recipe-common-code", 240);
                 changed |= EditBool(entry.Recipe, "enabled", "Enabled##recipe-common-enabled", defaultValue: true);
-                changed |= EditStack(entry.Recipe, "ingredient", "Ingredient##recipe-common-ingredient");
-                changed |= EditStack(entry.Recipe, "output", "Output##recipe-common-output");
-                changed |= DrawArrayStackEditor(entry.Recipe, "ingredients", "Ingredients##recipe-common-ingredients");
-                changed |= DrawArrayStackEditor(entry.Recipe, "outputs", "Outputs##recipe-common-outputs");
+                changed |= EditOptionalString(entry.Recipe, "requiresTrait", "Requires trait##recipe-requires-trait");
+                changed |= EditOptionalInt(entry.Recipe, "recipeGroup", "Recipe group##recipe-group", 1, 9999, aliases: ["recipegroup"]);
+                changed |= EditOptionalBool(entry.Recipe, "shapeless", "Shapeless##recipe-shapeless", defaultValue: false);
+                changed |= EditOptionalBool(entry.Recipe, "averageDurability", "Average durability##recipe-average-durability", defaultValue: true);
+                changed |= EditOptionalString(entry.Recipe, "copyAttributesFrom", "Copy attributes from##recipe-copy-attributes");
+                changed |= EditOptionalString(entry.Recipe, "isFood", "Is food marker##recipe-is-food");
+                changed |= EditOptionalJsonToken(entry.Recipe, "allowedVariants", "Allowed variants JSON##recipe-allowed-variants", defaultToken: new JObject());
+                changed |= EditOptionalJsonToken(entry.Recipe, "skipVariants", "Skip variants JSON##recipe-skip-variants", defaultToken: new JObject());
+                changed |= DrawRecipeVariantPlaceholderEditor(entry.Recipe);
+                if (entry.Kind == RecipeEditorKind.Cooking)
+                {
+                    changed |= DrawCookingIngredientsEditor(entry.Recipe, "Ingredients##recipe-common-cooking-ingredients");
+                    changed |= EditStack(entry.Recipe, "cooksInto", "Cooks into##recipe-common-cooks-into");
+                    changed |= EditOptionalJsonToken(entry.Recipe, "shape", "Shape JSON##recipe-common-shape", defaultToken: new JObject { ["base"] = "block/food/meal/liquid" });
+                    changed |= EditOptionalJsonToken(entry.Recipe, "perishableProps", "Perishable props JSON##recipe-common-perishable", defaultToken: new JObject());
+                }
+                else
+                {
+                    changed |= EditStack(entry.Recipe, "ingredient", "Ingredient##recipe-common-ingredient");
+                    changed |= EditStack(entry.Recipe, "output", "Output##recipe-common-output");
+                    changed |= DrawArrayStackEditor(entry.Recipe, "ingredients", "Ingredients##recipe-common-ingredients");
+                    changed |= DrawArrayStackEditor(entry.Recipe, "outputs", "Outputs##recipe-common-outputs");
+                }
                 if (changed) MarkChanged(entry);
 
                 ImGui.SeparatorText("Raw JSON");
@@ -751,16 +820,87 @@ public sealed partial class DebugWindowManager
             ImGui.EndChild();
 
             bool changed = false;
-            changed |= EditStack(recipe, "ingredient", "Ingredient##flow-ingredient");
-            changed |= DrawArrayStackEditor(recipe, "ingredients", "Ingredients##flow-ingredients");
-            changed |= EditStack(recipe, "input", "Input##flow-input");
-            changed |= DrawArrayStackEditor(recipe, "inputs", "Inputs##flow-inputs");
-            changed |= EditStack(recipe, "output", "Output##flow-output");
-            changed |= DrawArrayStackEditor(recipe, "outputs", "Outputs##flow-outputs");
+            if (entry.Kind == RecipeEditorKind.Cooking)
+            {
+                changed |= DrawCookingIngredientsEditor(recipe, "Ingredients##flow-cooking-ingredients");
+                changed |= EditStack(recipe, "cooksInto", "Cooks into##flow-cooks-into");
+                changed |= EditOptionalJsonToken(recipe, "shape", "Shape JSON##flow-cooking-shape", defaultToken: new JObject { ["base"] = "block/food/meal/liquid" });
+                changed |= EditOptionalJsonToken(recipe, "perishableProps", "Perishable props JSON##flow-cooking-perishable", defaultToken: new JObject());
+            }
+            else
+            {
+                changed |= EditStack(recipe, "ingredient", "Ingredient##flow-ingredient");
+                changed |= DrawArrayStackEditor(recipe, "ingredients", "Ingredients##flow-ingredients");
+                changed |= EditStack(recipe, "input", "Input##flow-input");
+                changed |= DrawArrayStackEditor(recipe, "inputs", "Inputs##flow-inputs");
+                changed |= EditStack(recipe, "output", "Output##flow-output");
+                changed |= DrawArrayStackEditor(recipe, "outputs", "Outputs##flow-outputs");
+            }
             changed |= EditNumber(recipe, "litres", "Litres##flow-litres", 0, 10000);
             changed |= EditNumber(recipe, "duration", "Duration##flow-duration", 0, 100000);
+            changed |= EditNumber(recipe, "sealHours", "Seal hours##flow-seal-hours", 0, 100000);
             changed |= EditNumber(recipe, "temperature", "Temperature##flow-temperature", 0, 5000);
             if (changed) MarkChanged(entry);
+        }
+
+        private bool DrawCookingIngredientsEditor(JObject recipe, string label)
+        {
+            if (recipe["ingredients"] == null)
+            {
+                if (!ImGui.Button($"Add {label}")) return false;
+                recipe["ingredients"] = new JArray(DefaultCookingIngredient());
+                return true;
+            }
+
+            if (recipe["ingredients"] is not JArray array)
+            {
+                ImGui.TextDisabled($"{label}: not an array");
+                return false;
+            }
+
+            bool changed = false;
+            ImGui.SeparatorText(label);
+            for (int index = 0; index < array.Count; index++)
+            {
+                if (array[index] is not JObject ingredient) continue;
+                ImGui.PushID($"cooking-ingredient-{label}-{index}");
+                ImGui.Separator();
+                changed |= EditCookingIngredientFields(ingredient, $"{label}-{index}");
+                if (ImGui.Button("Remove##cooking-ingredient-remove"))
+                {
+                    array.RemoveAt(index);
+                    changed = true;
+                    ImGui.PopID();
+                    break;
+                }
+                ImGui.PopID();
+            }
+
+            if (ImGui.Button($"Add ingredient##{label}"))
+            {
+                array.Add(DefaultCookingIngredient());
+                changed = true;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove field##{label}"))
+            {
+                recipe.Remove("ingredients");
+                changed = true;
+            }
+            return changed;
+        }
+
+        private bool EditCookingIngredientFields(JObject ingredient, string label)
+        {
+            bool changed = false;
+            changed |= EditString(ingredient, "code", $"Code##cooking-code-{label}", 120);
+            changed |= EditOptionalString(ingredient, "typeName", $"Type name##cooking-type-name-{label}");
+            changed |= EditOptionalString(ingredient, "isFood", $"Is food marker##cooking-is-food-{label}");
+            changed |= EditOptionalInt(ingredient, "minQuantity", $"Min qty##cooking-min-{label}", 0, 9999);
+            changed |= EditOptionalInt(ingredient, "maxQuantity", $"Max qty##cooking-max-{label}", 0, 9999);
+            changed |= EditOptionalFloat(ingredient, "portionSizeLitres", $"Portion litres##cooking-portion-{label}", 0f, 10000f);
+            changed |= DrawArrayStackEditor(ingredient, "validStacks", $"Valid stacks##cooking-valid-stacks-{label}");
+            return changed;
         }
 
         private bool DrawIngredientMapEditor(JObject recipe, JObject ingredients, List<string> rows)
@@ -903,7 +1043,7 @@ public sealed partial class DebugWindowManager
             {
                 changed = true;
             }
-            string quantityProperty = stack["stacksize"] != null ? "stacksize" : "quantity";
+            string quantityProperty = FindFirstPropertyName(stack, "stacksize", "stackSize", "quantity") ?? "quantity";
             int quantity = stack[quantityProperty]?.Value<int?>() ?? 1;
             ImGui.SameLine();
             ImGui.SetNextItemWidth(70);
@@ -911,6 +1051,37 @@ public sealed partial class DebugWindowManager
             {
                 stack[quantityProperty] = Math.Max(1, quantity);
                 changed = true;
+            }
+
+            bool hasAdvanced = HasAnyProperty(stack,
+                "name", "allowedVariants", "skipVariants", "tags", "attributes", "recipeAttributes",
+                "isTool", "consume", "toolDurabilityCost", "durabilityChange", "break", "matchingType",
+                "litres", "consumeLitres", "minratio", "maxratio", "shapeElement", "textureMapping",
+                "returnedStack", "cookedStack");
+            ImGuiTreeNodeFlags flags = hasAdvanced ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
+            if (ImGui.TreeNodeEx($"Details##stack-details-{label}", flags))
+            {
+                changed |= EditOptionalString(stack, "name", $"Wildcard name##stack-name-{label}");
+                changed |= EditOptionalStringArray(stack, "allowedVariants", $"Allowed variants##stack-allowed-{label}");
+                changed |= EditOptionalStringArray(stack, "skipVariants", $"Skip variants##stack-skip-{label}");
+                changed |= EditOptionalJsonToken(stack, "tags", $"Tags JSON##stack-tags-{label}", defaultToken: new JArray("tag"));
+                changed |= EditOptionalJsonToken(stack, "attributes", $"Attributes JSON##stack-attributes-{label}", defaultToken: new JObject());
+                changed |= EditOptionalJsonToken(stack, "recipeAttributes", $"Recipe attributes JSON##stack-recipe-attributes-{label}", defaultToken: new JObject());
+                changed |= EditOptionalBool(stack, "isTool", $"Is tool##stack-is-tool-{label}", defaultValue: true);
+                changed |= EditOptionalBool(stack, "consume", $"Consume##stack-consume-{label}", defaultValue: true);
+                changed |= EditOptionalInt(stack, "toolDurabilityCost", $"Tool durability cost##stack-tool-cost-{label}", 0, 100000);
+                changed |= EditOptionalInt(stack, "durabilityChange", $"Durability change##stack-durability-change-{label}", -100000, 100000);
+                changed |= EditOptionalBool(stack, "break", $"Break on zero durability##stack-break-{label}", defaultValue: true);
+                changed |= EditOptionalString(stack, "matchingType", $"Matching type##stack-matching-type-{label}");
+                changed |= EditOptionalFloat(stack, "litres", $"Litres##stack-litres-{label}", 0f, 10000f);
+                changed |= EditOptionalFloat(stack, "consumeLitres", $"Consume litres##stack-consume-litres-{label}", 0f, 10000f);
+                changed |= EditOptionalFloat(stack, "minratio", $"Min ratio##stack-minratio-{label}", 0f, 1f);
+                changed |= EditOptionalFloat(stack, "maxratio", $"Max ratio##stack-maxratio-{label}", 0f, 1f);
+                changed |= EditOptionalString(stack, "shapeElement", $"Shape element##stack-shape-element-{label}");
+                changed |= EditOptionalStringArray(stack, "textureMapping", $"Texture mapping##stack-texture-mapping-{label}");
+                changed |= EditStack(stack, "returnedStack", $"Returned stack##stack-returned-{label}");
+                changed |= EditStack(stack, "cookedStack", $"Cooked stack##stack-cooked-{label}");
+                ImGui.TreePop();
             }
             return changed;
         }
@@ -1544,13 +1715,12 @@ public sealed partial class DebugWindowManager
 
         private static JToken ParseRecipeJson(string text)
         {
-            using StringReader stringReader = new(text);
-            using JsonTextReader reader = new(stringReader)
+            if (DevToolsJson.TryParseToken(text, out JToken? token, out string error) && token != null)
             {
-                DateParseHandling = DateParseHandling.None,
-                FloatParseHandling = FloatParseHandling.Double
-            };
-            return JToken.ReadFrom(reader);
+                return token;
+            }
+
+            throw new JsonReaderException(error);
         }
 
         private static string SerializeToken(JToken token)
@@ -1610,8 +1780,15 @@ public sealed partial class DebugWindowManager
                 },
                 RecipeEditorKind.Cooking => new JObject
                 {
-                    ["ingredients"] = new JArray(DefaultStack("item", "game:vegetable-*")),
-                    ["output"] = DefaultStack("item", "game:meal"),
+                    ["code"] = name,
+                    ["ingredients"] = new JArray(new JObject
+                    {
+                        ["code"] = "ingredient",
+                        ["validStacks"] = new JArray(DefaultStack("item", "game:vegetable-*")),
+                        ["minQuantity"] = 1,
+                        ["maxQuantity"] = 1
+                    }),
+                    ["cooksInto"] = DefaultStack("item", "game:meal"),
                     ["name"] = name
                 },
                 RecipeEditorKind.Alloy => new JObject
@@ -1639,14 +1816,34 @@ public sealed partial class DebugWindowManager
             };
         }
 
+        private static JObject DefaultCookingIngredient()
+        {
+            return new JObject
+            {
+                ["code"] = "ingredient",
+                ["validStacks"] = new JArray(DefaultStack("item", "game:stick")),
+                ["minQuantity"] = 1,
+                ["maxQuantity"] = 1
+            };
+        }
+
         private static List<string> GetGridRows(JObject recipe, out int width, out int height)
         {
             string pattern = recipe["ingredientPattern"]?.ToString() ?? recipe["pattern"]?.ToString() ?? "";
-            List<string> rows = pattern.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            List<string> rows = SplitGridRows(pattern);
             if (rows.Count == 0) rows.Add("___");
             width = Math.Clamp(recipe["width"]?.Value<int?>() ?? rows.Max(row => row.Length), 1, 3);
             height = Math.Clamp(recipe["height"]?.Value<int?>() ?? rows.Count, 1, 3);
             return ResizeRows(rows, width, height);
+        }
+
+        private static List<string> SplitGridRows(string pattern)
+        {
+            if (string.IsNullOrWhiteSpace(pattern)) return [];
+            return pattern
+                .Split([',', '\t'], StringSplitOptions.TrimEntries)
+                .Where(row => row.Length > 0)
+                .ToList();
         }
 
         private static List<string> ResizeRows(List<string> rows, int width, int height)
@@ -1770,6 +1967,312 @@ public sealed partial class DebugWindowManager
             return created;
         }
 
+        private bool DrawRecipeVariantPlaceholderEditor(JObject recipe)
+        {
+            SortedSet<string> placeholderNames = CollectVariantPlaceholderNames(recipe);
+            ImGuiTreeNodeFlags flags = placeholderNames.Count > 0 ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
+            if (!ImGui.TreeNodeEx("Variant placeholders##recipe-placeholders", flags)) return false;
+
+            bool changed = false;
+            foreach (string placeholderName in placeholderNames)
+            {
+                changed |= EditOptionalStringArray(recipe, placeholderName, $"{placeholderName}##recipe-placeholder-{placeholderName}");
+            }
+
+            ImGui.SetNextItemWidth(180);
+            ImGui.InputText("Add placeholder##recipe-placeholder-name", ref _newVariantPlaceholderName, 64);
+            ImGui.SameLine();
+            if (ImGui.Button("Add##recipe-placeholder-add"))
+            {
+                string propertyName = NormalizeVariantPlaceholderName(_newVariantPlaceholderName);
+                if (propertyName.Length == 0)
+                {
+                    _status = "Variant placeholder names must start with a letter or underscore and contain only letters, digits, or underscores.";
+                }
+                else if (recipe[propertyName] != null)
+                {
+                    _status = $"Variant placeholder '{propertyName}' already exists.";
+                }
+                else
+                {
+                    recipe[propertyName] = new JArray();
+                    _newVariantPlaceholderName = "";
+                    changed = true;
+                }
+            }
+
+            ImGui.TreePop();
+            return changed;
+        }
+
+        private static SortedSet<string> CollectVariantPlaceholderNames(JObject recipe)
+        {
+            SortedSet<string> names = new(StringComparer.Ordinal);
+            foreach (string placeholderName in KnownVariantPlaceholderNames)
+            {
+                if (recipe[placeholderName] != null)
+                {
+                    names.Add(placeholderName);
+                }
+            }
+
+            foreach (JProperty property in recipe.Properties())
+            {
+                if (IsVariantPlaceholderProperty(property))
+                {
+                    names.Add(property.Name);
+                }
+            }
+
+            CollectStringPlaceholders(recipe, names);
+            return names;
+        }
+
+        private static void CollectStringPlaceholders(JToken token, ISet<string> names)
+        {
+            if (token is JValue { Type: JTokenType.String } value)
+            {
+                string text = value.ToString();
+                foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(text, @"\{(?<name>[A-Za-z_][A-Za-z0-9_]*)\}"))
+                {
+                    names.Add(match.Groups["name"].Value);
+                }
+                return;
+            }
+
+            foreach (JToken child in token.Children())
+            {
+                CollectStringPlaceholders(child, names);
+            }
+        }
+
+        private static bool IsVariantPlaceholderProperty(JProperty property)
+        {
+            if (KnownRecipeSchemaProperties.Contains(property.Name)) return false;
+            return property.Value switch
+            {
+                JArray array => array.All(IsStringLikeToken),
+                JValue { Type: JTokenType.String } => KnownVariantPlaceholderNames.Contains(property.Name, StringComparer.OrdinalIgnoreCase),
+                _ => false
+            };
+        }
+
+        private static bool IsStringLikeToken(JToken token)
+        {
+            return token is JValue value &&
+                value.Type is JTokenType.String or JTokenType.Integer or JTokenType.Float or JTokenType.Boolean;
+        }
+
+        private static string NormalizeVariantPlaceholderName(string name)
+        {
+            string trimmed = name.Trim();
+            if (trimmed.Length == 0) return "";
+            if (!IsPlaceholderStart(trimmed[0])) return "";
+            for (int index = 1; index < trimmed.Length; index++)
+            {
+                if (!IsPlaceholderPart(trimmed[index])) return "";
+            }
+            return trimmed;
+        }
+
+        private static bool IsPlaceholderStart(char c)
+        {
+            return c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or '_';
+        }
+
+        private static bool IsPlaceholderPart(char c)
+        {
+            return IsPlaceholderStart(c) || c is >= '0' and <= '9';
+        }
+
+        private static bool HasAnyProperty(JObject obj, params string[] propertyNames)
+        {
+            return propertyNames.Any(name => FindFirstPropertyName(obj, name) != null);
+        }
+
+        private static string? FindFirstPropertyName(JObject obj, params string[] propertyNames)
+        {
+            foreach (string propertyName in propertyNames)
+            {
+                JProperty? property = obj.Property(propertyName, StringComparison.OrdinalIgnoreCase);
+                if (property != null) return property.Name;
+            }
+
+            return null;
+        }
+
+        private static bool EditOptionalString(JObject obj, string property, string label, params string[] aliases)
+        {
+            string propertyName = FindFirstPropertyName(obj, [property, .. aliases]) ?? property;
+            if (obj[propertyName] == null)
+            {
+                if (!ImGui.Button($"Add {label}")) return false;
+                obj[property] = "";
+                return true;
+            }
+
+            bool changed = EditString(obj, propertyName, label, 240);
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{label}"))
+            {
+                obj.Remove(propertyName);
+                return true;
+            }
+            return changed;
+        }
+
+        private static bool EditOptionalBool(JObject obj, string property, string label, bool defaultValue, params string[] aliases)
+        {
+            string propertyName = FindFirstPropertyName(obj, [property, .. aliases]) ?? property;
+            if (obj[propertyName] == null)
+            {
+                if (!ImGui.Button($"Add {label}")) return false;
+                obj[property] = defaultValue;
+                return true;
+            }
+
+            bool changed = EditBool(obj, propertyName, label, defaultValue);
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{label}"))
+            {
+                obj.Remove(propertyName);
+                return true;
+            }
+            return changed;
+        }
+
+        private static bool EditOptionalInt(JObject obj, string property, string label, int min, int max, params string[] aliases)
+        {
+            string propertyName = FindFirstPropertyName(obj, [property, .. aliases]) ?? property;
+            if (obj[propertyName] == null)
+            {
+                if (!ImGui.Button($"Add {label}")) return false;
+                obj[property] = min;
+                return true;
+            }
+
+            bool changed = EditNumber(obj, propertyName, label, min, max);
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{label}"))
+            {
+                obj.Remove(propertyName);
+                return true;
+            }
+            return changed;
+        }
+
+        private static bool EditOptionalFloat(JObject obj, string property, string label, float min, float max, params string[] aliases)
+        {
+            string propertyName = FindFirstPropertyName(obj, [property, .. aliases]) ?? property;
+            if (obj[propertyName] == null)
+            {
+                if (!ImGui.Button($"Add {label}")) return false;
+                obj[property] = min;
+                return true;
+            }
+
+            float value = obj[propertyName]?.Value<float?>() ?? min;
+            ImGui.SetNextItemWidth(120);
+            if (ImGui.DragFloat(label, ref value, 0.01f, min, max, "%.###"))
+            {
+                obj[propertyName] = Math.Clamp(value, min, max);
+                return true;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{label}"))
+            {
+                obj.Remove(propertyName);
+                return true;
+            }
+            return false;
+        }
+
+        private static bool EditOptionalStringArray(JObject obj, string property, string label, params string[] aliases)
+        {
+            string propertyName = FindFirstPropertyName(obj, [property, .. aliases]) ?? property;
+            if (obj[propertyName] == null)
+            {
+                if (!ImGui.Button($"Add {label}")) return false;
+                obj[property] = new JArray();
+                return true;
+            }
+
+            string value = obj[propertyName] is JArray array
+                ? string.Join(", ", array.Select(token => token?.ToString() ?? "").Where(text => text.Length > 0))
+                : obj[propertyName]?.ToString() ?? "";
+            if (ImGui.InputText(label, ref value, 1024))
+            {
+                obj[propertyName] = new JArray(value
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(part => part.Length > 0));
+                return true;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{label}"))
+            {
+                obj.Remove(propertyName);
+                return true;
+            }
+            return false;
+        }
+
+        private bool EditOptionalJsonToken(JObject obj, string property, string label, JToken defaultToken, params string[] aliases)
+        {
+            string propertyName = FindFirstPropertyName(obj, [property, .. aliases]) ?? property;
+            string bufferKey = $"{label}:{propertyName}";
+            if (obj[propertyName] == null)
+            {
+                _jsonFieldBuffers.Remove(bufferKey);
+                if (!ImGui.Button($"Add {label}")) return false;
+                obj[property] = defaultToken.DeepClone();
+                return true;
+            }
+
+            if (!_jsonFieldBuffers.TryGetValue(bufferKey, out string? buffer))
+            {
+                buffer = SerializeToken(obj[propertyName]!);
+                _jsonFieldBuffers[bufferKey] = buffer;
+            }
+
+            ImGui.InputTextMultiline(label, ref buffer, 32 * 1024, new NVector2(-1f, 88f), ImGuiInputTextFlags.AllowTabInput);
+            _jsonFieldBuffers[bufferKey] = buffer;
+
+            bool changed = false;
+            if (ImGui.Button($"Apply##apply-{label}"))
+            {
+                if (DevToolsJson.TryParseToken(buffer, out JToken? token, out string error) && token != null)
+                {
+                    obj[propertyName] = token;
+                    _jsonFieldBuffers[bufferKey] = SerializeToken(token);
+                    changed = true;
+                }
+                else
+                {
+                    _status = $"{propertyName} JSON parse failed: {error}";
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Format##format-{label}"))
+            {
+                if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
+                {
+                    _jsonFieldBuffers[bufferKey] = formatted;
+                }
+                else
+                {
+                    _status = $"{propertyName} JSON format failed: {formatError}";
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{label}"))
+            {
+                obj.Remove(propertyName);
+                _jsonFieldBuffers.Remove(bufferKey);
+                changed = true;
+            }
+            return changed;
+        }
+
         private static bool EditString(JObject obj, string property, string label, int maxLength)
         {
             string value = obj[property]?.ToString() ?? "";
@@ -1803,8 +2306,14 @@ public sealed partial class DebugWindowManager
             uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.92f, 0.86f, 0.74f, 1f));
             drawList.AddRectFilled(new NVector2(x, y), new NVector2(x + width, y + height), fill, 5f);
             drawList.AddRect(new NVector2(x, y), new NVector2(x + width, y + height), border, 5f, ImDrawFlags.None, 1.5f);
-            drawList.AddText(new NVector2(x + 10f, y + 8f), text, title);
-            drawList.AddText(new NVector2(x + 10f, y + 32f), text, TrimMiddle(body, 22));
+            SafeAddText(drawList, new NVector2(x + 10f, y + 8f), text, title);
+            SafeAddText(drawList, new NVector2(x + 10f, y + 32f), text, string.IsNullOrWhiteSpace(body) ? "-" : TrimMiddle(body, 22));
+        }
+
+        private static void SafeAddText(ImDrawListPtr drawList, NVector2 position, uint color, string? text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            drawList.AddText(position, color, text);
         }
 
         private static void DrawFlowArrow(ImDrawListPtr drawList, float x1, float y1, float x2, float y2)
@@ -1821,7 +2330,7 @@ public sealed partial class DebugWindowManager
 
         private static string DescribeOutput(JObject recipe)
         {
-            return DescribeToken(recipe["output"] ?? recipe["outputs"]);
+            return DescribeToken(recipe["output"] ?? recipe["outputs"] ?? recipe["cooksInto"]);
         }
 
         private static string DescribeProcess(JObject recipe)
