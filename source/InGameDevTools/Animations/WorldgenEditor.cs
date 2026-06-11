@@ -85,6 +85,7 @@ public sealed partial class DebugWindowManager
     private readonly ImGuiThreePanelLayoutState _worldgenLayout = new(0.26f, 0.30f);
     private readonly DevToolsEditorDiagnostics _worldgenDiagnostics = new("Worldgen");
     private readonly DevToolsAssetIndexer _worldgenIndexer = new(batchSize: 80);
+    private readonly DevToolsTextHistory _worldgenTextHistory = new();
     private bool _worldgenPreviewPoppedOut;
     private float _worldgenPoppedViewportWidth = 1100f;
     private float _worldgenPoppedViewportHeight = 760f;
@@ -934,9 +935,23 @@ public sealed partial class DebugWindowManager
 
     private void DrawWorldgenRawJsonEditor()
     {
+        _worldgenTextHistory.Record(_worldgenCurrentText, ImGui.GetTime());
+        if (DevToolsJsonTextTools.DrawEditToolbar("worldgen-json-tools", ref _worldgenCurrentText, _worldgenTextHistory, out string toolStatus))
+        {
+            ValidateWorldgenCurrentText();
+            RememberWorldgenDraft();
+            InvalidateWorldgenPreviewRasterCache();
+            ScheduleWorldgenRealtimePeek("raw JSON tools changed text");
+        }
+        if (!string.IsNullOrEmpty(toolStatus))
+        {
+            _worldgenStatus = toolStatus;
+        }
+
         int textCapacity = Math.Max(_worldgenCurrentText.Length + 8192, 2 * 1024 * 1024);
         if (ImGui.InputTextMultiline("##worldgen-json-text", ref _worldgenCurrentText, (uint)textCapacity, new NVector2(-float.Epsilon, Math.Max(180f, ImGui.GetContentRegionAvail().Y - 24f)), ImGuiInputTextFlags.AllowTabInput))
         {
+            _worldgenTextHistory.Record(_worldgenCurrentText, ImGui.GetTime());
             ValidateWorldgenCurrentText();
             RememberWorldgenDraft();
             InvalidateWorldgenPreviewRasterCache();
@@ -6030,6 +6045,7 @@ public sealed partial class DebugWindowManager
         }
 
         ValidateWorldgenCurrentText();
+        _worldgenTextHistory.Reset(_worldgenCurrentText);
         ApplyWorldgenPreviewModeForEntry(entry);
     }
 

@@ -24,6 +24,7 @@ public sealed partial class DebugWindowManager
     private readonly ImGuiThreePanelLayoutState _aiBehaviorLayout = new(0.26f, 0.34f);
     private readonly DevToolsEditorDiagnostics _aiBehaviorDiagnostics = new("Entity AI");
     private readonly DevToolsAssetIndexer _aiBehaviorIndexer = new(batchSize: 90);
+    private readonly DevToolsTextHistory _aiBehaviorTextHistory = new();
 
     private bool _aiBehaviorIndexIncludedServerAssets;
     private int _aiBehaviorEntryIndex;
@@ -1370,9 +1371,21 @@ public sealed partial class DebugWindowManager
 
     private void DrawAiBehaviorRawJsonEditor()
     {
+        _aiBehaviorTextHistory.Record(_aiBehaviorCurrentText, ImGui.GetTime());
+        if (DevToolsJsonTextTools.DrawEditToolbar("entity-ai-json-tools", ref _aiBehaviorCurrentText, _aiBehaviorTextHistory, out string toolStatus))
+        {
+            ValidateAiBehaviorCurrentText();
+            RememberAiBehaviorDraft();
+        }
+        if (!string.IsNullOrEmpty(toolStatus))
+        {
+            _aiBehaviorStatus = toolStatus;
+        }
+
         int textCapacity = Math.Max(_aiBehaviorCurrentText.Length + 8192, 2 * 1024 * 1024);
         if (ImGui.InputTextMultiline("##entity-ai-json-text", ref _aiBehaviorCurrentText, (uint)textCapacity, new NVector2(-float.Epsilon, Math.Max(180f, ImGui.GetContentRegionAvail().Y - 24f)), ImGuiInputTextFlags.AllowTabInput))
         {
+            _aiBehaviorTextHistory.Record(_aiBehaviorCurrentText, ImGui.GetTime());
             ValidateAiBehaviorCurrentText();
             RememberAiBehaviorDraft();
         }
@@ -1396,6 +1409,7 @@ public sealed partial class DebugWindowManager
         }
 
         ValidateAiBehaviorCurrentText();
+        _aiBehaviorTextHistory.Reset(_aiBehaviorCurrentText);
     }
 
     private void EnsureAiBehaviorEntryLoaded(AiBehaviorEntry entry)

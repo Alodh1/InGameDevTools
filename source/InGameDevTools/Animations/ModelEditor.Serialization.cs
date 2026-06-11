@@ -426,6 +426,24 @@ public sealed partial class DebugWindowManager
             ImGui.SetClipboardText(_modelJsonBuffer);
             _modelStatus = "Shape JSON copied to clipboard.";
         }
+        ImGui.SameLine();
+        if (ImGui.Button("Format##model-json-format"))
+        {
+            if (DevToolsJsonTextTools.TryFormat(_modelJsonBuffer, out string formattedJson, out string formatError))
+            {
+                _modelJsonBuffer = formattedJson;
+                _modelJsonError = "";
+                _modelStatus = "Formatted shape JSON buffer.";
+            }
+            else
+            {
+                _modelJsonError = $"Cannot format: {formatError}";
+            }
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Pretty-print the JSON buffer (does not apply it to the document).");
+        }
         if (!string.IsNullOrWhiteSpace(_modelJsonError))
         {
             ImGui.SameLine();

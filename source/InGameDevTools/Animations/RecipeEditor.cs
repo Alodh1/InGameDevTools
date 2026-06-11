@@ -481,6 +481,19 @@ public sealed partial class DebugWindowManager
                 {
                     ApplyRawJson(entry);
                 }
+                ImGui.SameLine();
+                if (ImGui.Button("Format##recipe-raw-format"))
+                {
+                    if (DevToolsJsonTextTools.TryFormat(_rawBuffer, out string formattedRaw, out string formatError))
+                    {
+                        _rawBuffer = formattedRaw;
+                        _status = "Formatted raw JSON buffer.";
+                    }
+                    else
+                    {
+                        _status = $"Cannot format: {formatError}";
+                    }
+                }
 
                 if (!string.IsNullOrWhiteSpace(_status))
                 {
