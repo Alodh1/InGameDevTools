@@ -199,6 +199,8 @@ public sealed partial class DebugWindowManager
     private bool _modelPendingNewDocument;
     private bool _modelOpenDiscardPopup;
     private ModelElementData? _modelReparentSource;
+    private string _modelTreeFilter = "";
+    private HashSet<ModelElementData>? _modelTreeFilterMatches;
     private readonly Dictionary<string, string> _modelComboFilters = new(StringComparer.Ordinal);
     private List<string>? _modelTextureAssetIndex;
     private List<string>? _modelStepParentNameIndex;
@@ -765,6 +767,19 @@ public sealed partial class DebugWindowManager
                 }
             }
 
+            ImGui.SetNextItemWidth(-float.Epsilon);
+            ImGui.InputTextWithHint("##model-tree-filter", "Filter elements...", ref _modelTreeFilter, 128);
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Show only elements whose name matches (ancestors stay visible). Supports loose subsequence matching.");
+            }
+
+            _modelTreeFilterMatches = BuildModelTreeFilterMatches();
+            if (_modelTreeFilterMatches != null)
+            {
+                ImGui.TextDisabled($"{_modelTreeFilterMatches.Count} element(s) shown.");
+            }
+
             ImGui.BeginChild("##model-tree-list", new NVector2(0f, 0f), false, ImGuiWindowFlags.HorizontalScrollbar);
             try
             {
@@ -784,8 +799,41 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private HashSet<ModelElementData>? BuildModelTreeFilterMatches()
+    {
+        string filter = _modelTreeFilter.Trim();
+        if (filter.Length == 0 || _modelDoc == null) return null;
+
+        HashSet<ModelElementData> visible = [];
+        foreach (ModelElementData root in _modelDoc.Roots)
+        {
+            CollectModelTreeFilterMatches(root, filter, visible);
+        }
+
+        return visible;
+    }
+
+    private static bool CollectModelTreeFilterMatches(ModelElementData element, string filter, HashSet<ModelElementData> visible)
+    {
+        bool anyDescendant = false;
+        foreach (ModelElementData child in element.Children)
+        {
+            anyDescendant |= CollectModelTreeFilterMatches(child, filter, visible);
+        }
+
+        if (anyDescendant || DevToolsFuzzyMatch.Matches(element.Name ?? "", filter))
+        {
+            visible.Add(element);
+            return true;
+        }
+
+        return false;
+    }
+
     private void DrawModelTreeNode(ModelElementData element, int index, int depth)
     {
+        if (_modelTreeFilterMatches != null && !_modelTreeFilterMatches.Contains(element)) return;
+
         ImGui.PushID(index);
         try
         {
@@ -804,6 +852,11 @@ public sealed partial class DebugWindowManager
             if (element.Children.Count == 0) flags |= ImGuiTreeNodeFlags.Leaf;
             if (ModelIsElementSelected(element)) flags |= ImGuiTreeNodeFlags.Selected;
             if (depth < 2 && element.Children.Count > 0) flags |= ImGuiTreeNodeFlags.DefaultOpen;
+            if (_modelTreeFilterMatches != null && element.Children.Any(child => _modelTreeFilterMatches.Contains(child)))
+            {
+                // Reveal matches while a filter is active.
+                ImGui.SetNextItemOpen(true, ImGuiCond.Always);
+            }
 
             string name = string.IsNullOrWhiteSpace(element.Name) ? "(unnamed)" : element.Name;
             if (ReferenceEquals(element, _modelSelectedElement) && _modelSelectedElements.Count > 1)
