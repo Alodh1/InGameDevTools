@@ -73,7 +73,7 @@ public sealed partial class DebugWindowManager
         public VanillaAnimationDocument Document { get; }
         public int Index { get; }
         public VanillaAnimation Animation { get; }
-        public JToken? SourceToken { get; }
+        public JToken? SourceToken { get; set; }
     }
 
     private sealed class VanillaAnimationMetaEntry
@@ -91,7 +91,7 @@ public sealed partial class DebugWindowManager
         public int Index { get; }
         public AnimationMetaData Metadata { get; }
         public VanillaShapeAnimationEntry? LinkedShape { get; set; }
-        public JToken? SourceToken { get; }
+        public JToken? SourceToken { get; set; }
 
         public VanillaShapeAnimationEntry? ResolveCurrentShape()
         {

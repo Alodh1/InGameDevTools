@@ -19,6 +19,7 @@ public sealed partial class DebugWindowManager
     private bool _modelJsonBufferStale = true;
     private bool _modelJsonEditing;
     private string _modelJsonError = "";
+    private readonly Dictionary<string, string> _modelMetadataBuffers = new(StringComparer.Ordinal);
     private bool _modelLiveDirty;
     private long _modelLiveChangedAtMs;
 

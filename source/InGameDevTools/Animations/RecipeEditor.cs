@@ -78,6 +78,16 @@ public sealed partial class DebugWindowManager
             "clayCovered"
         ];
 
+        private static readonly string[] RecipeAdvancedFieldKindLabels =
+        [
+            "String",
+            "Boolean",
+            "Integer",
+            "Float",
+            "Object",
+            "Array"
+        ];
+
         private static readonly HashSet<string> KnownRecipeSchemaProperties = new(StringComparer.OrdinalIgnoreCase)
         {
             "name",
@@ -126,7 +136,9 @@ public sealed partial class DebugWindowManager
         private string _newDomain = "game";
         private string _newName = "new-recipe";
         private string _newVariantPlaceholderName = "";
+        private string _newRecipeAdvancedFieldName = "";
         private int _newKindIndex;
+        private int _newRecipeAdvancedFieldKindIndex;
         private string _rawBuffer = "";
         private string _rawBufferKey = "";
         private string[] _itemCodes = [];
@@ -541,7 +553,10 @@ public sealed partial class DebugWindowManager
                     changed |= DrawArrayStackEditor(entry.Recipe, "ingredients", "Ingredients##recipe-common-ingredients");
                     changed |= DrawArrayStackEditor(entry.Recipe, "outputs", "Outputs##recipe-common-outputs");
                 }
+                changed |= DrawRecipeAdvancedFieldsEditor(entry);
                 if (changed) MarkChanged(entry);
+
+                DrawRecipeValidationPanel(entry);
 
                 ImGui.SeparatorText("Raw JSON");
                 if (_rawBufferKey != entry.Key) SyncRawBuffer(entry);
@@ -2016,15 +2031,16 @@ public sealed partial class DebugWindowManager
                 }
             }
 
+            CollectStringPlaceholders(recipe, names);
+
             foreach (JProperty property in recipe.Properties())
             {
-                if (IsVariantPlaceholderProperty(property))
+                if (IsVariantPlaceholderProperty(property, names))
                 {
                     names.Add(property.Name);
                 }
             }
 
-            CollectStringPlaceholders(recipe, names);
             return names;
         }
 
@@ -2046,15 +2062,438 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        private static bool IsVariantPlaceholderProperty(JProperty property)
+        private static bool IsVariantPlaceholderProperty(JProperty property, ISet<string> placeholderNames)
         {
             if (KnownRecipeSchemaProperties.Contains(property.Name)) return false;
+            if (!placeholderNames.Contains(property.Name)) return false;
             return property.Value switch
             {
                 JArray array => array.All(IsStringLikeToken),
-                JValue { Type: JTokenType.String } => KnownVariantPlaceholderNames.Contains(property.Name, StringComparer.OrdinalIgnoreCase),
+                JValue { Type: JTokenType.String } => true,
                 _ => false
             };
+        }
+
+        private bool DrawRecipeAdvancedFieldsEditor(RecipeEntry entry)
+        {
+            JObject recipe = entry.Recipe;
+            SortedSet<string> placeholderNames = CollectVariantPlaceholderNames(recipe);
+            List<JProperty> advancedProperties = recipe.Properties()
+                .Where(property => IsRecipeAdvancedFieldProperty(property, placeholderNames))
+                .OrderBy(property => property.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            ImGuiTreeNodeFlags flags = advancedProperties.Count > 0 ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
+            if (!ImGui.TreeNodeEx($"Advanced fields ({advancedProperties.Count})##recipe-advanced-fields", flags)) return false;
+
+            bool changed = false;
+            foreach (JProperty property in advancedProperties)
+            {
+                ImGui.PushID($"recipe-advanced-{property.Name}");
+                ImGui.Separator();
+                changed |= DrawRecipeAdvancedField(entry, property);
+                ImGui.PopID();
+            }
+
+            ImGui.SeparatorText("Add advanced field");
+            ImGui.SetNextItemWidth(180);
+            ImGui.InputTextWithHint("##recipe-advanced-new-name", "field name", ref _newRecipeAdvancedFieldName, 128);
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(110);
+            ImGui.Combo("Type##recipe-advanced-new-kind", ref _newRecipeAdvancedFieldKindIndex, RecipeAdvancedFieldKindLabels, RecipeAdvancedFieldKindLabels.Length);
+            ImGui.SameLine();
+            if (ImGui.Button("Add##recipe-advanced-add"))
+            {
+                changed |= TryAddRecipeAdvancedField(recipe, placeholderNames);
+            }
+
+            ImGui.TreePop();
+            return changed;
+        }
+
+        private static bool IsRecipeAdvancedFieldProperty(JProperty property, ISet<string> placeholderNames)
+        {
+            if (KnownRecipeSchemaProperties.Contains(property.Name)) return false;
+            return !IsVariantPlaceholderProperty(property, placeholderNames);
+        }
+
+        private bool DrawRecipeAdvancedField(RecipeEntry entry, JProperty property)
+        {
+            JObject recipe = entry.Recipe;
+            string propertyName = property.Name;
+            bool changed = false;
+
+            if (property.Value is JObject or JArray)
+            {
+                if (ImGui.TreeNodeEx($"{propertyName} JSON##recipe-advanced-json-node", ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    changed |= EditRecipeAdvancedJsonToken(entry, propertyName);
+                    if (ImGui.Button($"Remove##recipe-advanced-remove-{propertyName}"))
+                    {
+                        recipe.Remove(propertyName);
+                        ClearRecipeAdvancedFieldBuffer(entry.Key, propertyName);
+                        changed = true;
+                    }
+                    ImGui.TreePop();
+                }
+
+                return changed;
+            }
+
+            ImGui.TextUnformatted(propertyName);
+            ImGui.SameLine();
+
+            switch (property.Value.Type)
+            {
+                case JTokenType.Boolean:
+                    bool boolValue = property.Value.Value<bool?>() ?? false;
+                    if (ImGui.Checkbox($"##recipe-advanced-bool-{propertyName}", ref boolValue))
+                    {
+                        recipe[propertyName] = boolValue;
+                        changed = true;
+                    }
+                    break;
+                case JTokenType.Integer:
+                    int intValue = property.Value.Value<int?>() ?? 0;
+                    ImGui.SetNextItemWidth(120);
+                    if (ImGui.InputInt($"##recipe-advanced-int-{propertyName}", ref intValue))
+                    {
+                        recipe[propertyName] = intValue;
+                        changed = true;
+                    }
+                    break;
+                case JTokenType.Float:
+                    float floatValue = property.Value.Value<float?>() ?? 0f;
+                    ImGui.SetNextItemWidth(120);
+                    if (ImGui.InputFloat($"##recipe-advanced-float-{propertyName}", ref floatValue, 0, 0, "%.###"))
+                    {
+                        recipe[propertyName] = floatValue;
+                        changed = true;
+                    }
+                    break;
+                case JTokenType.String:
+                    string stringValue = property.Value.ToString();
+                    ImGui.SetNextItemWidth(Math.Max(160f, ImGui.GetContentRegionAvail().X - 92f));
+                    if (ImGui.InputText($"##recipe-advanced-string-{propertyName}", ref stringValue, 4096))
+                    {
+                        recipe[propertyName] = stringValue;
+                        changed = true;
+                    }
+                    break;
+                default:
+                    ImGui.NewLine();
+                    changed |= EditRecipeAdvancedJsonToken(entry, propertyName);
+                    break;
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##recipe-advanced-remove-{propertyName}"))
+            {
+                recipe.Remove(propertyName);
+                ClearRecipeAdvancedFieldBuffer(entry.Key, propertyName);
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private void DrawRecipeValidationPanel(RecipeEntry entry)
+        {
+            List<string> issues = BuildRecipeValidationIssues(entry);
+            ImGuiTreeNodeFlags flags = issues.Count > 0 ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
+            if (!ImGui.TreeNodeEx($"Validation ({issues.Count})##recipe-validation", flags)) return;
+
+            if (issues.Count == 0)
+            {
+                ImGui.TextDisabled("No obvious schema issues for this recipe kind.");
+                ImGui.TreePop();
+                return;
+            }
+
+            foreach (string issue in issues)
+            {
+                bool error = issue.StartsWith("Error:", StringComparison.OrdinalIgnoreCase);
+                ImGui.TextColored(
+                    error ? new NVector4(1f, 0.34f, 0.25f, 1f) : new NVector4(1f, 0.76f, 0.32f, 1f),
+                    issue);
+            }
+
+            ImGui.TreePop();
+        }
+
+        private static List<string> BuildRecipeValidationIssues(RecipeEntry entry)
+        {
+            JObject recipe = entry.Recipe;
+            List<string> issues = [];
+
+            if (string.IsNullOrWhiteSpace(recipe["code"]?.ToString()) && string.IsNullOrWhiteSpace(recipe["name"]?.ToString()))
+            {
+                issues.Add("Warning: recipe has neither code nor name.");
+            }
+
+            switch (entry.Kind)
+            {
+                case RecipeEditorKind.Grid:
+                    ValidateGridRecipe(recipe, issues);
+                    break;
+                case RecipeEditorKind.Smithing:
+                case RecipeEditorKind.Clayforming:
+                case RecipeEditorKind.Knapping:
+                    ValidatePatternRecipe(recipe, issues, entry.KindLabel);
+                    break;
+                case RecipeEditorKind.Cooking:
+                    ValidateCookingRecipe(recipe, issues);
+                    break;
+                case RecipeEditorKind.Barrel:
+                    ValidateFlowRecipe(recipe, issues, "barrel");
+                    if (recipe["sealHours"] == null && recipe["duration"] == null)
+                    {
+                        issues.Add("Warning: barrel recipe has no sealHours or duration.");
+                    }
+                    break;
+                case RecipeEditorKind.Alloy:
+                    ValidateFlowRecipe(recipe, issues, "alloy");
+                    ValidateAlloyRatios(recipe, issues);
+                    break;
+                case RecipeEditorKind.Other:
+                    issues.Add("Warning: unknown recipe kind; only common fields and raw JSON can be validated.");
+                    break;
+            }
+
+            return issues;
+        }
+
+        private static void ValidateGridRecipe(JObject recipe, List<string> issues)
+        {
+            List<string> rows = GetGridRows(recipe, out int width, out int height);
+            if (rows.Count == 0)
+            {
+                issues.Add("Error: grid recipe has no ingredientPattern/pattern rows.");
+            }
+            if (width is < 1 or > 3 || height is < 1 or > 3)
+            {
+                issues.Add($"Error: grid size {width}x{height} is outside the crafting grid limit.");
+            }
+            if (recipe["ingredients"] is not JObject ingredients || !ingredients.Properties().Any())
+            {
+                issues.Add("Error: grid recipe has no ingredient map.");
+            }
+            else
+            {
+                ValidateGridIngredientSymbols(rows, ingredients, issues);
+            }
+            if (!HasRecipeStack(recipe, "output"))
+            {
+                issues.Add("Error: grid recipe has no output stack.");
+            }
+        }
+
+        private static void ValidateGridIngredientSymbols(IEnumerable<string> rows, JObject ingredients, List<string> issues)
+        {
+            HashSet<string> used = [];
+            foreach (string row in rows)
+            {
+                foreach (char symbol in row)
+                {
+                    if (symbol == '_' || char.IsWhiteSpace(symbol)) continue;
+                    string key = symbol.ToString();
+                    used.Add(key);
+                    if (ingredients[key] == null)
+                    {
+                        issues.Add($"Error: pattern uses symbol '{key}' with no matching ingredient.");
+                    }
+                }
+            }
+
+            foreach (JProperty property in ingredients.Properties())
+            {
+                if (!used.Contains(property.Name))
+                {
+                    issues.Add($"Warning: ingredient '{property.Name}' is not used by the pattern.");
+                }
+            }
+        }
+
+        private static void ValidatePatternRecipe(JObject recipe, List<string> issues, string kindLabel)
+        {
+            List<List<string>> layers = GetPatternLayers(recipe);
+            if (layers.Count == 0 || layers.All(layer => layer.Count == 0))
+            {
+                issues.Add($"Error: {kindLabel} recipe has no pattern layers.");
+            }
+            if (!HasRecipeStack(recipe, "ingredient"))
+            {
+                issues.Add($"Error: {kindLabel} recipe has no ingredient stack.");
+            }
+            if (!HasRecipeStack(recipe, "output"))
+            {
+                issues.Add($"Error: {kindLabel} recipe has no output stack.");
+            }
+        }
+
+        private static void ValidateCookingRecipe(JObject recipe, List<string> issues)
+        {
+            if (recipe["ingredients"] is not JArray ingredients || ingredients.Count == 0)
+            {
+                issues.Add("Error: cooking recipe has no ingredients array.");
+            }
+            else
+            {
+                for (int index = 0; index < ingredients.Count; index++)
+                {
+                    if (ingredients[index] is not JObject ingredient)
+                    {
+                        issues.Add($"Error: cooking ingredient {index} is not an object.");
+                        continue;
+                    }
+                    if (string.IsNullOrWhiteSpace(ingredient["code"]?.ToString()) &&
+                        string.IsNullOrWhiteSpace(ingredient["typeName"]?.ToString()) &&
+                        ingredient["validStacks"] is not JArray)
+                    {
+                        issues.Add($"Warning: cooking ingredient {index} has no code, typeName, or validStacks.");
+                    }
+                }
+            }
+
+            if (!HasRecipeStack(recipe, "cooksInto") && !HasRecipeStack(recipe, "output"))
+            {
+                issues.Add("Warning: cooking recipe has neither cooksInto nor output.");
+            }
+        }
+
+        private static void ValidateFlowRecipe(JObject recipe, List<string> issues, string kindLabel)
+        {
+            if (!HasRecipeStack(recipe, "ingredient") &&
+                !HasRecipeStack(recipe, "input") &&
+                recipe["ingredients"] is not JArray &&
+                recipe["inputs"] is not JArray)
+            {
+                issues.Add($"Error: {kindLabel} recipe has no input/ingredient stack or array.");
+            }
+            if (!HasRecipeStack(recipe, "output") && recipe["outputs"] is not JArray)
+            {
+                issues.Add($"Error: {kindLabel} recipe has no output stack or outputs array.");
+            }
+        }
+
+        private static void ValidateAlloyRatios(JObject recipe, List<string> issues)
+        {
+            if (recipe["ingredients"] is not JArray ingredients) return;
+            for (int index = 0; index < ingredients.Count; index++)
+            {
+                if (ingredients[index] is not JObject ingredient) continue;
+                bool hasMin = ingredient["minratio"] != null || ingredient["minRatio"] != null;
+                bool hasMax = ingredient["maxratio"] != null || ingredient["maxRatio"] != null;
+                if (!hasMin || !hasMax)
+                {
+                    issues.Add($"Warning: alloy ingredient {index} should define minratio and maxratio.");
+                }
+            }
+        }
+
+        private static bool HasRecipeStack(JObject recipe, string propertyName)
+        {
+            return recipe[propertyName] is JObject stack &&
+                (!string.IsNullOrWhiteSpace(stack["code"]?.ToString()) ||
+                 !string.IsNullOrWhiteSpace(stack["type"]?.ToString()) ||
+                 !string.IsNullOrWhiteSpace(stack["typeName"]?.ToString()) ||
+                 stack["validStacks"] is JArray);
+        }
+
+        private bool EditRecipeAdvancedJsonToken(RecipeEntry entry, string propertyName)
+        {
+            string bufferKey = GetRecipeAdvancedFieldBufferKey(entry.Key, propertyName);
+            if (!_jsonFieldBuffers.TryGetValue(bufferKey, out string? buffer))
+            {
+                buffer = SerializeToken(entry.Recipe[propertyName] ?? JValue.CreateNull());
+            }
+
+            ImGui.InputTextMultiline($"##recipe-advanced-json-{propertyName}", ref buffer, 128 * 1024, new NVector2(-1f, 96f), ImGuiInputTextFlags.AllowTabInput);
+            _jsonFieldBuffers[bufferKey] = buffer;
+
+            bool changed = false;
+            if (ImGui.Button($"Apply##recipe-advanced-apply-{propertyName}"))
+            {
+                if (DevToolsJson.TryParseToken(buffer, out JToken? token, out string error) && token != null)
+                {
+                    entry.Recipe[propertyName] = token;
+                    _jsonFieldBuffers[bufferKey] = SerializeToken(token);
+                    changed = true;
+                }
+                else
+                {
+                    _status = $"{propertyName} JSON parse failed: {error}";
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Format##recipe-advanced-format-{propertyName}"))
+            {
+                if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
+                {
+                    _jsonFieldBuffers[bufferKey] = formatted;
+                }
+                else
+                {
+                    _status = $"{propertyName} JSON format failed: {formatError}";
+                }
+            }
+
+            return changed;
+        }
+
+        private bool TryAddRecipeAdvancedField(JObject recipe, ISet<string> placeholderNames)
+        {
+            string propertyName = _newRecipeAdvancedFieldName.Trim();
+            if (propertyName.Length == 0)
+            {
+                _status = "Advanced recipe field name is required.";
+                return false;
+            }
+
+            if (KnownRecipeSchemaProperties.Contains(propertyName))
+            {
+                _status = $"{propertyName} is already handled by structured recipe controls.";
+                return false;
+            }
+
+            if (placeholderNames.Contains(propertyName) || KnownVariantPlaceholderNames.Contains(propertyName, StringComparer.OrdinalIgnoreCase))
+            {
+                _status = $"{propertyName} belongs in Variant placeholders.";
+                return false;
+            }
+
+            if (recipe[propertyName] != null)
+            {
+                _status = $"Recipe field {propertyName} already exists.";
+                return false;
+            }
+
+            recipe[propertyName] = CreateRecipeAdvancedFieldDefault(_newRecipeAdvancedFieldKindIndex);
+            _newRecipeAdvancedFieldName = "";
+            return true;
+        }
+
+        private static JToken CreateRecipeAdvancedFieldDefault(int fieldKindIndex)
+        {
+            return fieldKindIndex switch
+            {
+                1 => false,
+                2 => 0,
+                3 => 0f,
+                4 => new JObject(),
+                5 => new JArray(),
+                _ => ""
+            };
+        }
+
+        private static string GetRecipeAdvancedFieldBufferKey(string entryKey, string propertyName)
+        {
+            return $"recipe-advanced:{entryKey}:{propertyName}";
+        }
+
+        private void ClearRecipeAdvancedFieldBuffer(string entryKey, string propertyName)
+        {
+            _jsonFieldBuffers.Remove(GetRecipeAdvancedFieldBufferKey(entryKey, propertyName));
         }
 
         private static bool IsStringLikeToken(JToken token)

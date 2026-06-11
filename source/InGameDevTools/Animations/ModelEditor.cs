@@ -1,5 +1,6 @@
 using ImGuiNET;
 using InGameDevTools.Utils;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
@@ -1059,6 +1060,7 @@ public sealed partial class DebugWindowManager
         }
 
         DrawModelRuntimeControls(doc);
+        DrawModelExtraMetadataEditor("Document metadata", $"doc:{doc.DisplayPath}", doc.Extra, value => doc.Extra = value);
         ImGui.Spacing();
     }
 
@@ -1204,6 +1206,8 @@ public sealed partial class DebugWindowManager
         {
             ImGui.SetTooltip("Element in another shape this element attaches to when step-parented (e.g. a seraph bone for wearables). Options come from this shape and loaded entity shapes; type in the filter for anything else.");
         }
+
+        DrawModelExtraMetadataEditor("Element metadata", $"element:{element.GetHashCode()}", element.Extra, value => element.Extra = value);
 
         int selectedCount = ModelSelectedElementsInDocument().Count;
         if (ImGui.SmallButton(selectedCount > 1 ? "Duplicate selected##model-elem-duplicate" : "Duplicate##model-elem-duplicate"))
@@ -1371,12 +1375,86 @@ public sealed partial class DebugWindowManager
                     ModelMarkChanged();
                 }
                 if (ImGui.IsItemDeactivatedAfterEdit()) ModelEndEdit("Edit face glow");
+
+                DrawModelExtraMetadataEditor($"{ModelFaceNames[faceIndex]} metadata", $"face:{element.GetHashCode()}:{faceIndex}", face.Extra, value => face.Extra = value);
             }
             finally
             {
                 ImGui.PopID();
             }
         }
+    }
+
+    private void DrawModelExtraMetadataEditor(string label, string bufferKey, JObject? extra, Action<JObject?> setExtra)
+    {
+        if (extra == null)
+        {
+            if (ImGui.SmallButton($"Add {label}##model-extra-add-{bufferKey}"))
+            {
+                ModelBeginEdit();
+                setExtra(new JObject());
+                _modelMetadataBuffers.Remove(bufferKey);
+                ModelMarkChanged();
+                ModelEndEdit($"Add {label}");
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Adds an object for model JSON fields that are preserved but not otherwise represented by the editor.");
+            }
+            return;
+        }
+
+        ImGuiTreeNodeFlags flags = extra.Count > 0 ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
+        if (!ImGui.TreeNodeEx($"{label} ({extra.Count})##model-extra-node-{bufferKey}", flags)) return;
+
+        if (!_modelMetadataBuffers.TryGetValue(bufferKey, out string? buffer))
+        {
+            buffer = extra.ToString(Formatting.Indented);
+            _modelMetadataBuffers[bufferKey] = buffer;
+        }
+
+        ImGui.InputTextMultiline($"##model-extra-json-{bufferKey}", ref buffer, 256 * 1024, new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
+        _modelMetadataBuffers[bufferKey] = buffer;
+
+        if (ImGui.Button($"Apply##model-extra-apply-{bufferKey}"))
+        {
+            if (DevToolsJson.TryParseObject(buffer, out JObject? parsed, out string error) && parsed != null)
+            {
+                ModelBeginEdit();
+                setExtra(parsed.Count == 0 ? null : parsed);
+                _modelMetadataBuffers[bufferKey] = parsed.ToString(Formatting.Indented);
+                ModelMarkChanged();
+                ModelEndEdit($"Edit {label}");
+                _modelStatus = $"{label} updated.";
+            }
+            else
+            {
+                _modelStatus = $"{label} JSON parse failed: {error}";
+            }
+        }
+        ImGui.SameLine();
+        if (ImGui.Button($"Format##model-extra-format-{bufferKey}"))
+        {
+            if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
+            {
+                _modelMetadataBuffers[bufferKey] = formatted;
+            }
+            else
+            {
+                _modelStatus = $"{label} format failed: {formatError}";
+            }
+        }
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##model-extra-remove-{bufferKey}"))
+        {
+            ModelBeginEdit();
+            setExtra(null);
+            _modelMetadataBuffers.Remove(bufferKey);
+            ModelMarkChanged();
+            ModelEndEdit($"Remove {label}");
+        }
+
+        ImGui.TreePop();
     }
 
     // Single bare letters and Ctrl+digit combos pass through to the game (E opens the

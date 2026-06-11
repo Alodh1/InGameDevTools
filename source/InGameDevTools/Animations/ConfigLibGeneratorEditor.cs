@@ -246,7 +246,7 @@ public sealed partial class DebugWindowManager
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Arrays and objects are listed for visibility, but are disabled until ConfigLib mapping export is implemented.");
+            ImGui.SetTooltip("Arrays and objects can be included with their JSON defaults. Use the per-setting schema type override if the target ConfigLib version expects a custom type name.");
         }
 
         ImGui.SameLine();
@@ -267,10 +267,6 @@ public sealed partial class DebugWindowManager
 
                 bool selectableByType = IsConfigLibSettingSelectable(setting);
                 bool include = setting.Include && selectableByType;
-                if (!selectableByType)
-                {
-                    ImGui.BeginDisabled();
-                }
 
                 if (ImGui.Checkbox($"##configlib-setting-enabled-{index}", ref include))
                 {
@@ -283,11 +279,6 @@ public sealed partial class DebugWindowManager
                 if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                 {
                     ImGui.SetTooltip(setting.Tooltip);
-                }
-
-                if (!selectableByType)
-                {
-                    ImGui.EndDisabled();
                 }
 
                 if (open)
@@ -307,8 +298,25 @@ public sealed partial class DebugWindowManager
     {
         if (!selectableByType)
         {
-            ImGui.TextDisabled("Complex values are visible only until ConfigLib mapping export is implemented.");
+            ImGui.TextDisabled("This setting cannot be emitted until it has a non-empty code and an enabled type.");
             return;
+        }
+
+        if (IsConfigLibComplexSetting(setting))
+        {
+            string schemaType = setting.Type;
+            ImGui.SetNextItemWidth(180);
+            if (ImGui.InputText($"Schema type##configlib-type-{index}", ref schemaType, 80))
+            {
+                setting.Type = schemaType.Trim();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Detected from the JSON value as object or array. Override if the target ConfigLib version uses a custom complex type name.");
+            }
+
+            string defaultJson = setting.Default.ToString(Formatting.Indented);
+            ImGui.InputTextMultiline($"Default JSON##configlib-default-json-{index}", ref defaultJson, (uint)Math.Max(4096, defaultJson.Length + 1), new NVector2(-float.Epsilon, 82f), ImGuiInputTextFlags.ReadOnly);
         }
 
         string title = setting.Title;
@@ -687,14 +695,17 @@ public sealed partial class DebugWindowManager
     private bool IsConfigLibSettingSelectable(ConfigLibSettingDraft setting)
     {
         if (string.IsNullOrWhiteSpace(setting.Code)) return false;
-        if (IsConfigLibComplexSetting(setting)) return false;
+        if (string.IsNullOrWhiteSpace(setting.Type)) return false;
         if (!_configLibIncludeStrings && string.Equals(setting.Type, "string", StringComparison.OrdinalIgnoreCase)) return false;
         return true;
     }
 
     private static bool IsConfigLibComplexSetting(ConfigLibSettingDraft setting)
     {
-        return string.Equals(setting.Type, "other", StringComparison.OrdinalIgnoreCase);
+        return setting.Default is JObject or JArray ||
+            string.Equals(setting.Type, "object", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(setting.Type, "array", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(setting.Type, "other", StringComparison.OrdinalIgnoreCase);
     }
 
     private static JValue BuildConfigLibNumericToken(ConfigLibSettingDraft draft, double value)
@@ -863,7 +874,7 @@ public sealed partial class DebugWindowManager
                 }
                 else
                 {
-                    settings.Add(ConfigLibSettingDraft.From(path, "other", MakeJsonCompatibleDefault(token)));
+                    settings.Add(ConfigLibSettingDraft.From(path, "object", MakeJsonCompatibleDefault(token)));
                     foreach (JProperty property in obj.Properties())
                     {
                         VisitConfigLibToken(property.Value, JoinConfigLibPath(path, property.Name), settings);
@@ -873,7 +884,7 @@ public sealed partial class DebugWindowManager
             case JArray array:
                 if (!string.IsNullOrWhiteSpace(path))
                 {
-                    settings.Add(ConfigLibSettingDraft.From(path, "other", MakeJsonCompatibleDefault(token)));
+                    settings.Add(ConfigLibSettingDraft.From(path, "array", MakeJsonCompatibleDefault(token)));
                 }
 
                 for (int index = 0; index < array.Count; index++)
@@ -1047,14 +1058,14 @@ public sealed partial class DebugWindowManager
             IsNumeric = string.Equals(type, "integer", StringComparison.OrdinalIgnoreCase) || string.Equals(type, "float", StringComparison.OrdinalIgnoreCase);
             InitializeNumericDefaults(defaultValue);
             DefaultPreview = BuildDefaultPreview(defaultValue);
-            Tooltip = string.Equals(type, "other", StringComparison.OrdinalIgnoreCase)
-                ? $"{code}\nType: {type}\nArrays and objects need ConfigLib mapping support and are not exported yet.\nDefault: {DefaultPreview}"
+            Tooltip = IsComplexDefault(defaultValue)
+                ? $"{code}\nType: {type}\nComplex JSON default is exported as-is. Override the schema type if your ConfigLib version expects a custom name.\nDefault: {DefaultPreview}"
                 : $"{code}\nType: {type}\nDefault: {DefaultPreview}";
         }
 
         public string Code { get; }
         public string Name { get; }
-        public string Type { get; }
+        public string Type { get; set; }
         public JToken Default { get; }
         public bool Include { get; set; }
         public string Title { get; set; }
@@ -1103,6 +1114,11 @@ public sealed partial class DebugWindowManager
                 JTokenType.Boolean or JTokenType.Integer or JTokenType.Float => token.ToString(Formatting.None),
                 _ => token.ToString(Formatting.None)
             };
+        }
+
+        private static bool IsComplexDefault(JToken token)
+        {
+            return token is JObject or JArray;
         }
     }
 }

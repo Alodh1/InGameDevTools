@@ -31,10 +31,11 @@ public sealed partial class DebugWindowManager
     ];
     private static readonly string[] PatchCreatorOutputFormatLabels = ["JsonPatchesLib", "Vanilla patches"];
     private static readonly string[] PatchCreatorTargetModeLabels = ["Exact asset", "Wildcard @", "Regex @@"];
-    private static readonly string[] PatchCreatorTemplateLabels = ["Set property", "Append to array", "Remove value/property", "Merge list values", "Run expression", "Copy path", "Move path", "Raw operation"];
-    private static readonly string[] PatchCreatorJsonPatchesLibOps = ["add", "replace", "remove", "copy", "move", "addmerge", "addeach", "expression"];
-    private static readonly string[] PatchCreatorVanillaOps = ["add", "replace", "remove", "copy", "move"];
+    private static readonly string[] PatchCreatorTemplateLabels = ["Set property", "Append to array", "Remove value/property", "Test value", "Merge list values", "Run expression", "Copy path", "Move path", "Raw operation"];
+    private static readonly string[] PatchCreatorJsonPatchesLibOps = ["add", "replace", "remove", "copy", "move", "test", "addmerge", "addeach", "expression"];
+    private static readonly string[] PatchCreatorVanillaOps = ["add", "replace", "remove", "copy", "move", "test"];
     private static readonly string[] PatchCreatorSideLabels = ["Server", "Client", "Universal"];
+    private static readonly string[] PatchCreatorConditionModeLabels = ["No condition", "Use setting value", "Is true", "Is false", "Is custom value"];
 
     private readonly List<PatchCreatorAssetEntry> _patchCreatorAssets = [];
     private readonly List<PatchCreatorAssetEntry> _visiblePatchCreatorAssets = [];
@@ -59,8 +60,11 @@ public sealed partial class DebugWindowManager
     private string _patchCreatorFromPath = "";
     private string _patchCreatorValueJson = "null";
     private string _patchCreatorConditionJson = "";
+    private string _patchCreatorConditionWhen = "";
+    private string _patchCreatorConditionValueJson = "true";
     private bool _patchCreatorEnabled = true;
     private int _patchCreatorPriority;
+    private int _patchCreatorConditionMode;
     private int _patchCreatorPreviewMode;
     private string _patchCreatorStatus = "Patch creator ready.";
     private string _patchCreatorSelectedPath = "";
@@ -484,8 +488,7 @@ public sealed partial class DebugWindowManager
             ImGui.InputInt("Priority##patch-creator-priority", ref _patchCreatorPriority);
             if (CurrentPatchCreatorOutputFormat == PatchCreatorOutputFormat.Vanilla)
             {
-                ImGui.TextUnformatted("Condition JSON");
-                ImGui.InputTextMultiline("##patch-creator-condition-json", ref _patchCreatorConditionJson, 64 * 1024, new NVector2(-float.Epsilon, 70f), ImGuiInputTextFlags.AllowTabInput);
+                DrawPatchCreatorConditionBuilder();
             }
             else
             {
@@ -518,6 +521,144 @@ public sealed partial class DebugWindowManager
             }
             if (!canAdd) ImGui.EndDisabled();
         }
+    }
+
+    private void DrawPatchCreatorConditionBuilder()
+    {
+        ImGui.SeparatorText("Condition");
+        bool changed = false;
+        _patchCreatorConditionMode = Math.Clamp(_patchCreatorConditionMode, 0, PatchCreatorConditionModeLabels.Length - 1);
+        changed |= ImGui.Combo("Mode##patch-creator-condition-mode", ref _patchCreatorConditionMode, PatchCreatorConditionModeLabels, PatchCreatorConditionModeLabels.Length);
+
+        if (_patchCreatorConditionMode > 0)
+        {
+            changed |= ImGui.InputText("When##patch-creator-condition-when", ref _patchCreatorConditionWhen, 160);
+        }
+
+        if (_patchCreatorConditionMode == 4)
+        {
+            ImGui.TextUnformatted("isValue JSON");
+            changed |= ImGui.InputTextMultiline("##patch-creator-condition-is-value", ref _patchCreatorConditionValueJson, 64 * 1024, new NVector2(-float.Epsilon, 58f), ImGuiInputTextFlags.AllowTabInput);
+        }
+
+        if (changed)
+        {
+            if (TryBuildPatchCreatorConditionJson(out string conditionJson, out string error))
+            {
+                _patchCreatorConditionJson = conditionJson;
+            }
+            else
+            {
+                _patchCreatorStatus = error;
+            }
+        }
+
+        if (ImGui.Button("Load builder from raw##patch-creator-condition-load"))
+        {
+            LoadPatchCreatorConditionBuilder(_patchCreatorConditionJson);
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Clear condition##patch-creator-condition-clear"))
+        {
+            _patchCreatorConditionMode = 0;
+            _patchCreatorConditionWhen = "";
+            _patchCreatorConditionValueJson = "true";
+            _patchCreatorConditionJson = "";
+        }
+
+        if (ImGui.TreeNode("Raw condition JSON##patch-creator-condition-raw"))
+        {
+            ImGui.InputTextMultiline("##patch-creator-condition-json", ref _patchCreatorConditionJson, 64 * 1024, new NVector2(-float.Epsilon, 70f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.TreePop();
+        }
+    }
+
+    private bool TryBuildPatchCreatorConditionJson(out string conditionJson, out string error)
+    {
+        conditionJson = "";
+        error = "";
+        if (_patchCreatorConditionMode == 0)
+        {
+            return true;
+        }
+
+        string when = _patchCreatorConditionWhen.Trim();
+        if (string.IsNullOrWhiteSpace(when))
+        {
+            error = "Condition 'when' setting key is required.";
+            return false;
+        }
+
+        JObject condition = new()
+        {
+            ["when"] = when
+        };
+
+        switch (_patchCreatorConditionMode)
+        {
+            case 1:
+                condition["useValue"] = true;
+                break;
+            case 2:
+                condition["isValue"] = true;
+                break;
+            case 3:
+                condition["isValue"] = false;
+                break;
+            case 4:
+                if (!TryParsePatchCreatorJson(_patchCreatorConditionValueJson, out JToken? value, out string valueError) || value == null)
+                {
+                    error = $"Condition isValue JSON is invalid: {valueError}";
+                    return false;
+                }
+                condition["isValue"] = value;
+                break;
+        }
+
+        conditionJson = condition.ToString(Formatting.Indented);
+        return true;
+    }
+
+    private void LoadPatchCreatorConditionBuilder(string conditionJson)
+    {
+        if (string.IsNullOrWhiteSpace(conditionJson))
+        {
+            _patchCreatorConditionMode = 0;
+            _patchCreatorConditionWhen = "";
+            _patchCreatorConditionValueJson = "true";
+            return;
+        }
+
+        if (!TryParsePatchCreatorJson(conditionJson, out JToken? token, out _) || token is not JObject condition)
+        {
+            return;
+        }
+
+        _patchCreatorConditionWhen = condition["when"]?.ToString() ?? "";
+        if (condition["useValue"] != null)
+        {
+            _patchCreatorConditionMode = 1;
+            _patchCreatorConditionValueJson = "true";
+            return;
+        }
+
+        JToken? isValue = condition["isValue"];
+        if (isValue == null)
+        {
+            _patchCreatorConditionMode = 0;
+            _patchCreatorConditionValueJson = "true";
+            return;
+        }
+
+        if (isValue.Type == JTokenType.Boolean)
+        {
+            _patchCreatorConditionMode = isValue.Value<bool>() ? 2 : 3;
+            _patchCreatorConditionValueJson = isValue.Value<bool>() ? "true" : "false";
+            return;
+        }
+
+        _patchCreatorConditionMode = 4;
+        _patchCreatorConditionValueJson = isValue.ToString(Formatting.Indented);
     }
 
     private void DrawPatchCreatorOperationList()
@@ -676,17 +817,21 @@ public sealed partial class DebugWindowManager
                 _patchCreatorValueJson = "";
                 break;
             case 3:
+                SetPatchCreatorBuilderOp("test");
+                if (!string.IsNullOrWhiteSpace(_patchCreatorSelectedTokenJson)) _patchCreatorValueJson = _patchCreatorSelectedTokenJson;
+                break;
+            case 4:
                 SetPatchCreatorBuilderOp(CurrentPatchCreatorOutputFormat == PatchCreatorOutputFormat.JsonPatchesLib ? "addmerge" : "add");
                 _patchCreatorValueJson = "[]";
                 break;
-            case 4:
+            case 5:
                 SetPatchCreatorBuilderOp(CurrentPatchCreatorOutputFormat == PatchCreatorOutputFormat.JsonPatchesLib ? "expression" : "replace");
                 _patchCreatorValueJson = CurrentPatchCreatorOutputFormat == PatchCreatorOutputFormat.JsonPatchesLib ? "value" : "0";
                 break;
-            case 5:
+            case 6:
                 SetPatchCreatorBuilderOp("copy");
                 break;
-            case 6:
+            case 7:
                 SetPatchCreatorBuilderOp("move");
                 break;
         }
@@ -778,6 +923,7 @@ public sealed partial class DebugWindowManager
         _patchCreatorFromPath = operation.FromPath;
         _patchCreatorValueJson = operation.ValueJson;
         _patchCreatorConditionJson = operation.ConditionJson;
+        LoadPatchCreatorConditionBuilder(_patchCreatorConditionJson);
         _patchCreatorEnabled = operation.Enabled;
         _patchCreatorPriority = operation.Priority;
         int sideIndex = Array.FindIndex(PatchCreatorSideLabels, side => side.Equals(operation.Side, StringComparison.OrdinalIgnoreCase));
@@ -928,6 +1074,12 @@ public sealed partial class DebugWindowManager
                     if (!TryGetPatchCreatorToken(root, operation.FromPath, out JToken? moveToken, out error)) return false;
                     if (!TrySetPatchCreatorToken(ref root, operation.Path, moveToken.DeepClone(), add: true, out error)) return false;
                     return TryRemovePatchCreatorToken(ref root, operation.FromPath, null, out error);
+                case "test":
+                    if (!TryGetPatchCreatorToken(root, operation.Path, out JToken? testToken, out error)) return false;
+                    JToken expected = ParsePatchCreatorValue(operation);
+                    if (JToken.DeepEquals(testToken, expected)) return true;
+                    error = $"Test failed. Expected {expected.ToString(Formatting.None)}, found {testToken.ToString(Formatting.None)}.";
+                    return false;
                 case "addmerge":
                     return TryAddMergePatchCreatorToken(ref root, operation.Path, ParsePatchCreatorValue(operation), out error);
                 case "addeach":
@@ -1332,6 +1484,7 @@ public sealed partial class DebugWindowManager
     private static bool PatchCreatorOpNeedsValue(string op) =>
         op.Equals("add", StringComparison.OrdinalIgnoreCase) ||
         op.Equals("replace", StringComparison.OrdinalIgnoreCase) ||
+        op.Equals("test", StringComparison.OrdinalIgnoreCase) ||
         op.Equals("addmerge", StringComparison.OrdinalIgnoreCase) ||
         op.Equals("addeach", StringComparison.OrdinalIgnoreCase) ||
         op.Equals("expression", StringComparison.OrdinalIgnoreCase);

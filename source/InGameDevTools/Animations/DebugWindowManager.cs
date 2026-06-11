@@ -712,7 +712,7 @@ public sealed partial class DebugWindowManager : IDisposable
         Settings
     }
 
-    private static readonly bool BlockItemJsonEditorVisible = false;
+    private static readonly bool BlockItemJsonEditorVisible = true;
 
     private readonly AnimationEditorHistory _animationHistory = new();
     private TransformGizmoRenderer? _transformGizmoRenderer;

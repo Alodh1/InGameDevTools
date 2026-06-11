@@ -26,6 +26,7 @@ public sealed partial class DebugWindowManager
     private string _blockItemJsonOriginalText = "";
     private string _blockItemJsonStatus = "";
     private string _blockItemJsonLiveAppliedHash = "";
+    private readonly Dictionary<string, string> _blockItemJsonFieldBuffers = new(StringComparer.Ordinal);
 
     private void BlockItemJsonEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -215,12 +216,30 @@ public sealed partial class DebugWindowManager
         EnsureBlockItemJsonEntryLoaded(entry);
 
         ImGui.SeparatorText(entry.Label);
-        ImGui.TextDisabled("Raw authoring JSON. Runtime apply currently patches attributes/transforms; source save writes the full JSON.");
+        ImGui.TextDisabled("Structured source fields are above the raw editor. Runtime apply patches attributes only; source save writes the full JSON.");
+
+        JObject? structuredJson = TryParseJsonObject(_blockItemJsonText);
+        if (structuredJson != null)
+        {
+            if (DrawBlockItemJsonStructuredEditor(entry, structuredJson))
+            {
+                _blockItemJsonText = structuredJson.ToString(Formatting.Indented);
+                _blockItemJsonStatus = "Structured JSON edited. Apply runtime attributes or save authored file when ready.";
+                RebuildVisibleBlockItemJsonAssets();
+            }
+        }
+        else
+        {
+            ImGui.TextColored(new NVector4(1f, 0.45f, 0.30f, 1f), "Structured controls disabled until raw JSON parses.");
+        }
+
+        ImGui.SeparatorText("Raw JSON");
 
         NVector2 editorSize = new(-float.Epsilon, Math.Max(220f, ImGui.GetContentRegionAvail().Y - 34f));
         if (ImGui.InputTextMultiline("##block-item-json-text", ref _blockItemJsonText, 1024 * 1024, editorSize, ImGuiInputTextFlags.AllowTabInput))
         {
             _blockItemJsonStatus = "JSON edited. Apply runtime or save authored file when ready.";
+            _blockItemJsonFieldBuffers.Clear();
             RebuildVisibleBlockItemJsonAssets();
             if (_liveApplyManager.AutoApply)
             {
@@ -229,6 +248,196 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.EndChild();
+    }
+
+    private bool DrawBlockItemJsonStructuredEditor(BlockItemJsonEntry entry, JObject json)
+    {
+        bool changed = false;
+
+        if (ImGui.CollapsingHeader("Identity and variants##block-json-identity", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            ImGui.Indent();
+            changed |= EditBlockItemJsonString(json, "code", "Code##block-json-code", saveOnly: true, maxLength: 240);
+            changed |= EditBlockItemJsonOptionalString(json, "class", "Class##block-json-class", saveOnly: true);
+            changed |= EditBlockItemJsonOptionalBool(json, "enabled", "Enabled##block-json-enabled", saveOnly: true, defaultValue: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "variantgroups", "Variant groups JSON##block-json-variantgroups", new JArray(), saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "byType", "By-type JSON##block-json-bytype", new JObject(), saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "creativeinventory", "Creative inventory JSON##block-json-creative", new JObject(), saveOnly: true);
+            ImGui.Unindent();
+        }
+
+        if (ImGui.CollapsingHeader("Shape, textures, and render##block-json-shape", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            ImGui.Indent();
+            changed |= EditBlockItemJsonTokenField(entry, json, "shape", "Shape JSON##block-json-shape-field", new JObject { ["base"] = "" }, saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "textures", "Textures JSON##block-json-textures", new JObject(), saveOnly: true);
+            changed |= EditBlockItemJsonOptionalString(json, "drawtype", "Draw type##block-json-drawtype", saveOnly: true);
+            changed |= EditBlockItemJsonOptionalString(json, "renderpass", "Render pass##block-json-renderpass", saveOnly: true);
+            changed |= EditBlockItemJsonOptionalBool(json, "ambientocclusion", "Ambient occlusion##block-json-ao", saveOnly: true, defaultValue: true);
+            ImGui.Unindent();
+        }
+
+        if (ImGui.CollapsingHeader("Behaviors, drops, and attributes##block-json-behaviors", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            ImGui.Indent();
+            changed |= EditBlockItemJsonTokenField(entry, json, "behaviors", "Behaviors JSON##block-json-behaviors-field", new JArray(), saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "drops", "Drops JSON##block-json-drops", new JArray(), saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "attributes", "Attributes JSON##block-json-attributes", new JObject(), saveOnly: false, runtimeAttributes: true);
+            ImGui.Unindent();
+        }
+
+        if (ImGui.CollapsingHeader("Gameplay properties##block-json-gameplay"))
+        {
+            ImGui.Indent();
+            changed |= EditBlockItemJsonTokenField(entry, json, "combustibleProps", "Combustible props JSON##block-json-combustible", new JObject(), saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "nutritionProps", "Nutrition props JSON##block-json-nutrition", new JObject(), saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "transitionableProps", "Transitionable props JSON##block-json-transitionable", new JArray(), saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "storageFlags", "Storage flags JSON##block-json-storage-flags", new JArray(), saveOnly: true);
+            changed |= EditBlockItemJsonTokenField(entry, json, "heldTpIdleAnimation", "Held animation JSON##block-json-held-animation", new JObject(), saveOnly: true);
+            ImGui.Unindent();
+        }
+
+        return changed;
+    }
+
+    private static void DrawBlockItemJsonScopeLabel(bool saveOnly, bool runtimeAttributes = false)
+    {
+        ImGui.SameLine();
+        ImGui.TextDisabled(runtimeAttributes ? "live attributes + source save" : saveOnly ? "source save" : "runtime + source");
+    }
+
+    private bool EditBlockItemJsonString(JObject json, string propertyName, string label, bool saveOnly, int maxLength)
+    {
+        string value = json[propertyName]?.ToString() ?? "";
+        ImGui.SetNextItemWidth(Math.Max(180f, ImGui.GetContentRegionAvail().X - 170f));
+        if (!ImGui.InputText(label, ref value, (uint)maxLength))
+        {
+            DrawBlockItemJsonScopeLabel(saveOnly);
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(value)) json.Remove(propertyName);
+        else json[propertyName] = value;
+        DrawBlockItemJsonScopeLabel(saveOnly);
+        return true;
+    }
+
+    private bool EditBlockItemJsonOptionalString(JObject json, string propertyName, string label, bool saveOnly)
+    {
+        if (json[propertyName] == null)
+        {
+            if (!ImGui.Button($"Add {label}")) return false;
+            json[propertyName] = "";
+            DrawBlockItemJsonScopeLabel(saveOnly);
+            return true;
+        }
+
+        bool changed = EditBlockItemJsonString(json, propertyName, label, saveOnly, maxLength: 512);
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##block-json-remove-{propertyName}"))
+        {
+            json.Remove(propertyName);
+            return true;
+        }
+        return changed;
+    }
+
+    private bool EditBlockItemJsonOptionalBool(JObject json, string propertyName, string label, bool saveOnly, bool defaultValue)
+    {
+        if (json[propertyName] == null)
+        {
+            if (!ImGui.Button($"Add {label}")) return false;
+            json[propertyName] = defaultValue;
+            DrawBlockItemJsonScopeLabel(saveOnly);
+            return true;
+        }
+
+        bool value = json[propertyName]?.Value<bool?>() ?? defaultValue;
+        if (ImGui.Checkbox(label, ref value))
+        {
+            json[propertyName] = value;
+            DrawBlockItemJsonScopeLabel(saveOnly);
+            return true;
+        }
+
+        DrawBlockItemJsonScopeLabel(saveOnly);
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##block-json-remove-{propertyName}"))
+        {
+            json.Remove(propertyName);
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool EditBlockItemJsonTokenField(BlockItemJsonEntry entry, JObject json, string propertyName, string label, JToken defaultToken, bool saveOnly, bool runtimeAttributes = false)
+    {
+        if (json[propertyName] == null)
+        {
+            if (!ImGui.Button($"Add {label}")) return false;
+            json[propertyName] = defaultToken.DeepClone();
+            DrawBlockItemJsonScopeLabel(saveOnly, runtimeAttributes);
+            return true;
+        }
+
+        bool changed = false;
+        ImGuiTreeNodeFlags flags = propertyName.Equals("attributes", StringComparison.OrdinalIgnoreCase) ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
+        if (ImGui.TreeNodeEx(label, flags))
+        {
+            DrawBlockItemJsonScopeLabel(saveOnly, runtimeAttributes);
+            string bufferKey = GetBlockItemJsonFieldBufferKey(entry, propertyName);
+            if (!_blockItemJsonFieldBuffers.TryGetValue(bufferKey, out string? buffer))
+            {
+                buffer = json[propertyName]?.ToString(Formatting.Indented) ?? defaultToken.ToString(Formatting.Indented);
+            }
+
+            ImGui.InputTextMultiline($"##block-json-field-{propertyName}", ref buffer, 256 * 1024, new NVector2(-float.Epsilon, 110f), ImGuiInputTextFlags.AllowTabInput);
+            _blockItemJsonFieldBuffers[bufferKey] = buffer;
+
+            if (ImGui.Button($"Apply##block-json-apply-{propertyName}"))
+            {
+                JToken? parsed = DevToolsJson.TryParseToken(buffer, useVintageStoryFallback: false);
+                if (parsed == null)
+                {
+                    _blockItemJsonStatus = $"{propertyName} JSON is malformed.";
+                }
+                else
+                {
+                    json[propertyName] = parsed;
+                    _blockItemJsonFieldBuffers[bufferKey] = parsed.ToString(Formatting.Indented);
+                    changed = true;
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Format##block-json-format-{propertyName}"))
+            {
+                if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
+                {
+                    _blockItemJsonFieldBuffers[bufferKey] = formatted;
+                }
+                else
+                {
+                    _blockItemJsonStatus = $"{propertyName} format failed: {formatError}";
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##block-json-remove-{propertyName}"))
+            {
+                json.Remove(propertyName);
+                _blockItemJsonFieldBuffers.Remove(bufferKey);
+                changed = true;
+            }
+
+            ImGui.TreePop();
+        }
+
+        return changed;
+    }
+
+    private static string GetBlockItemJsonFieldBufferKey(BlockItemJsonEntry entry, string propertyName)
+    {
+        return $"{entry.Key}:{propertyName}";
     }
 
     private void DrawBlockItemJsonInspector(NVector2 size, bool showDiagnostics)

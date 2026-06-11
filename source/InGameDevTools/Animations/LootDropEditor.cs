@@ -18,6 +18,28 @@ public sealed partial class DebugWindowManager
     private const float LootDropWeightEpsilon = 0.0001f;
     private const int LootDropIndexBatchSize = 90;
 
+    private static readonly HashSet<string> LootDropTradeFirstClassProperties = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "type",
+        "code",
+        "stacksize",
+        "stackSize",
+        "quantity",
+        "price",
+        "stock",
+        "attributes"
+    };
+
+    private static readonly string[] LootDropAdvancedFieldKindLabels =
+    [
+        "String",
+        "Boolean",
+        "Integer",
+        "Float",
+        "Object",
+        "Array"
+    ];
+
     private readonly List<LootDropEntry> _lootDropEntries = [];
     private readonly List<LootDropEntry> _visibleLootDropEntries = [];
     private readonly List<LootDropDraft> _lootDropDrafts = [];
@@ -53,6 +75,9 @@ public sealed partial class DebugWindowManager
     private BlockDropItemStack[] _lootDropValidatedRuntimeDrops = [];
     private int _lootDropSimulationRuns = 1000;
     private string _lootDropSimulationText = "";
+    private readonly Dictionary<string, string> _lootDropJsonFieldBuffers = new(StringComparer.Ordinal);
+    private string _lootDropNewTradeFieldName = "";
+    private int _lootDropNewTradeFieldKindIndex;
 
     private void LootDropEditorTab(float deltaSeconds, bool showDiagnostics)
     {
@@ -147,6 +172,7 @@ public sealed partial class DebugWindowManager
             _lootDropSimulationText = "";
             _lootDropDrafts.Clear();
             _lootDropDraftStates.Clear();
+            _lootDropJsonFieldBuffers.Clear();
             _lootDropSelectedDraftIndex = 0;
         }
 
@@ -518,15 +544,31 @@ public sealed partial class DebugWindowManager
         }
         if (!canRemove) ImGui.EndDisabled();
 
+        DrawLootDropGroupingPanel();
+
         float leftWidth = Math.Min(270f * _devToolsUiScale, Math.Max(180f, ImGui.GetContentRegionAvail().X * 0.35f));
         ImGui.BeginChild("##loot-drop-list", new NVector2(leftWidth, Math.Max(160f, ImGui.GetContentRegionAvail().Y)), true);
+        Dictionary<int, LootDropWeightedGroupInfo> weightedGroupMap = BuildLootDropWeightedGroupMap(_lootDropDrafts);
         for (int index = 0; index < _lootDropDrafts.Count; index++)
         {
             LootDropDraft draft = _lootDropDrafts[index];
-            string weightLabel = IsWeightedLootDrop(draft) ? $" w{draft.Weight:0.###}" : "";
+            string weightLabel = "";
+            if (weightedGroupMap.TryGetValue(index, out LootDropWeightedGroupInfo groupInfo))
+            {
+                weightLabel = $" G{groupInfo.GroupNumber}:{GetLootDropWeightPercent(draft, groupInfo):0.#}%";
+            }
+            else if (IsWeightedLootDrop(draft))
+            {
+                weightLabel = $" w{draft.Weight:0.###}";
+            }
+
             if (ImGui.Selectable($"{index}: {draft.Type}:{draft.Code} x{draft.QuantityAvg:0.##}{weightLabel}##loot-drop-row-{index}", index == _lootDropSelectedDraftIndex))
             {
                 _lootDropSelectedDraftIndex = index;
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(BuildLootDropRowTooltip(draft, index, weightedGroupMap));
             }
         }
         ImGui.EndChild();
@@ -613,6 +655,71 @@ public sealed partial class DebugWindowManager
         return changed;
     }
 
+    private void DrawLootDropGroupingPanel()
+    {
+        if (_lootDropDrafts.Count == 0) return;
+
+        ImGuiTreeNodeFlags flags = HasWeightedLootDrops(_lootDropDrafts) || _lootDropDrafts.Any(HasLootDropConditionOrFlow)
+            ? ImGuiTreeNodeFlags.DefaultOpen
+            : ImGuiTreeNodeFlags.None;
+        if (!ImGui.TreeNodeEx("Groups and conditions##loot-drop-groups", flags)) return;
+
+        List<LootDropWeightedGroupInfo> groups = BuildLootDropWeightedGroups(_lootDropDrafts);
+        if (groups.Count == 0 && !_lootDropDrafts.Any(HasLootDropConditionOrFlow))
+        {
+            ImGui.TextDisabled("No weighted groups, tool/stat gates, attributes, or last-drop stops.");
+            ImGui.TreePop();
+            return;
+        }
+
+        int groupCursor = 0;
+        for (int index = 0; index < _lootDropDrafts.Count;)
+        {
+            if (groupCursor < groups.Count && groups[groupCursor].StartIndex == index)
+            {
+                LootDropWeightedGroupInfo group = groups[groupCursor++];
+                string groupLabel = $"Weighted group {group.GroupNumber}: rows {group.StartIndex}-{group.EndExclusive - 1}, total weight {group.TotalWeight:0.###}##loot-drop-group-{group.GroupNumber}";
+                if (ImGui.TreeNodeEx(groupLabel, ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    for (int row = group.StartIndex; row < group.EndExclusive; row++)
+                    {
+                        DrawLootDropGroupingRow(row, _lootDropDrafts[row], group);
+                    }
+                    ImGui.TreePop();
+                }
+
+                index = group.EndExclusive;
+                continue;
+            }
+
+            DrawLootDropGroupingRow(index, _lootDropDrafts[index], null);
+            index++;
+        }
+
+        ImGui.TreePop();
+    }
+
+    private void DrawLootDropGroupingRow(int index, LootDropDraft draft, LootDropWeightedGroupInfo? group)
+    {
+        string chance = group.HasValue ? $" ({GetLootDropWeightPercent(draft, group.Value):0.#}% pick)" : "";
+        bool selected = index == _lootDropSelectedDraftIndex;
+        if (ImGui.Selectable($"{index}: {draft.Type}:{draft.Code}{chance}##loot-drop-group-row-{index}", selected))
+        {
+            _lootDropSelectedDraftIndex = index;
+        }
+
+        string conditionSummary = BuildLootDropConditionSummary(draft);
+        if (!string.IsNullOrWhiteSpace(conditionSummary))
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled(conditionSummary);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(BuildLootDropRowTooltip(draft, index, BuildLootDropWeightedGroupMap(_lootDropDrafts)));
+        }
+    }
+
     private void DrawTradeTableEditor(LootDropEntry entry)
     {
         ImGui.TextDisabled($"Trade token path: {string.Join(".", entry.TradePath)}");
@@ -678,6 +785,8 @@ public sealed partial class DebugWindowManager
             changed |= EditJsonFloat(price, "var", $"Price var##loot-trade-price-var-{propertyName}-{index}", 0, 1000000);
             changed |= EditJsonFloat(stock, "avg", $"Stock avg##loot-trade-stock-avg-{propertyName}-{index}", 0, 1000000);
             changed |= EditJsonFloat(stock, "var", $"Stock var##loot-trade-stock-var-{propertyName}-{index}", 0, 1000000);
+            changed |= DrawTradeItemAttributesEditor(item, propertyName, index);
+            changed |= DrawTradeItemAdvancedFieldsEditor(item, propertyName, index);
 
             if (ImGui.Button($"Remove##loot-trade-remove-{propertyName}-{index}"))
             {
@@ -699,6 +808,279 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.TreePop();
+    }
+
+    private bool DrawTradeItemAttributesEditor(JObject item, string propertyName, int index)
+    {
+        string bufferKey = $"{_lootDropLoadedKey}:trade:{propertyName}:{index}:attributes";
+        if (item["attributes"] == null)
+        {
+            _lootDropJsonFieldBuffers.Remove(bufferKey);
+            if (!ImGui.Button($"Add attributes##loot-trade-add-attrs-{propertyName}-{index}")) return false;
+
+            item["attributes"] = new JObject();
+            _lootDropJsonFieldBuffers[bufferKey] = "{}";
+            return true;
+        }
+
+        bool changed = false;
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags.DefaultOpen;
+        if (ImGui.TreeNodeEx($"Attributes JSON##loot-trade-attrs-{propertyName}-{index}", flags))
+        {
+            if (!_lootDropJsonFieldBuffers.TryGetValue(bufferKey, out string? buffer))
+            {
+                buffer = item["attributes"]?.ToString(Formatting.Indented) ?? "{}";
+            }
+
+            ImGui.InputTextMultiline($"##loot-trade-attrs-text-{propertyName}-{index}", ref buffer, 64 * 1024, new NVector2(-float.Epsilon, 104f), ImGuiInputTextFlags.AllowTabInput);
+            _lootDropJsonFieldBuffers[bufferKey] = buffer;
+
+            if (ImGui.Button($"Apply attributes##loot-trade-apply-attrs-{propertyName}-{index}"))
+            {
+                JToken? parsed = TryParseJsonToken(buffer);
+                if (parsed == null)
+                {
+                    _lootDropStatus = "Trade item attributes JSON is malformed.";
+                }
+                else
+                {
+                    item["attributes"] = parsed;
+                    _lootDropJsonFieldBuffers[bufferKey] = parsed.ToString(Formatting.Indented);
+                    changed = true;
+                }
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button($"Format##loot-trade-format-attrs-{propertyName}-{index}"))
+            {
+                if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
+                {
+                    _lootDropJsonFieldBuffers[bufferKey] = formatted;
+                }
+                else
+                {
+                    _lootDropStatus = $"Trade item attributes format failed: {formatError}";
+                }
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove attributes##loot-trade-remove-attrs-{propertyName}-{index}"))
+            {
+                item.Remove("attributes");
+                _lootDropJsonFieldBuffers.Remove(bufferKey);
+                changed = true;
+            }
+
+            ImGui.TreePop();
+        }
+
+        return changed;
+    }
+
+    private bool DrawTradeItemAdvancedFieldsEditor(JObject item, string listPropertyName, int index)
+    {
+        List<JProperty> advancedProperties = item.Properties()
+            .Where(property => !LootDropTradeFirstClassProperties.Contains(property.Name))
+            .OrderBy(property => property.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        ImGuiTreeNodeFlags flags = advancedProperties.Count > 0 ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
+        if (!ImGui.TreeNodeEx($"Advanced fields ({advancedProperties.Count})##loot-trade-advanced-{listPropertyName}-{index}", flags)) return false;
+
+        bool changed = false;
+        foreach (JProperty property in advancedProperties)
+        {
+            ImGui.PushID($"loot-trade-advanced-{listPropertyName}-{index}-{property.Name}");
+            ImGui.Separator();
+            changed |= DrawTradeItemAdvancedField(item, listPropertyName, index, property);
+            ImGui.PopID();
+        }
+
+        ImGui.SeparatorText("Add advanced field");
+        ImGui.SetNextItemWidth(180);
+        ImGui.InputTextWithHint($"##loot-trade-advanced-new-name-{listPropertyName}-{index}", "field name", ref _lootDropNewTradeFieldName, 128);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(110);
+        ImGui.Combo($"Type##loot-trade-advanced-new-kind-{listPropertyName}-{index}", ref _lootDropNewTradeFieldKindIndex, LootDropAdvancedFieldKindLabels, LootDropAdvancedFieldKindLabels.Length);
+        ImGui.SameLine();
+        if (ImGui.Button($"Add##loot-trade-advanced-add-{listPropertyName}-{index}"))
+        {
+            changed |= TryAddTradeItemAdvancedField(item);
+        }
+
+        ImGui.TreePop();
+        return changed;
+    }
+
+    private bool DrawTradeItemAdvancedField(JObject item, string listPropertyName, int index, JProperty property)
+    {
+        string fieldName = property.Name;
+        bool changed = false;
+
+        if (property.Value is JObject or JArray)
+        {
+            if (ImGui.TreeNodeEx($"{fieldName} JSON##loot-trade-advanced-json-node-{listPropertyName}-{index}", ImGuiTreeNodeFlags.DefaultOpen))
+            {
+                changed |= EditTradeItemAdvancedJsonToken(item, listPropertyName, index, fieldName);
+                if (ImGui.Button($"Remove##loot-trade-advanced-remove-{listPropertyName}-{index}-{fieldName}"))
+                {
+                    item.Remove(fieldName);
+                    ClearTradeItemAdvancedFieldBuffer(listPropertyName, index, fieldName);
+                    changed = true;
+                }
+                ImGui.TreePop();
+            }
+
+            return changed;
+        }
+
+        ImGui.TextUnformatted(fieldName);
+        ImGui.SameLine();
+
+        switch (property.Value.Type)
+        {
+            case JTokenType.Boolean:
+                bool boolValue = property.Value.Value<bool?>() ?? false;
+                if (ImGui.Checkbox($"##loot-trade-advanced-bool-{listPropertyName}-{index}-{fieldName}", ref boolValue))
+                {
+                    item[fieldName] = boolValue;
+                    changed = true;
+                }
+                break;
+            case JTokenType.Integer:
+                int intValue = property.Value.Value<int?>() ?? 0;
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.InputInt($"##loot-trade-advanced-int-{listPropertyName}-{index}-{fieldName}", ref intValue))
+                {
+                    item[fieldName] = intValue;
+                    changed = true;
+                }
+                break;
+            case JTokenType.Float:
+                float floatValue = property.Value.Value<float?>() ?? 0f;
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.InputFloat($"##loot-trade-advanced-float-{listPropertyName}-{index}-{fieldName}", ref floatValue, 0, 0, "%.###"))
+                {
+                    item[fieldName] = floatValue;
+                    changed = true;
+                }
+                break;
+            case JTokenType.String:
+                string stringValue = property.Value.ToString();
+                ImGui.SetNextItemWidth(Math.Max(160f, ImGui.GetContentRegionAvail().X - 92f));
+                if (ImGui.InputText($"##loot-trade-advanced-string-{listPropertyName}-{index}-{fieldName}", ref stringValue, 4096))
+                {
+                    item[fieldName] = stringValue;
+                    changed = true;
+                }
+                break;
+            default:
+                ImGui.NewLine();
+                changed |= EditTradeItemAdvancedJsonToken(item, listPropertyName, index, fieldName);
+                break;
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##loot-trade-advanced-remove-{listPropertyName}-{index}-{fieldName}"))
+        {
+            item.Remove(fieldName);
+            ClearTradeItemAdvancedFieldBuffer(listPropertyName, index, fieldName);
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    private bool EditTradeItemAdvancedJsonToken(JObject item, string listPropertyName, int index, string fieldName)
+    {
+        string bufferKey = GetTradeItemAdvancedFieldBufferKey(listPropertyName, index, fieldName);
+        if (!_lootDropJsonFieldBuffers.TryGetValue(bufferKey, out string? buffer))
+        {
+            buffer = item[fieldName]?.ToString(Formatting.Indented) ?? "null";
+        }
+
+        ImGui.InputTextMultiline($"##loot-trade-advanced-json-{listPropertyName}-{index}-{fieldName}", ref buffer, 128 * 1024, new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
+        _lootDropJsonFieldBuffers[bufferKey] = buffer;
+
+        bool changed = false;
+        if (ImGui.Button($"Apply##loot-trade-advanced-apply-{listPropertyName}-{index}-{fieldName}"))
+        {
+            JToken? parsed = TryParseJsonToken(buffer);
+            if (parsed == null)
+            {
+                _lootDropStatus = $"{fieldName} JSON is malformed.";
+            }
+            else
+            {
+                item[fieldName] = parsed;
+                _lootDropJsonFieldBuffers[bufferKey] = parsed.ToString(Formatting.Indented);
+                changed = true;
+            }
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button($"Format##loot-trade-advanced-format-{listPropertyName}-{index}-{fieldName}"))
+        {
+            if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
+            {
+                _lootDropJsonFieldBuffers[bufferKey] = formatted;
+            }
+            else
+            {
+                _lootDropStatus = $"{fieldName} format failed: {formatError}";
+            }
+        }
+
+        return changed;
+    }
+
+    private bool TryAddTradeItemAdvancedField(JObject item)
+    {
+        string fieldName = _lootDropNewTradeFieldName.Trim();
+        if (fieldName.Length == 0)
+        {
+            _lootDropStatus = "Trade item field name is required.";
+            return false;
+        }
+
+        if (LootDropTradeFirstClassProperties.Contains(fieldName))
+        {
+            _lootDropStatus = $"{fieldName} is already handled by structured trade controls.";
+            return false;
+        }
+
+        if (item[fieldName] != null)
+        {
+            _lootDropStatus = $"Trade item field {fieldName} already exists.";
+            return false;
+        }
+
+        item[fieldName] = CreateLootDropAdvancedFieldDefault(_lootDropNewTradeFieldKindIndex);
+        _lootDropNewTradeFieldName = "";
+        return true;
+    }
+
+    private static JToken CreateLootDropAdvancedFieldDefault(int fieldKindIndex)
+    {
+        return fieldKindIndex switch
+        {
+            1 => false,
+            2 => 0,
+            3 => 0f,
+            4 => new JObject(),
+            5 => new JArray(),
+            _ => ""
+        };
+    }
+
+    private string GetTradeItemAdvancedFieldBufferKey(string listPropertyName, int index, string fieldName)
+    {
+        return $"{_lootDropLoadedKey}:trade:{listPropertyName}:{index}:advanced:{fieldName}";
+    }
+
+    private void ClearTradeItemAdvancedFieldBuffer(string listPropertyName, int index, string fieldName)
+    {
+        _lootDropJsonFieldBuffers.Remove(GetTradeItemAdvancedFieldBufferKey(listPropertyName, index, fieldName));
     }
 
     private void DrawLootDropInspector(NVector2 size, bool showDiagnostics)
@@ -1437,6 +1819,88 @@ public sealed partial class DebugWindowManager
         return drafts.Any(IsWeightedLootDrop);
     }
 
+    private static List<LootDropWeightedGroupInfo> BuildLootDropWeightedGroups(IReadOnlyList<LootDropDraft> drafts)
+    {
+        List<LootDropWeightedGroupInfo> groups = [];
+        int groupNumber = 1;
+        for (int index = 0; index < drafts.Count;)
+        {
+            if (!IsWeightedLootDrop(drafts[index]))
+            {
+                index++;
+                continue;
+            }
+
+            int start = index;
+            float totalWeight = 0f;
+            while (index < drafts.Count && IsWeightedLootDrop(drafts[index]))
+            {
+                totalWeight += Math.Max(0f, drafts[index].Weight);
+                index++;
+            }
+
+            groups.Add(new LootDropWeightedGroupInfo(groupNumber++, start, index, totalWeight));
+        }
+
+        return groups;
+    }
+
+    private static Dictionary<int, LootDropWeightedGroupInfo> BuildLootDropWeightedGroupMap(IReadOnlyList<LootDropDraft> drafts)
+    {
+        Dictionary<int, LootDropWeightedGroupInfo> result = [];
+        foreach (LootDropWeightedGroupInfo group in BuildLootDropWeightedGroups(drafts))
+        {
+            for (int index = group.StartIndex; index < group.EndExclusive; index++)
+            {
+                result[index] = group;
+            }
+        }
+
+        return result;
+    }
+
+    private static float GetLootDropWeightPercent(LootDropDraft draft, LootDropWeightedGroupInfo group)
+    {
+        if (group.TotalWeight <= 0f) return 0f;
+        return Math.Max(0f, draft.Weight) / group.TotalWeight * 100f;
+    }
+
+    private static bool HasLootDropConditionOrFlow(LootDropDraft draft)
+    {
+        return !string.IsNullOrWhiteSpace(draft.Tool) ||
+            !string.IsNullOrWhiteSpace(draft.DropModbyStat) ||
+            !string.IsNullOrWhiteSpace(draft.AttributesJson) ||
+            draft.LastDrop;
+    }
+
+    private static string BuildLootDropConditionSummary(LootDropDraft draft)
+    {
+        List<string> parts = [];
+        if (!string.IsNullOrWhiteSpace(draft.Tool)) parts.Add($"tool {draft.Tool}");
+        if (!string.IsNullOrWhiteSpace(draft.DropModbyStat)) parts.Add($"stat {draft.DropModbyStat}");
+        if (!string.IsNullOrWhiteSpace(draft.AttributesJson)) parts.Add("attributes");
+        if (draft.LastDrop) parts.Add("stops on drop");
+        return parts.Count == 0 ? "" : string.Join(", ", parts);
+    }
+
+    private static string BuildLootDropRowTooltip(LootDropDraft draft, int index, IReadOnlyDictionary<int, LootDropWeightedGroupInfo> weightedGroupMap)
+    {
+        List<string> lines = [$"Row {index}: {draft.Type}:{draft.Code}"];
+        if (weightedGroupMap.TryGetValue(index, out LootDropWeightedGroupInfo group))
+        {
+            lines.Add($"Weighted group {group.GroupNumber}, rows {group.StartIndex}-{group.EndExclusive - 1}");
+            lines.Add($"Weight {draft.Weight:0.###} of {group.TotalWeight:0.###} ({GetLootDropWeightPercent(draft, group):0.#}% pick chance inside group)");
+        }
+        else
+        {
+            lines.Add("Runs as an ordinary ordered drop row.");
+        }
+
+        string conditions = BuildLootDropConditionSummary(draft);
+        lines.Add(string.IsNullOrWhiteSpace(conditions) ? "No tool/stat gates, attributes, or last-drop stop." : $"Conditions/flow: {conditions}");
+        return string.Join(Environment.NewLine, lines);
+    }
+
     private static int CountWeightedLootDropGroups(IReadOnlyList<LootDropDraft> drafts)
     {
         int groups = 0;
@@ -1934,6 +2398,8 @@ public sealed partial class DebugWindowManager
     private sealed record LootDropEntitySourceAsset(IAsset Asset, string SourceCode, JObject SourceJson);
 
     private sealed record LootDropVariantGroup(string Code, IReadOnlyList<string> States);
+
+    private readonly record struct LootDropWeightedGroupInfo(int GroupNumber, int StartIndex, int EndExclusive, float TotalWeight);
 
     private sealed class LootDropDraftState
     {

@@ -1838,13 +1838,13 @@ public sealed partial class DebugWindowManager
             if (document.ShapeAnimations.Count > 0)
             {
                 token["animations"] = new JArray(document.ShapeAnimations.Select(entry =>
-                    VanillaAnimationExportService.ToVanillaAnimationToken(entry.Animation, null)));
+                    VanillaAnimationExportService.ToVanillaAnimationToken(entry.Animation, entry.SourceToken)));
             }
 
             if (document.MetadataEntries.Count > 0)
             {
                 token["metadata"] = new JArray(document.MetadataEntries.Select(entry =>
-                    VanillaAnimationExportService.ToAnimationMetaDataToken(entry.Metadata, null)));
+                    VanillaAnimationExportService.ToAnimationMetaDataToken(entry.Metadata, entry.SourceToken)));
             }
 
             return JsonConvert.SerializeObject(token, Formatting.None);

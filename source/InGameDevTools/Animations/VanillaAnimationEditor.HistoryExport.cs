@@ -25,23 +25,29 @@ public sealed partial class DebugWindowManager
     {
         private readonly int[] _animationIndexes;
         private readonly List<VanillaAnimation> _animations;
+        private readonly List<JToken?> _animationSourceTokens;
         private readonly int[] _metadataIndexes;
         private readonly List<AnimationMetaData> _metadata;
+        private readonly List<JToken?> _metadataSourceTokens;
 
         private VanillaAnimationDocumentSnapshot(
             string label,
             string serialized,
             int[] animationIndexes,
             List<VanillaAnimation> animations,
+            List<JToken?> animationSourceTokens,
             int[] metadataIndexes,
-            List<AnimationMetaData> metadata)
+            List<AnimationMetaData> metadata,
+            List<JToken?> metadataSourceTokens)
         {
             Label = label;
             Serialized = serialized;
             _animationIndexes = animationIndexes;
             _animations = animations;
+            _animationSourceTokens = animationSourceTokens;
             _metadataIndexes = metadataIndexes;
             _metadata = metadata;
+            _metadataSourceTokens = metadataSourceTokens;
         }
 
         public string Label { get; }
@@ -93,10 +99,18 @@ public sealed partial class DebugWindowManager
                     .Where(index => index >= 0 && index < document.ShapeAnimations.Count)
                     .Select(index => CloneVanillaAnimation(document.ShapeAnimations[index].Animation))
                     .ToList(),
+                animationIndexes
+                    .Where(index => index >= 0 && index < document.ShapeAnimations.Count)
+                    .Select(index => document.ShapeAnimations[index].SourceToken?.DeepClone())
+                    .ToList(),
                 metadataIndexes,
                 metadataIndexes
                     .Where(index => index >= 0 && index < document.MetadataEntries.Count)
                     .Select(index => CloneAnimationMetaData(document.MetadataEntries[index].Metadata))
+                    .ToList(),
+                metadataIndexes
+                    .Where(index => index >= 0 && index < document.MetadataEntries.Count)
+                    .Select(index => document.MetadataEntries[index].SourceToken?.DeepClone())
                     .ToList());
         }
 
@@ -120,6 +134,7 @@ public sealed partial class DebugWindowManager
 
                 VanillaShapeAnimationEntry entry = document.ShapeAnimations[animationIndex];
                 CopyVanillaAnimation(entry.Animation, _animations[index]);
+                entry.SourceToken = _animationSourceTokens[index]?.DeepClone();
             }
 
             int metadataCount = Math.Min(_metadataIndexes.Length, _metadata.Count);
@@ -128,6 +143,7 @@ public sealed partial class DebugWindowManager
                 int metadataIndex = _metadataIndexes[index];
                 if (metadataIndex < 0 || metadataIndex >= document.MetadataEntries.Count) continue;
                 CopyAnimationMetaData(document.MetadataEntries[metadataIndex].Metadata, _metadata[index]);
+                document.MetadataEntries[metadataIndex].SourceToken = _metadataSourceTokens[index]?.DeepClone();
             }
         }
 
@@ -149,7 +165,7 @@ public sealed partial class DebugWindowManager
                     animations.Add(new JObject
                     {
                         ["index"] = index,
-                        ["value"] = VanillaAnimationExportService.ToVanillaAnimationToken(document.ShapeAnimations[index].Animation, null)
+                        ["value"] = VanillaAnimationExportService.ToVanillaAnimationToken(document.ShapeAnimations[index].Animation, document.ShapeAnimations[index].SourceToken)
                     });
                 }
 
@@ -165,7 +181,7 @@ public sealed partial class DebugWindowManager
                     metadata.Add(new JObject
                     {
                         ["index"] = index,
-                        ["value"] = VanillaAnimationExportService.ToAnimationMetaDataToken(document.MetadataEntries[index].Metadata, null)
+                        ["value"] = VanillaAnimationExportService.ToAnimationMetaDataToken(document.MetadataEntries[index].Metadata, document.MetadataEntries[index].SourceToken)
                     });
                 }
 
@@ -387,29 +403,33 @@ public sealed partial class DebugWindowManager
             token["easeAnimationSpeed"] = animation.EaseAnimationSpeed;
             token["onActivityStopped"] = animation.OnActivityStopped.ToString();
             token["onAnimationEnd"] = animation.OnAnimationEnd.ToString();
-            token["keyframes"] = new JArray((animation.KeyFrames ?? []).Select(ToVanillaKeyFrameToken));
+            JArray? sourceKeyFrames = GetSourceArray(sourceToken, "keyframes", "keyFrames");
+            token["keyframes"] = new JArray((animation.KeyFrames ?? []).Select((keyFrame, index) =>
+                ToVanillaKeyFrameToken(keyFrame, GetSourceTokenAt(sourceKeyFrames, index))));
             return token;
         }
 
-        public static JToken ToVanillaKeyFrameToken(AnimationKeyFrame keyFrame)
+        public static JToken ToVanillaKeyFrameToken(AnimationKeyFrame keyFrame, JToken? sourceToken = null)
         {
-            JObject token = new()
-            {
-                ["frame"] = keyFrame.Frame
-            };
+            JObject token = sourceToken?.DeepClone() as JObject ?? new JObject();
+            token.Remove("frame");
+            token.Remove("elements");
+            token["frame"] = keyFrame.Frame;
 
             JObject elements = new();
+            JObject? sourceElements = sourceToken?["elements"] as JObject;
             foreach ((string name, AnimationKeyFrameElement element) in (keyFrame.Elements ?? new()).OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase))
             {
-                elements[name] = ToVanillaElementToken(element);
+                elements[name] = ToVanillaElementToken(element, sourceElements?.Property(name, StringComparison.OrdinalIgnoreCase)?.Value);
             }
             token["elements"] = elements;
             return token;
         }
 
-        public static JToken ToVanillaElementToken(AnimationKeyFrameElement element)
+        public static JToken ToVanillaElementToken(AnimationKeyFrameElement element, JToken? sourceToken = null)
         {
-            JObject token = new();
+            JObject token = sourceToken?.DeepClone() as JObject ?? new JObject();
+            RemoveKnownAnimationElementProperties(token);
             AddNullable(token, "offsetX", element.OffsetX);
             AddNullable(token, "offsetY", element.OffsetY);
             AddNullable(token, "offsetZ", element.OffsetZ);
@@ -491,6 +511,40 @@ public sealed partial class DebugWindowManager
             {
                 token[property] = value.Value;
             }
+        }
+
+        private static JArray? GetSourceArray(JToken? sourceToken, params string[] names)
+        {
+            foreach (string name in names)
+            {
+                if (sourceToken?[name] is JArray array) return array;
+            }
+
+            return null;
+        }
+
+        private static JToken? GetSourceTokenAt(JArray? sourceArray, int index)
+        {
+            return sourceArray != null && index >= 0 && index < sourceArray.Count ? sourceArray[index] : null;
+        }
+
+        private static void RemoveKnownAnimationElementProperties(JObject token)
+        {
+            token.Remove("offsetX");
+            token.Remove("offsetY");
+            token.Remove("offsetZ");
+            token.Remove("stretchX");
+            token.Remove("stretchY");
+            token.Remove("stretchZ");
+            token.Remove("rotationX");
+            token.Remove("rotationY");
+            token.Remove("rotationZ");
+            token.Remove("originX");
+            token.Remove("originY");
+            token.Remove("originZ");
+            token.Remove("rotShortestDistanceX");
+            token.Remove("rotShortestDistanceY");
+            token.Remove("rotShortestDistanceZ");
         }
 
         private static JObject RemoveEditorPrivateProperties(JObject json)

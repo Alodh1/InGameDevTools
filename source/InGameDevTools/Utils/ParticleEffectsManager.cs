@@ -3295,6 +3295,10 @@ public class ParticleEffectsManager
 
 public static class ParticleEditor
 {
+    private static bool _includeVelocityEvolveInJsonOutput;
+    private static readonly Dictionary<string, string> _jsonEditBuffers = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> _jsonEditStatuses = new(StringComparer.Ordinal);
+
     public static void Draw(string id, AdvancedParticleProperties particleProperties)
     {
         JsonOutput(id, particleProperties);
@@ -3324,19 +3328,93 @@ public static class ParticleEditor
         JsonSerializer serializer = JsonSerializer.Create(settings);
         JToken json = JToken.FromObject(particleProperties, serializer);
 
-        // VS 1.22 does not like this generated field in exported particle JSON.
-        // Keep the in-editor value usable, but never print/copy it into the JSON output.
-        RemovePropertyRecursive(json, "VelocityEvolve");
-        RemovePropertyRecursive(json, "velocityEvolve");
+        ImGui.Checkbox($"Include VelocityEvolve in copied JSON##{id}", ref _includeVelocityEvolveInJsonOutput);
+        if (_includeVelocityEvolveInJsonOutput)
+        {
+            ImGui.TextColored(new System.Numerics.Vector4(1f, 0.78f, 0.35f, 1f), "VelocityEvolve can crash VS 1.22 clients when network-spawned; include only for compatible authored assets.");
+        }
+        else
+        {
+            RemovePropertyRecursive(json, "VelocityEvolve");
+            RemovePropertyRecursive(json, "velocityEvolve");
+        }
 
         string output = json.ToString(Formatting.Indented);
+        if (!_jsonEditBuffers.TryGetValue(id, out string? editBuffer))
+        {
+            editBuffer = output;
+            _jsonEditBuffers[id] = editBuffer;
+        }
 
-        ImGui.InputTextMultiline($"##{id}", ref output, (uint)output.Length, new(500, 300), ImGuiInputTextFlags.ReadOnly | ImGuiInputTextFlags.AutoSelectAll);
+        ImGui.InputTextMultiline($"##{id}", ref editBuffer, 2 * 1024 * 1024, new(500, 300), ImGuiInputTextFlags.AllowTabInput);
+        _jsonEditBuffers[id] = editBuffer;
+        if (_jsonEditStatuses.TryGetValue(id, out string? status) && !string.IsNullOrWhiteSpace(status))
+        {
+            ImGui.TextWrapped(status);
+        }
+
+        if (ImGui.Button($"Load current JSON##{id}"))
+        {
+            _jsonEditBuffers[id] = output;
+            _jsonEditStatuses[id] = "Loaded current particle JSON into the editor.";
+        }
+        ImGui.SameLine();
+        if (ImGui.Button($"Format JSON##{id}"))
+        {
+            if (DevToolsJsonTextTools.TryFormat(editBuffer, out string formatted, out string formatError))
+            {
+                _jsonEditBuffers[id] = formatted;
+                _jsonEditStatuses[id] = "Formatted particle JSON.";
+            }
+            else
+            {
+                _jsonEditStatuses[id] = $"Format failed: {formatError}";
+            }
+        }
+        ImGui.SameLine();
+        if (ImGui.Button($"Apply JSON##{id}"))
+        {
+            if (DevToolsJson.TryParseToken(editBuffer, out JToken? editedToken, out string parseError) &&
+                editedToken != null &&
+                new JsonObject(editedToken).AsObject<AdvancedParticleProperties>() is { } editedProperties)
+            {
+                EnsureParticleEditorDefaults(editedProperties);
+                CopyParticleProperties(particleProperties, editedProperties);
+                JToken updated = JToken.FromObject(particleProperties, JsonSerializer.Create(settings));
+                if (!_includeVelocityEvolveInJsonOutput)
+                {
+                    RemovePropertyRecursive(updated, "VelocityEvolve");
+                    RemovePropertyRecursive(updated, "velocityEvolve");
+                }
+                _jsonEditBuffers[id] = updated.ToString(Formatting.Indented);
+                _jsonEditStatuses[id] = "Applied particle JSON.";
+            }
+            else
+            {
+                _jsonEditStatuses[id] = $"Apply failed: {parseError}";
+            }
+        }
+        ImGui.SameLine();
         if (ImGui.Button($"Copy to clipboard##{id}"))
         {
-            ImGui.SetClipboardText(output);
+            ImGui.SetClipboardText(_jsonEditBuffers[id]);
         }
         ImGui.Unindent();
+    }
+
+    private static void CopyParticleProperties(AdvancedParticleProperties target, AdvancedParticleProperties source)
+    {
+        Type type = typeof(AdvancedParticleProperties);
+        foreach (System.Reflection.PropertyInfo property in type.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+        {
+            if (!property.CanRead || !property.CanWrite || property.GetIndexParameters().Length > 0) continue;
+            property.SetValue(target, property.GetValue(source));
+        }
+
+        foreach (System.Reflection.FieldInfo field in type.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+        {
+            field.SetValue(target, field.GetValue(source));
+        }
     }
 
     private static void RemovePropertyRecursive(JToken token, string propertyName)
@@ -3482,6 +3560,24 @@ public static class ParticleEditor
         NatFloat velocityZ = particleProperties.Velocity[2];
         NatFloatEditor(id, "Velocity.Z", ref velocityZ);
         particleProperties.Velocity[2] = velocityZ;
+
+        ImGui.SeparatorText("Velocity evolve");
+        ImGui.TextDisabled("Runtime world spawn strips VelocityEvolve for VS 1.22 client stability; editor/live preview data keeps it.");
+        EvolvingNatFloat[] velocityEvolve = EnsureEvolvingNatFloatArray(particleProperties.VelocityEvolve, 3);
+
+        EvolvingNatFloat velocityEvolveX = velocityEvolve[0];
+        EvolvingNatFloatEditorOptional(id, "Velocity evolve.X", ref velocityEvolveX, defaultWhenEnabled: EvolvingNatFloat.createIdentical(0f));
+        velocityEvolve[0] = velocityEvolveX;
+
+        EvolvingNatFloat velocityEvolveY = velocityEvolve[1];
+        EvolvingNatFloatEditorOptional(id, "Velocity evolve.Y", ref velocityEvolveY, defaultWhenEnabled: EvolvingNatFloat.createIdentical(0f));
+        velocityEvolve[1] = velocityEvolveY;
+
+        EvolvingNatFloat velocityEvolveZ = velocityEvolve[2];
+        EvolvingNatFloatEditorOptional(id, "Velocity evolve.Z", ref velocityEvolveZ, defaultWhenEnabled: EvolvingNatFloat.createIdentical(0f));
+        velocityEvolve[2] = velocityEvolveZ;
+
+        particleProperties.VelocityEvolve = HasAnyEvolvingNatFloat(velocityEvolve) ? velocityEvolve : null;
 
         ImGui.Unindent();
     }
@@ -3780,6 +3876,24 @@ public static class ParticleEditor
         }
 
         EvolvingNatFloatEditor(id, label, ref value);
+    }
+
+    private static EvolvingNatFloat[] EnsureEvolvingNatFloatArray(EvolvingNatFloat[]? values, int length)
+    {
+        EvolvingNatFloat[] result = new EvolvingNatFloat[length];
+        for (int index = 0; index < length; index++)
+        {
+            result[index] = values != null && index < values.Length
+                ? values[index]
+                : EvolvingNatFloat.NoValueSet;
+        }
+
+        return result;
+    }
+
+    private static bool HasAnyEvolvingNatFloat(IEnumerable<EvolvingNatFloat> values)
+    {
+        return values.Any(value => value != EvolvingNatFloat.NoValueSet && value.Transform != EnumTransformFunction.UNSPECIFIED);
     }
 
     private static void EvolvingNatFloatEditor(string id, string label, ref EvolvingNatFloat value)

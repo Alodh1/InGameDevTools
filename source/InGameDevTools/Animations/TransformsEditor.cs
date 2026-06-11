@@ -47,6 +47,8 @@ public sealed partial class DebugWindowManager
     private int _transformDirectSlotIndex;
     private int _transformTypedMapIndex;
     private string _transformTypedKey = "";
+    private string _transformCustomAttributeCode = "";
+    private string _transformCustomTypedKey = "";
     private int _transformBehaviorTransformIndex;
     private int _transformBehaviorMapIndex;
     private string _transformBehaviorMapKey = "";
@@ -78,7 +80,7 @@ public sealed partial class DebugWindowManager
     private string _transformsStatus = "";
     private bool _transformsIndexed;
 
-    private static readonly string[] TransformSlotModeLabels = ["Attribute", "Typed map", "Behavior", "Behavior map"];
+    private static readonly string[] TransformSlotModeLabels = ["Attribute", "Typed map", "Behavior", "Behavior map", "Custom attribute", "Custom typed map"];
 
     private static readonly BehaviorTransformDefinition[] BehaviorTransformDefinitions =
     [
@@ -816,7 +818,12 @@ public sealed partial class DebugWindowManager
             _transformSlotModeIndex = Math.Clamp(_transformSlotModeIndex, 0, TransformSlotModeLabels.Length - 1);
             if (ImGui.Combo("Slot type##transform-slot-mode-global", ref _transformSlotModeIndex, TransformSlotModeLabels, TransformSlotModeLabels.Length))
             {
-                _transformUseTypedSlot = CurrentTransformSlotMode == TransformSlotMode.TypedAttribute;
+                _transformUseTypedSlot = CurrentTransformSlotMode is TransformSlotMode.TypedAttribute or TransformSlotMode.CustomTypedAttribute;
+                if (CurrentTransformSlotMode is TransformSlotMode.CustomAttribute or TransformSlotMode.CustomTypedAttribute)
+                {
+                    _transformsOnlyApplicable = false;
+                    _transformsShowUncertain = true;
+                }
                 _transformPreviewCacheKey = "";
                 RebuildVisibleTransformAssets();
             }
@@ -936,6 +943,18 @@ public sealed partial class DebugWindowManager
                     BehaviorMapTransformDefinitions.Select(definition => definition.DisplayName).ToArray(),
                     BehaviorMapTransformDefinitions.Length);
                 DrawBehaviorMapKeySelector(SelectedTransformAsset, BehaviorMapTransformDefinitions[_transformBehaviorMapIndex], ref changed);
+                break;
+
+            case TransformSlotMode.CustomAttribute:
+                ImGui.SetNextItemWidth(-1);
+                changed |= ImGui.InputTextWithHint("Attribute##transform-custom-attribute-global", "e.g. onCustomDisplayTransform", ref _transformCustomAttributeCode, 160);
+                break;
+
+            case TransformSlotMode.CustomTypedAttribute:
+                ImGui.SetNextItemWidth(-1);
+                changed |= ImGui.InputTextWithHint("Attribute map##transform-custom-typed-attribute-global", "e.g. customTransformByType", ref _transformCustomAttributeCode, 160);
+                ImGui.SetNextItemWidth(-1);
+                changed |= ImGui.InputTextWithHint("Key##transform-custom-typed-key-global", "type key", ref _transformCustomTypedKey, 120);
                 break;
         }
 
@@ -3292,8 +3311,10 @@ public sealed partial class DebugWindowManager
     {
         if (asset == null) return null;
         string attributeCode = GetSelectedTransformAttributeCode();
+        if (string.IsNullOrWhiteSpace(attributeCode)) return null;
         string? typedKey = GetSelectedTransformTypedKey();
-        return RequiresTransformTypedKey(attributeCode) && string.IsNullOrWhiteSpace(typedKey)
+        bool requiresTypedKey = RequiresTransformTypedKey(attributeCode) || CurrentTransformSlotMode == TransformSlotMode.CustomTypedAttribute;
+        return requiresTypedKey && string.IsNullOrWhiteSpace(typedKey)
             ? null
             : new TransformSlotSelection(asset, attributeCode, typedKey);
     }
@@ -3318,6 +3339,10 @@ public sealed partial class DebugWindowManager
                 _transformBehaviorMapIndex = Math.Clamp(_transformBehaviorMapIndex, 0, BehaviorMapTransformDefinitions.Length - 1);
                 return BehaviorMapTransformDefinitions[_transformBehaviorMapIndex].Code;
 
+            case TransformSlotMode.CustomAttribute:
+            case TransformSlotMode.CustomTypedAttribute:
+                return _transformCustomAttributeCode.Trim();
+
             default:
                 return DirectTransformAttributeCodes[0];
         }
@@ -3329,6 +3354,7 @@ public sealed partial class DebugWindowManager
         {
             TransformSlotMode.TypedAttribute when !string.IsNullOrWhiteSpace(_transformTypedKey) => _transformTypedKey.Trim(),
             TransformSlotMode.BehaviorMap when !string.IsNullOrWhiteSpace(_transformBehaviorMapKey) => _transformBehaviorMapKey.Trim(),
+            TransformSlotMode.CustomTypedAttribute when !string.IsNullOrWhiteSpace(_transformCustomTypedKey) => _transformCustomTypedKey.Trim(),
             _ => null
         };
     }
@@ -3665,7 +3691,9 @@ public sealed partial class DebugWindowManager
         Attribute,
         TypedAttribute,
         Behavior,
-        BehaviorMap
+        BehaviorMap,
+        CustomAttribute,
+        CustomTypedAttribute
     }
 
     private sealed record BehaviorTransformDefinition(

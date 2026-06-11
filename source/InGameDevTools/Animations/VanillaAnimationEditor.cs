@@ -28,6 +28,31 @@ public sealed partial class DebugWindowManager
     private const int VanillaIkAutoMaxAdjustmentBones = 4;
     private const int VanillaIkAutoHubChildThreshold = 3;
 
+    private static readonly HashSet<string> VanillaKnownKeyFrameKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "frame",
+        "elements"
+    };
+
+    private static readonly HashSet<string> VanillaKnownAnimationElementKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "offsetX",
+        "offsetY",
+        "offsetZ",
+        "stretchX",
+        "stretchY",
+        "stretchZ",
+        "rotationX",
+        "rotationY",
+        "rotationZ",
+        "originX",
+        "originY",
+        "originZ",
+        "rotShortestDistanceX",
+        "rotShortestDistanceY",
+        "rotShortestDistanceZ"
+    };
+
     private static readonly string[] VanillaIkTrunkNameTokens =
     [
         "root",
@@ -50,6 +75,7 @@ public sealed partial class DebugWindowManager
     private readonly VanillaAnimationSelection _vanillaSelection = new();
     private readonly VanillaAnimationExportService _vanillaExportService = new();
     private readonly VanillaAnimationEditorHistory _vanillaHistory = new();
+    private readonly Dictionary<string, string> _vanillaExtraJsonBuffers = new(StringComparer.Ordinal);
     private VanillaAnimationPreviewScene? _vanillaPreviewScene;
     private VanillaAnimationViewport3DRenderer? _vanillaPreviewRenderer;
     private bool _vanillaPreviewMeshRebuildPending;
@@ -505,6 +531,7 @@ public sealed partial class DebugWindowManager
             RefreshVanillaPreviewAfterEdit(row);
         }
 
+        DrawVanillaKeyFrameExtraEditor(row, entry, selected);
         DrawVanillaElementEditor(row, entry, selected);
     }
 
@@ -642,6 +669,223 @@ public sealed partial class DebugWindowManager
             CompleteVanillaElementTransformGroups(element);
             ApplyVanillaElementEdit(row, entry, keyFrame, _vanillaSelection.ElementName);
         }
+
+        if (selectedInKeyFrame)
+        {
+            DrawVanillaElementExtraEditor(row, entry, keyFrame, _vanillaSelection.ElementName);
+        }
+    }
+
+    private void DrawVanillaKeyFrameExtraEditor(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame)
+    {
+        int keyFrameIndex = GetVanillaKeyFrameIndex(entry.Animation, keyFrame);
+        if (keyFrameIndex < 0) return;
+
+        JObject? source = GetVanillaKeyFrameSourceObject(entry, keyFrameIndex, create: false);
+        JObject? extra = ExtractVanillaExtraObject(source, VanillaKnownKeyFrameKeys);
+        string bufferKey = $"{entry.Document.HistoryKey}:anim:{entry.Index}:keyframe:{keyFrameIndex}";
+        DrawVanillaExtraJsonEditor(
+            "Keyframe metadata",
+            bufferKey,
+            extra,
+            value =>
+            {
+                JObject target = GetVanillaKeyFrameSourceObject(entry, keyFrameIndex, create: true)!;
+                SetVanillaExtraObject(target, VanillaKnownKeyFrameKeys, value);
+            },
+            row,
+            entry.Document);
+    }
+
+    private void DrawVanillaElementExtraEditor(VanillaBrowserRow row, VanillaShapeAnimationEntry entry, AnimationKeyFrame keyFrame, string elementName)
+    {
+        if (string.IsNullOrWhiteSpace(elementName)) return;
+        int keyFrameIndex = GetVanillaKeyFrameIndex(entry.Animation, keyFrame);
+        if (keyFrameIndex < 0) return;
+
+        JObject? source = GetVanillaElementSourceObject(entry, keyFrameIndex, elementName, create: false);
+        JObject? extra = ExtractVanillaExtraObject(source, VanillaKnownAnimationElementKeys);
+        string bufferKey = $"{entry.Document.HistoryKey}:anim:{entry.Index}:keyframe:{keyFrameIndex}:element:{elementName}";
+        DrawVanillaExtraJsonEditor(
+            "Element metadata",
+            bufferKey,
+            extra,
+            value =>
+            {
+                JObject target = GetVanillaElementSourceObject(entry, keyFrameIndex, elementName, create: true)!;
+                SetVanillaExtraObject(target, VanillaKnownAnimationElementKeys, value);
+            },
+            row,
+            entry.Document);
+    }
+
+    private void DrawVanillaExtraJsonEditor(
+        string label,
+        string bufferKey,
+        JObject? extra,
+        Action<JObject?> setExtra,
+        VanillaBrowserRow row,
+        VanillaAnimationDocument document)
+    {
+        if (extra == null && !_vanillaExtraJsonBuffers.TryGetValue(bufferKey, out _))
+        {
+            if (ImGui.SmallButton($"Add {label}##vanilla-extra-add-{bufferKey}"))
+            {
+                _vanillaExtraJsonBuffers[bufferKey] = "{}";
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Adds JSON fields that the animation editor preserves but does not otherwise represent as structured controls.");
+            }
+            return;
+        }
+
+        ImGuiTreeNodeFlags flags = extra is { Count: > 0 } ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None;
+        if (!ImGui.TreeNodeEx($"{label} ({extra?.Count ?? 0})##vanilla-extra-node-{bufferKey}", flags)) return;
+
+        if (!_vanillaExtraJsonBuffers.TryGetValue(bufferKey, out string? buffer))
+        {
+            buffer = extra?.ToString(Formatting.Indented) ?? "{}";
+            _vanillaExtraJsonBuffers[bufferKey] = buffer;
+        }
+
+        ImGui.InputTextMultiline($"##vanilla-extra-json-{bufferKey}", ref buffer, 256 * 1024, new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
+        _vanillaExtraJsonBuffers[bufferKey] = buffer;
+
+        if (ImGui.Button($"Apply##vanilla-extra-apply-{bufferKey}"))
+        {
+            if (DevToolsJson.TryParseObject(buffer, out JObject? parsed, out string error) && parsed != null)
+            {
+                JObject? next = parsed.Count == 0 ? null : parsed;
+                setExtra(next);
+                if (next == null)
+                {
+                    _vanillaExtraJsonBuffers.Remove(bufferKey);
+                }
+                else
+                {
+                    _vanillaExtraJsonBuffers[bufferKey] = next.ToString(Formatting.Indented);
+                }
+
+                MarkVanillaDirty(document);
+                RefreshVanillaPreviewAfterEdit(row);
+                _vanillaStatus = $"{label} updated.";
+            }
+            else
+            {
+                _vanillaStatus = $"{label} JSON parse failed: {error}";
+            }
+        }
+        ImGui.SameLine();
+        if (ImGui.Button($"Format##vanilla-extra-format-{bufferKey}"))
+        {
+            if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
+            {
+                _vanillaExtraJsonBuffers[bufferKey] = formatted;
+            }
+            else
+            {
+                _vanillaStatus = $"{label} format failed: {formatError}";
+            }
+        }
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##vanilla-extra-remove-{bufferKey}"))
+        {
+            setExtra(null);
+            _vanillaExtraJsonBuffers.Remove(bufferKey);
+            MarkVanillaDirty(document);
+            RefreshVanillaPreviewAfterEdit(row);
+            _vanillaStatus = $"{label} removed.";
+        }
+
+        ImGui.TreePop();
+    }
+
+    private static JObject? ExtractVanillaExtraObject(JObject? source, IReadOnlySet<string> knownKeys)
+    {
+        if (source == null) return null;
+
+        JObject extra = new();
+        foreach (JProperty property in source.Properties())
+        {
+            if (knownKeys.Contains(property.Name)) continue;
+            extra[property.Name] = property.Value.DeepClone();
+        }
+
+        return extra.Count > 0 ? extra : null;
+    }
+
+    private static void SetVanillaExtraObject(JObject target, IReadOnlySet<string> knownKeys, JObject? extra)
+    {
+        foreach (JProperty property in target.Properties().ToArray())
+        {
+            if (!knownKeys.Contains(property.Name))
+            {
+                property.Remove();
+            }
+        }
+
+        if (extra == null) return;
+        foreach (JProperty property in extra.Properties())
+        {
+            target[property.Name] = property.Value.DeepClone();
+        }
+    }
+
+    private static int GetVanillaKeyFrameIndex(VanillaAnimation animation, AnimationKeyFrame keyFrame)
+    {
+        if (animation.KeyFrames == null) return -1;
+        return Array.FindIndex(animation.KeyFrames, candidate => ReferenceEquals(candidate, keyFrame));
+    }
+
+    private static JObject? GetVanillaKeyFrameSourceObject(VanillaShapeAnimationEntry entry, int keyFrameIndex, bool create)
+    {
+        if (keyFrameIndex < 0) return null;
+
+        JObject? animationSource = entry.SourceToken as JObject;
+        if (animationSource == null)
+        {
+            if (!create) return null;
+            animationSource = new JObject();
+            entry.SourceToken = animationSource;
+        }
+
+        JArray? keyFrames = animationSource["keyframes"] as JArray ?? animationSource["keyFrames"] as JArray;
+        if (keyFrames == null)
+        {
+            if (!create) return null;
+            keyFrames = [];
+            animationSource["keyframes"] = keyFrames;
+        }
+
+        while (create && keyFrames.Count <= keyFrameIndex)
+        {
+            keyFrames.Add(new JObject());
+        }
+
+        return keyFrameIndex < keyFrames.Count ? keyFrames[keyFrameIndex] as JObject : null;
+    }
+
+    private static JObject? GetVanillaElementSourceObject(VanillaShapeAnimationEntry entry, int keyFrameIndex, string elementName, bool create)
+    {
+        JObject? keyFrameSource = GetVanillaKeyFrameSourceObject(entry, keyFrameIndex, create);
+        if (keyFrameSource == null) return null;
+
+        JObject? elements = keyFrameSource["elements"] as JObject;
+        if (elements == null)
+        {
+            if (!create) return null;
+            elements = new JObject();
+            keyFrameSource["elements"] = elements;
+        }
+
+        JProperty? property = elements.Property(elementName, StringComparison.OrdinalIgnoreCase);
+        if (property?.Value is JObject existing) return existing;
+        if (!create) return null;
+
+        JObject created = new();
+        elements[elementName] = created;
+        return created;
     }
 
     private static int AddMissingVanillaElementsToKeyFrame(AnimationKeyFrame keyFrame, IEnumerable<string> elementNames, out string[] addedNames)

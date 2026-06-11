@@ -208,6 +208,7 @@ public sealed partial class DebugWindowManager
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Transforms", "Tab", "transform item block model placement", DevToolsTab.Transforms, () => RequestDevToolsTab(DevToolsTab.Transforms));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Models", "Tab", "model models shape shapes cube editor uv texture", DevToolsTab.Models, () => RequestDevToolsTab(DevToolsTab.Models));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open ConfigLib", "Tab", "config configlib modconfig", DevToolsTab.ConfigLib, () => RequestDevToolsTab(DevToolsTab.ConfigLib));
+        AddCommandPaletteEntry(entries, normalizedFilter, "Open Block/Item JSON", "Tab", "block item json attributes source authoring", DevToolsTab.BlockItemJson, () => RequestDevToolsTab(DevToolsTab.BlockItemJson));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Loot/Drops", "Tab", "loot drops trade table", DevToolsTab.LootDrops, () => RequestDevToolsTab(DevToolsTab.LootDrops));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Worldgen", "Tab", "worldgen deposits block patches landforms strata", DevToolsTab.Worldgen, () => RequestDevToolsTab(DevToolsTab.Worldgen));
         AddCommandPaletteEntry(entries, normalizedFilter, "Open Patches", "Tab", "patches jsonpatcheslib patch creator", DevToolsTab.Patches, () => RequestDevToolsTab(DevToolsTab.Patches));
