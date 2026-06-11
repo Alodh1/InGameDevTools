@@ -1697,18 +1697,45 @@ public sealed partial class DebugWindowManager
 
     private static void ModelApplyEulerFieldRotationDelta(ModelGizmoDragElementState state, int axis, double deltaDegrees)
     {
-        switch (axis)
+        // When only the dragged axis carries rotation, plain accumulation keeps the value
+        // continuous past ±90° and avoids canonicalizing e.g. 135° into a three-axis triple.
+        bool otherAxesZero = axis switch
         {
-            case 0:
-                state.Element.RotationX = ModelWrapDegrees(state.RotationX + deltaDegrees);
-                break;
-            case 1:
-                state.Element.RotationY = ModelWrapDegrees(state.RotationY + deltaDegrees);
-                break;
-            default:
-                state.Element.RotationZ = ModelWrapDegrees(state.RotationZ + deltaDegrees);
-                break;
+            0 => Math.Abs(state.RotationY) < 0.0001 && Math.Abs(state.RotationZ) < 0.0001,
+            1 => Math.Abs(state.RotationX) < 0.0001 && Math.Abs(state.RotationZ) < 0.0001,
+            _ => Math.Abs(state.RotationX) < 0.0001 && Math.Abs(state.RotationY) < 0.0001
+        };
+        if (otherAxesZero)
+        {
+            switch (axis)
+            {
+                case 0:
+                    state.Element.RotationX = ModelWrapDegrees(state.RotationX + deltaDegrees);
+                    break;
+                case 1:
+                    state.Element.RotationY = ModelWrapDegrees(state.RotationY + deltaDegrees);
+                    break;
+                default:
+                    state.Element.RotationZ = ModelWrapDegrees(state.RotationZ + deltaDegrees);
+                    break;
+            }
+
+            return;
         }
+
+        // Rings are drawn on the element's rotated local axes, so rotate about that drawn axis:
+        // with VS's R = Rx·Ry·Rz composition this is a right-multiplication, then a decompose
+        // back into Euler angles. Editing one Euler field directly only matches the drawn axis
+        // for Z; for X/Y it rotates about parent-space axes and collapses near Y = ±90°.
+        (double x, double y, double z) = DevToolsRotationMath.RotateXyzEulerAboutLocalAxis(
+            state.RotationX,
+            state.RotationY,
+            state.RotationZ,
+            axis,
+            deltaDegrees);
+        state.Element.RotationX = ModelWrapDegrees(x);
+        state.Element.RotationY = ModelWrapDegrees(y);
+        state.Element.RotationZ = ModelWrapDegrees(z);
     }
 
     private static void DrawModelRing(ImDrawListPtr drawList, DevToolsPreviewCamera camera, Vector3 center, Vector3 axis, float radius, uint color)
