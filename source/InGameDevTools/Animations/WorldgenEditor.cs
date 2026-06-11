@@ -86,6 +86,7 @@ public sealed partial class DebugWindowManager
     private readonly DevToolsEditorDiagnostics _worldgenDiagnostics = new("Worldgen");
     private readonly DevToolsAssetIndexer _worldgenIndexer = new(batchSize: 80);
     private readonly DevToolsTextHistory _worldgenTextHistory = new();
+    private bool _worldgenShowTextDiff;
     private bool _worldgenPreviewPoppedOut;
     private float _worldgenPoppedViewportWidth = 1100f;
     private float _worldgenPoppedViewportHeight = 760f;
@@ -946,6 +947,22 @@ public sealed partial class DebugWindowManager
         if (!string.IsNullOrEmpty(toolStatus))
         {
             _worldgenStatus = toolStatus;
+        }
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Diff##worldgen-json-diff-toggle", ref _worldgenShowTextDiff);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Show the draft's line diff against the loaded source (both sides normalized when parseable).");
+        }
+
+        if (_worldgenShowTextDiff)
+        {
+            DevToolsTextDiffView.Draw(
+                "worldgen-json",
+                _worldgenOriginalText,
+                _worldgenCurrentText,
+                Math.Clamp(ImGui.GetContentRegionAvail().Y * 0.45f, 120f, 320f));
         }
 
         int textCapacity = Math.Max(_worldgenCurrentText.Length + 8192, 2 * 1024 * 1024);

@@ -25,6 +25,7 @@ public sealed partial class DebugWindowManager
     private readonly DevToolsEditorDiagnostics _aiBehaviorDiagnostics = new("Entity AI");
     private readonly DevToolsAssetIndexer _aiBehaviorIndexer = new(batchSize: 90);
     private readonly DevToolsTextHistory _aiBehaviorTextHistory = new();
+    private bool _aiBehaviorShowTextDiff;
 
     private bool _aiBehaviorIndexIncludedServerAssets;
     private int _aiBehaviorEntryIndex;
@@ -1380,6 +1381,22 @@ public sealed partial class DebugWindowManager
         if (!string.IsNullOrEmpty(toolStatus))
         {
             _aiBehaviorStatus = toolStatus;
+        }
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Diff##entity-ai-json-diff-toggle", ref _aiBehaviorShowTextDiff);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Show the draft's line diff against the loaded source (both sides normalized when parseable).");
+        }
+
+        if (_aiBehaviorShowTextDiff)
+        {
+            DevToolsTextDiffView.Draw(
+                "entity-ai-json",
+                _aiBehaviorOriginalText,
+                _aiBehaviorCurrentText,
+                Math.Clamp(ImGui.GetContentRegionAvail().Y * 0.45f, 120f, 320f));
         }
 
         int textCapacity = Math.Max(_aiBehaviorCurrentText.Length + 8192, 2 * 1024 * 1024);
