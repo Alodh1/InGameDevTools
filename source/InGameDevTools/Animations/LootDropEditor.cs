@@ -160,11 +160,23 @@ public sealed partial class DebugWindowManager
             if (entityType?.Code != null) _lootDropIndexEntities.Add(entityType);
         }
 
-        _lootDropEntitySourceIndex = LootDropEntitySourceIndex.Build(_api, _lootDropDiagnostics);
+        List<IAsset> authoredLootAssets = CollectToolAuthoredAssets("loot-drops");
+        _lootDropEntitySourceIndex = LootDropEntitySourceIndex.Build(_api, _lootDropDiagnostics, authoredLootAssets);
         _lootDropIndexEntitySources.AddRange(_lootDropEntitySourceIndex.Sources);
+
+        HashSet<string> authoredLootLocations = new(StringComparer.OrdinalIgnoreCase);
+        foreach (IAsset asset in authoredLootAssets)
+        {
+            authoredLootLocations.Add(asset.Location.ToString());
+            if (IsLootDropTradeCandidateAsset(asset))
+            {
+                _lootDropIndexTradeAssets.Add(asset);
+            }
+        }
 
         foreach (IAsset asset in _api.Assets.AllAssets.Values)
         {
+            if (asset.Location != null && authoredLootLocations.Contains(asset.Location.ToString())) continue;
             if (IsLootDropTradeCandidateAsset(asset))
             {
                 _lootDropIndexTradeAssets.Add(asset);
@@ -1700,17 +1712,17 @@ public sealed partial class DebugWindowManager
 
         public IReadOnlyList<LootDropEntitySourceAsset> Sources => _sources;
 
-        public static LootDropEntitySourceIndex Build(ICoreClientAPI api, DevToolsEditorDiagnostics diagnostics)
+        public static LootDropEntitySourceIndex Build(ICoreClientAPI api, DevToolsEditorDiagnostics diagnostics, IReadOnlyList<IAsset>? authoredAssets = null)
         {
             LootDropEntitySourceIndex index = new();
-            foreach (IAsset asset in api.Assets.AllAssets.Values)
+            void IndexAsset(IAsset? asset)
             {
-                if (asset?.Location == null) continue;
+                if (asset?.Location == null) return;
                 string assetPath = asset.Location.Path.Replace('\\', '/');
                 if (!assetPath.StartsWith("entities/", StringComparison.OrdinalIgnoreCase) ||
                     !assetPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                 {
-                    continue;
+                    return;
                 }
 
                 string text = ReadAssetText(asset);
@@ -1720,11 +1732,11 @@ public sealed partial class DebugWindowManager
                     {
                         diagnostics.Warning($"Skipped malformed entity source {asset.Location}: {error}", text);
                     }
-                    continue;
+                    return;
                 }
 
                 string? sourceCode = json["code"]?.ToString();
-                if (string.IsNullOrWhiteSpace(sourceCode)) continue;
+                if (string.IsNullOrWhiteSpace(sourceCode)) return;
 
                 LootDropEntitySourceAsset source = new(asset, StripCodeDomain(sourceCode), json);
                 index._sources.Add(source);
@@ -1733,6 +1745,18 @@ public sealed partial class DebugWindowManager
                 {
                     index.Register(source, entityCode);
                 }
+            }
+
+            foreach (IAsset asset in api.Assets.AllAssets.Values)
+            {
+                IndexAsset(asset);
+            }
+
+            // Authored copies are indexed last: code registration is last-wins, so the
+            // user's saved files override the loaded game assets they were saved from.
+            foreach (IAsset asset in authoredAssets ?? [])
+            {
+                IndexAsset(asset);
             }
 
             index._sources.Sort((left, right) => right.SourceCode.Length.CompareTo(left.SourceCode.Length));

@@ -261,6 +261,9 @@ public sealed partial class DebugWindowManager
         }
 
         HashSet<string> indexedLocations = new(StringComparer.OrdinalIgnoreCase);
+        // Authored files first: same-location entries then win the duplicate check, so the
+        // editor resumes from the user's saved copy instead of the pristine game asset.
+        DevToolsBatching.AddAssetSource("authored worldgen files", () => CollectToolAuthoredAssets("worldgen"), _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
         DevToolsBatching.AddAssetSource("client worldgen category", () => _api.Assets.GetManyInCategory("worldgen", ""), _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
         DevToolsBatching.AddAssetSource("client loaded assets", () => _api.Assets.AllAssets.Values, _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
 

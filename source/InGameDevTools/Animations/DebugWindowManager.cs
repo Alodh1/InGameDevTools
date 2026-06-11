@@ -364,11 +364,107 @@ public sealed partial class DebugWindowManager : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// Read-only origin for files the user saved through the tool's authored folders
+    /// (VintagestoryData/InGameDevTools/&lt;type&gt;/assets/...). It lets those files take part
+    /// in editor indexes as regular <see cref="IAsset"/> instances without the game loading them.
+    /// </summary>
+    private sealed class ToolAuthoredAssetOrigin(string originPath) : IAssetOrigin
+    {
+        public string OriginPath { get; } = originPath;
+
+        public void LoadAsset(IAsset asset)
+        {
+            TryLoadAsset(asset);
+        }
+
+        public bool TryLoadAsset(IAsset asset)
+        {
+            try
+            {
+                string filePath = Path.Combine(OriginPath, "assets", asset.Location.Domain, asset.Location.Path.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(filePath)) return false;
+
+                asset.Data = File.ReadAllBytes(filePath);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public List<IAsset> GetAssets(AssetCategory category, bool shouldLoad = true) => [];
+
+        public List<IAsset> GetAssets(AssetLocation baseLocation, bool shouldLoad = true) => [];
+
+        public bool IsAllowedToAffectGameplay() => false;
+    }
+
+    /// <summary>
+    /// Enumerates user-authored JSON files under VintagestoryData/InGameDevTools/&lt;assetType&gt;/assets
+    /// as in-memory assets so editor indexes can list them next to loaded game assets.
+    /// Tool manifests, live-backups, and buffer files are excluded.
+    /// </summary>
+    internal static List<IAsset> CollectToolAuthoredAssets(string assetType, string? pathPrefix = null)
+    {
+        List<IAsset> assets = [];
+        try
+        {
+            string root = GetToolAuthoredAssetRoot(assetType);
+            string assetsRoot = Path.Combine(root, "assets");
+            if (!Directory.Exists(assetsRoot)) return assets;
+
+            ToolAuthoredAssetOrigin origin = new(root);
+            foreach (string domainDirectory in Directory.GetDirectories(assetsRoot))
+            {
+                string domain = Path.GetFileName(domainDirectory).ToLowerInvariant();
+                if (string.IsNullOrWhiteSpace(domain)) continue;
+
+                foreach (string filePath in Directory.GetFiles(domainDirectory, "*.json", SearchOption.AllDirectories))
+                {
+                    if (filePath.EndsWith(".ingamedevtools-manifest.json", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    string assetPath = Path.GetRelativePath(domainDirectory, filePath).Replace(Path.DirectorySeparatorChar, '/').ToLowerInvariant();
+                    if (pathPrefix != null && !assetPath.StartsWith(pathPrefix, StringComparison.Ordinal)) continue;
+
+                    assets.Add(new Vintagestory.Common.Asset(File.ReadAllBytes(filePath), new AssetLocation(domain, assetPath), origin));
+                }
+            }
+        }
+        catch
+        {
+            // Authored files are an optional overlay; never break an editor index over them.
+        }
+
+        return assets;
+    }
+
+    private static readonly string[] CollectibleSourceAuthoredAssetTypes = ["transforms", "loot-drops", "block-item-json", "animations"];
+
+    private static IEnumerable<IAsset> EnumerateSourceIndexAssets(ICoreClientAPI api)
+    {
+        // Authored copies come first so they win the source matching score over the
+        // identically coded game assets they were saved from.
+        foreach (string assetType in CollectibleSourceAuthoredAssetTypes)
+        {
+            foreach (IAsset asset in CollectToolAuthoredAssets(assetType))
+            {
+                yield return asset;
+            }
+        }
+
+        foreach (IAsset asset in api.Assets.AllAssets.Values)
+        {
+            yield return asset;
+        }
+    }
+
     private static SourceAssetIndex BuildSourceAssetIndex(ICoreClientAPI api)
     {
         SourceAssetIndex index = new();
 
-        foreach (IAsset asset in api.Assets.AllAssets.Values)
+        foreach (IAsset asset in EnumerateSourceIndexAssets(api))
         {
             if (asset?.Location == null) continue;
 

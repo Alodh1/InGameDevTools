@@ -450,6 +450,7 @@ public sealed partial class DebugWindowManager
         ModelBeginEdit();
         parsed.SourceText = _modelDoc.SourceText;
         parsed.Dirty = true;
+        parsed.FromAuthoredFile = _modelDoc.FromAuthoredFile;
         _modelDoc = parsed;
         ModelSelectElement(parsed.Roots.FirstOrDefault());
         _modelReparentSource = null;
@@ -496,6 +497,8 @@ public sealed partial class DebugWindowManager
                     if (string.IsNullOrEmpty(result))
                     {
                         doc.Dirty = false;
+                        // Refresh the browser so the saved authored file shows up immediately.
+                        _modelShapeIndex = null;
                     }
                     return result;
                 });

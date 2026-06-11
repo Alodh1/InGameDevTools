@@ -21,8 +21,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="VintagestoryLib" HintPath="$(GameDirectory)\VintagestoryLib.dll" Private="true" />
     <Reference Include="VintagestoryAPI" HintPath="$(GameDirectory)\VintagestoryAPI.dll" Private="true" />
+    <Reference Include="VSSurvivalMod" HintPath="$(GameDirectory)\Mods\VSSurvivalMod.dll" Private="true" />
+    <Reference Include="VSEssentials" HintPath="$(GameDirectory)\Mods\VSEssentials.dll" Private="true" />
+    <Reference Include="VSCreativeMod" HintPath="$(GameDirectory)\Mods\VSCreativeMod.dll" Private="true" />
     <Reference Include="Newtonsoft.Json" HintPath="$(GameDirectory)\Lib\Newtonsoft.Json.dll" Private="true" />
+    <Reference Include="0Harmony" HintPath="$(GameDirectory)\Lib\0Harmony.dll" Private="true" />
+    <Reference Include="protobuf-net" HintPath="$(GameDirectory)\Lib\protobuf-net.dll" Private="true" />
+    <Reference Include="cairo-sharp" HintPath="$(GameDirectory)\Lib\cairo-sharp.dll" Private="true" />
+    <Reference Include="JsonDiffPatch" HintPath="$(GameDirectory)\Lib\JsonDiffPatch.dll" Private="true" />
+    <Reference Include="Tavis.JsonPatch" HintPath="$(GameDirectory)\Lib\Tavis.JsonPatch.dll" Private="true" />
+    <Reference Include="SkiaSharp" HintPath="$(GameDirectory)\Lib\SkiaSharp.dll" Private="true" />
+    <Reference Include="OpenTK.Mathematics" HintPath="$(GameDirectory)\Lib\OpenTK.Mathematics.dll" Private="true" />
   </ItemGroup>
 
   <ItemGroup>

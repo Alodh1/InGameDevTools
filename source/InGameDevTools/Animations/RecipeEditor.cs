@@ -232,12 +232,33 @@ public sealed partial class DebugWindowManager
 
             try
             {
+                // Authored exports are loaded first and shadow the loaded game assets they
+                // were saved from, so editing resumes from the user's saved copies.
+                HashSet<string> authoredRecipeKeys = new(StringComparer.OrdinalIgnoreCase);
+                foreach (IAsset asset in DebugWindowManager.CollectToolAuthoredAssets("recipes", "recipes/"))
+                {
+                    try
+                    {
+                        JToken root = ParseRecipeJson(asset.ToText());
+                        string assetPath = EnsureJsonPath(asset.Location.Path);
+                        authoredRecipeKeys.Add($"{asset.Location.Domain}:{assetPath}");
+                        AddDocument(new RecipeDocument(asset.Location.Domain, assetPath, root, false));
+                    }
+                    catch (Exception exception)
+                    {
+                        _status = $"Skipped authored recipe {asset.Location}: {exception.Message}";
+                        Diagnostics.Warning(_status, exception.ToString());
+                    }
+                }
+
                 foreach (IAsset asset in api.Assets.GetManyInCategory("recipes", ""))
                 {
                     try
                     {
                         JToken root = ParseRecipeJson(asset.ToText());
                         string assetPath = EnsureJsonPath(asset.Location.Path);
+                        if (authoredRecipeKeys.Contains($"{asset.Location.Domain}:{assetPath}")) continue;
+
                         RecipeDocument document = new(asset.Location.Domain, assetPath, root, false);
                         AddDocument(document);
                     }

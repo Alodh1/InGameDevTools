@@ -154,6 +154,8 @@ public sealed partial class DebugWindowManager
         _patchCreatorAssetIndex = 0;
 
         HashSet<string> locations = new(StringComparer.OrdinalIgnoreCase);
+        // Authored patch files first so the user's saved copies win the duplicate check.
+        DevToolsBatching.AddAssets(CollectToolAuthoredAssets("patches"), _patchCreatorIndexAssets, locations, IsPatchCreatorJsonAsset);
         DevToolsBatching.AddAssets(_api.Assets.AllAssets.Values, _patchCreatorIndexAssets, locations, IsPatchCreatorJsonAsset);
         foreach (string category in PatchCreatorKnownCategories)
         {

@@ -183,6 +183,8 @@ public sealed partial class DebugWindowManager
         }
 
         HashSet<string> indexedLocations = new(StringComparer.OrdinalIgnoreCase);
+        // Authored files first so the user's saved copies win the duplicate check.
+        DevToolsBatching.AddAssetSource("authored entity AI files", () => CollectToolAuthoredAssets("entity-ai"), _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
         DevToolsBatching.AddAssetSource("client entity category", () => _api.Assets.GetManyInCategory("entities", ""), _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
         DevToolsBatching.AddAssetSource("client loaded assets", () => _api.Assets.AllAssets.Values, _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
 

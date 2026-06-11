@@ -129,6 +129,7 @@ public sealed partial class DebugWindowManager
         public string SourceText = "";
         public bool IsNew;
         public bool Dirty;
+        public bool FromAuthoredFile;
 
         public string DisplayPath => $"{Domain}:{AssetPath}";
 
@@ -156,10 +157,10 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private sealed record ModelShapeAssetEntry(string Domain, string AssetPath, IAsset Asset)
+    private sealed record ModelShapeAssetEntry(string Domain, string AssetPath, IAsset Asset, bool Authored = false)
     {
         public string Display => $"{Domain}:{AssetPath}";
-        public string SearchText { get; } = $"{Domain}:{AssetPath}".ToLowerInvariant();
+        public string SearchText { get; } = $"{Domain}:{AssetPath}{(Authored ? " authored" : "")}".ToLowerInvariant();
     }
 
     private sealed record ModelHistoryEntry(string Label, string Json, int[]? SelectionPath, int SelectedFace, int[][]? SelectionPaths = null);
@@ -387,6 +388,7 @@ public sealed partial class DebugWindowManager
         DrawModelInspectorPanel(new NVector2(rightWidth, height));
 
         DrawModelDiscardPopup();
+        DrawModelPrimitiveWindow();
         ModelMaybeAutoApplyLive(force: false);
         _modelDiagnostics.Draw("models-tab", showDiagnostics);
     }
@@ -447,7 +449,7 @@ public sealed partial class DebugWindowManager
         ImGui.RadioButton("Resize##model-tool-resize", ref tool, (int)ModelGizmoTool.Resize);
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Resize tool: drag the face handles to grow or shrink the element (Ctrl+Shift+3).");
+            ImGui.SetTooltip("Resize tool: drag face handles on cuboids, or drag corner handles on generated primitive groups to deform them. Hold Shift for uniform scale (Ctrl+Shift+3).");
         }
         ImGui.SameLine();
         ImGui.RadioButton("Rotate##model-tool-rotate", ref tool, (int)ModelGizmoTool.Rotate);
@@ -456,6 +458,20 @@ public sealed partial class DebugWindowManager
             ImGui.SetTooltip("Rotate tool: drag the rings to rotate around the rotation origin (Ctrl+Shift+4).");
         }
         _modelGizmoTool = (ModelGizmoTool)tool;
+
+        ImGui.SameLine();
+        bool primitiveOpen = _modelPrimitiveWindowOpen;
+        if (primitiveOpen) ImGui.PushStyleColor(ImGuiCol.Button, new NVector4(0.55f, 0.42f, 0.2f, 1f));
+        if (ImGui.Button("Prism helper##model-primitive-toggle"))
+        {
+            _modelPrimitiveWindowOpen = !_modelPrimitiveWindowOpen;
+            _modelPrimitivePreviewDirty = true;
+        }
+        if (primitiveOpen) ImGui.PopStyleColor();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Generate smooth shapes (spheres, cylinders, cones, tori, arches) out of cuboids, with a live viewport preview.");
+        }
 
         ImGui.SameLine();
         if (ImGui.Button("Shortcuts##model-shortcuts"))
@@ -677,12 +693,17 @@ public sealed partial class DebugWindowManager
 
                     shown++;
                     bool selected = _modelDoc != null && !_modelDoc.IsNew &&
+                        _modelDoc.FromAuthoredFile == entry.Authored &&
                         string.Equals(_modelDoc.Domain, entry.Domain, StringComparison.OrdinalIgnoreCase) &&
                         string.Equals(_modelDoc.AssetPath, entry.AssetPath, StringComparison.OrdinalIgnoreCase);
-                    string label = _modelBrowserDomain.Length > 0 ? entry.AssetPath : entry.Display;
+                    string label = (_modelBrowserDomain.Length > 0 ? entry.AssetPath : entry.Display) + (entry.Authored ? " [authored]" : "");
                     if (ImGui.Selectable($"{label}##model-asset-{shown}", selected) && !selected)
                     {
                         ModelRequestOpenDocument(entry);
+                    }
+                    if (entry.Authored && ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip("A file you saved through the devtools authored models folder.");
                     }
                 }
             }
@@ -716,6 +737,16 @@ public sealed partial class DebugWindowManager
             if (ImGui.IsItemHovered())
             {
                 ImGui.SetTooltip("Add a new root level cube element.");
+            }
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Add primitive##model-tree-add-primitive"))
+            {
+                _modelPrimitiveWindowOpen = true;
+                _modelPrimitivePreviewDirty = true;
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Open the prism helper to generate spheres, cylinders, cones, tori, and arches from cuboids.");
             }
             if (_modelReparentSource != null)
             {
@@ -1047,7 +1078,7 @@ public sealed partial class DebugWindowManager
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Without an origin the engine rotates around 0,0,0 of the parent space. Enabling centers the origin on the element.");
+            ImGui.SetTooltip("Without an origin the engine rotates around 0,0,0 of the parent space. Editor rotation tools center it on the element before rotating.");
         }
         if (element.RotationOrigin != null)
         {
@@ -1069,6 +1100,7 @@ public sealed partial class DebugWindowManager
         if (ImGui.IsItemActivated()) ModelBeginEdit();
         if (rotationChanged)
         {
+            ModelEnsureRotationOrigin(element);
             element.RotationX = rotation.X;
             element.RotationY = rotation.Y;
             element.RotationZ = rotation.Z;
@@ -1490,6 +1522,11 @@ public sealed partial class DebugWindowManager
         List<ModelShapeAssetEntry> index = [];
         try
         {
+            foreach (IAsset asset in CollectToolAuthoredAssets("models", "shapes/"))
+            {
+                index.Add(new ModelShapeAssetEntry(asset.Location.Domain, asset.Location.Path, asset, Authored: true));
+            }
+
             foreach (IAsset asset in _api.Assets.AllAssets.Values)
             {
                 if (asset?.Location == null) continue;
@@ -1507,7 +1544,9 @@ public sealed partial class DebugWindowManager
             index.Sort((left, right) =>
             {
                 int byDomain = string.Compare(left.Domain, right.Domain, StringComparison.OrdinalIgnoreCase);
-                return byDomain != 0 ? byDomain : string.Compare(left.AssetPath, right.AssetPath, StringComparison.OrdinalIgnoreCase);
+                if (byDomain != 0) return byDomain;
+                int byPath = string.Compare(left.AssetPath, right.AssetPath, StringComparison.OrdinalIgnoreCase);
+                return byPath != 0 ? byPath : left.Authored.CompareTo(right.Authored);
             });
         }
         catch (Exception exception)
@@ -1606,8 +1645,9 @@ public sealed partial class DebugWindowManager
             return;
         }
 
+        doc.FromAuthoredFile = entry.Authored;
         ModelSetDocument(doc);
-        _modelStatus = $"Opened {entry.Display}.";
+        _modelStatus = entry.Authored ? $"Opened authored copy of {entry.Display}." : $"Opened {entry.Display}.";
     }
 
     private void ModelCreateNewDocument()
@@ -1670,6 +1710,7 @@ public sealed partial class DebugWindowManager
         _modelPreviewDirty = true;
         _modelJsonBufferStale = true;
         _modelReparentSource = null;
+        _modelPrimitivePreviewDirty = true;
         ModelResetCameraToFit();
     }
 
@@ -2090,6 +2131,7 @@ public sealed partial class DebugWindowManager
 
         restored.SourceText = _modelDoc.SourceText;
         restored.Dirty = true;
+        restored.FromAuthoredFile = _modelDoc.FromAuthoredFile;
         _modelDoc = restored;
         ModelSelectElements(ModelResolveSelectionPaths(entry.SelectionPaths), ModelResolveSelectionPath(entry.SelectionPath));
         if (_modelSelectedElement == null)
