@@ -18,17 +18,13 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
-    private const int AiBehaviorIndexBatchSize = 90;
-
     private readonly List<AiBehaviorEntry> _aiBehaviorEntries = [];
     private readonly List<AiBehaviorEntry> _visibleAiBehaviorEntries = [];
-    private readonly List<IAsset> _aiBehaviorIndexAssets = [];
     private readonly Dictionary<string, AiBehaviorDraftState> _aiBehaviorDraftStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ImGuiThreePanelLayoutState _aiBehaviorLayout = new(0.26f, 0.34f);
     private readonly DevToolsEditorDiagnostics _aiBehaviorDiagnostics = new("Entity AI");
+    private readonly DevToolsAssetIndexer _aiBehaviorIndexer = new(batchSize: 90);
 
-    private AiBehaviorIndexState _aiBehaviorIndexState;
-    private int _aiBehaviorIndexAssetIndex;
     private bool _aiBehaviorIndexIncludedServerAssets;
     private int _aiBehaviorEntryIndex;
     private int _aiBehaviorTaskIndex;
@@ -96,7 +92,7 @@ public sealed partial class DebugWindowManager
         }
         catch (Exception exception)
         {
-            _aiBehaviorIndexState = AiBehaviorIndexState.Failed;
+            _aiBehaviorIndexer.Fail();
             _aiBehaviorStatus = $"Entity AI editor error: {exception.Message}";
             _aiBehaviorDiagnostics.Exception("Entity AI editor failed", exception);
             ImGui.TextColored(new NVector4(1f, 0.36f, 0.28f, 1f), _aiBehaviorStatus);
@@ -145,7 +141,7 @@ public sealed partial class DebugWindowManager
 
     private void EnsureAiBehaviorEntriesIndexed()
     {
-        if (_aiBehaviorIndexState == AiBehaviorIndexState.Ready &&
+        if (_aiBehaviorIndexer.IsReady &&
             _aiBehaviorEntries.Count == 0 &&
             !_aiBehaviorIndexIncludedServerAssets &&
             InGameDevToolsModSystem.ActiveServerApi != null)
@@ -153,23 +149,15 @@ public sealed partial class DebugWindowManager
             StartAiBehaviorIndexing(clearLoaded: false);
         }
 
-        if (_aiBehaviorIndexState == AiBehaviorIndexState.Ready || _aiBehaviorIndexState == AiBehaviorIndexState.Failed) return;
-        if (_aiBehaviorIndexState == AiBehaviorIndexState.Idle)
-        {
-            StartAiBehaviorIndexing(clearLoaded: false);
-        }
-
-        ProcessAiBehaviorIndexBatch();
+        _aiBehaviorIndexer.EnsureIndexed(() => StartAiBehaviorIndexing(clearLoaded: false), ProcessAiBehaviorIndexBatch);
     }
 
     private void StartAiBehaviorIndexing(bool clearLoaded)
     {
-        _aiBehaviorIndexState = AiBehaviorIndexState.Indexing;
-        _aiBehaviorIndexAssetIndex = 0;
+        _aiBehaviorIndexer.Begin();
         _aiBehaviorIndexIncludedServerAssets = false;
         _aiBehaviorEntries.Clear();
         _visibleAiBehaviorEntries.Clear();
-        _aiBehaviorIndexAssets.Clear();
         _aiBehaviorDiagnostics.Clear();
         _aiBehaviorKnownTaskCodes = null;
 
@@ -182,47 +170,37 @@ public sealed partial class DebugWindowManager
             _aiBehaviorTaskIndex = 0;
         }
 
-        HashSet<string> indexedLocations = new(StringComparer.OrdinalIgnoreCase);
         // Authored files first so the user's saved copies win the duplicate check.
-        DevToolsBatching.AddAssetSource("authored entity AI files", () => CollectToolAuthoredAssets("entity-ai"), _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
-        DevToolsBatching.AddAssetSource("client entity category", () => _api.Assets.GetManyInCategory("entities", ""), _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
-        DevToolsBatching.AddAssetSource("client loaded assets", () => _api.Assets.AllAssets.Values, _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
+        _aiBehaviorIndexer.AddSource("authored entity AI files", () => CollectToolAuthoredAssets("entity-ai"), IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
+        _aiBehaviorIndexer.AddSource("client entity category", () => _api.Assets.GetManyInCategory("entities", ""), IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
+        _aiBehaviorIndexer.AddSource("client loaded assets", () => _api.Assets.AllAssets.Values, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
 
         ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
         if (serverApi != null)
         {
             _aiBehaviorIndexIncludedServerAssets = true;
-            DevToolsBatching.AddAssetSource("server entity category", () => serverApi.Assets.GetManyInCategory("entities", ""), _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
-            DevToolsBatching.AddAssetSource("server loaded assets", () => serverApi.Assets.AllAssets.Values, _aiBehaviorIndexAssets, indexedLocations, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
+            _aiBehaviorIndexer.AddSource("server entity category", () => serverApi.Assets.GetManyInCategory("entities", ""), IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
+            _aiBehaviorIndexer.AddSource("server loaded assets", () => serverApi.Assets.AllAssets.Values, IsAiBehaviorEntityAsset, _aiBehaviorDiagnostics);
         }
 
-        DevToolsBatching.SortAssetsByLocation(_aiBehaviorIndexAssets);
+        _aiBehaviorIndexer.SortPendingByLocation();
         _aiBehaviorStatus = BuildAiBehaviorIndexProgressText();
     }
 
     private void ProcessAiBehaviorIndexBatch()
     {
-        if (_aiBehaviorIndexState != AiBehaviorIndexState.Indexing) return;
-
-        try
-        {
-            DevToolsBatching.ProcessBatch(
-                _aiBehaviorIndexAssets,
-                ref _aiBehaviorIndexAssetIndex,
-                AiBehaviorIndexBatchSize,
+        if (!_aiBehaviorIndexer.TryProcessBatch(
                 IndexAiBehaviorAsset,
                 CompleteAiBehaviorIndexing,
                 () =>
                 {
                     _aiBehaviorStatus = BuildAiBehaviorIndexProgressText();
                     RebuildVisibleAiBehaviorEntries();
-                });
-        }
-        catch (Exception exception)
+                },
+                out Exception? error))
         {
-            _aiBehaviorIndexState = AiBehaviorIndexState.Failed;
-            _aiBehaviorStatus = $"Entity AI indexing failed: {exception.Message}";
-            _aiBehaviorDiagnostics.Exception("Entity AI indexing failed", exception);
+            _aiBehaviorStatus = $"Entity AI indexing failed: {error?.Message}";
+            _aiBehaviorDiagnostics.Exception("Entity AI indexing failed", error!);
         }
     }
 
@@ -230,7 +208,6 @@ public sealed partial class DebugWindowManager
     {
         _aiBehaviorEntries.Sort((left, right) => string.Compare(left.SortKey, right.SortKey, StringComparison.OrdinalIgnoreCase));
         RebuildVisibleAiBehaviorEntries();
-        _aiBehaviorIndexState = AiBehaviorIndexState.Ready;
         _aiBehaviorStatus = $"Indexed {_aiBehaviorEntries.Count} entity AI source asset(s).";
         if (_visibleAiBehaviorEntries.Count > 0 && string.IsNullOrWhiteSpace(_aiBehaviorLoadedKey))
         {
@@ -241,7 +218,7 @@ public sealed partial class DebugWindowManager
     private string BuildAiBehaviorIndexProgressText()
     {
         string serverSuffix = _aiBehaviorIndexIncludedServerAssets ? " including server assets" : " client assets only";
-        return $"Indexing entity AI sources {_aiBehaviorIndexAssetIndex}/{_aiBehaviorIndexAssets.Count}{serverSuffix}.";
+        return $"Indexing entity AI sources {_aiBehaviorIndexer.Position}/{_aiBehaviorIndexer.PendingAssets.Count}{serverSuffix}.";
     }
 
     private void IndexAiBehaviorAsset(IAsset asset)
@@ -356,14 +333,14 @@ public sealed partial class DebugWindowManager
         ImGui.SameLine();
         ImGui.TextDisabled($"{_visibleAiBehaviorEntries.Count} / {_aiBehaviorEntries.Count}");
 
-        if (_aiBehaviorIndexState == AiBehaviorIndexState.Indexing)
+        if (_aiBehaviorIndexer.IsIndexing)
         {
             ImGui.TextWrapped(_aiBehaviorStatus);
         }
 
         if (_visibleAiBehaviorEntries.Count == 0)
         {
-            ImGui.TextWrapped(_aiBehaviorIndexState == AiBehaviorIndexState.Ready ? "No entity AI sources match the current filters." : _aiBehaviorStatus);
+            ImGui.TextWrapped(_aiBehaviorIndexer.IsReady ? "No entity AI sources match the current filters." : _aiBehaviorStatus);
             ImGui.EndChild();
             return;
         }
@@ -397,14 +374,14 @@ public sealed partial class DebugWindowManager
     {
         ImGui.BeginChild("##entity-ai-editor", size, true);
 
-        if (_aiBehaviorIndexState == AiBehaviorIndexState.Indexing)
+        if (_aiBehaviorIndexer.IsIndexing)
         {
             ImGui.TextWrapped(_aiBehaviorStatus);
             ImGui.EndChild();
             return;
         }
 
-        if (_aiBehaviorIndexState == AiBehaviorIndexState.Failed)
+        if (_aiBehaviorIndexer.IsFailed)
         {
             ImGui.TextColored(new NVector4(1f, 0.38f, 0.32f, 1f), "Entity AI indexing failed.");
             ImGui.TextWrapped(_aiBehaviorStatus);
@@ -3936,14 +3913,6 @@ public sealed partial class DebugWindowManager
             }
         }
         return properties;
-    }
-
-    private enum AiBehaviorIndexState
-    {
-        Idle,
-        Indexing,
-        Ready,
-        Failed
     }
 
     private sealed record AiBehaviorEntry(

@@ -14,7 +14,6 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
-    private const int PatchCreatorIndexBatchSize = 120;
     private static readonly string[] PatchCreatorKnownCategories =
     [
         "blocktypes",
@@ -39,12 +38,10 @@ public sealed partial class DebugWindowManager
 
     private readonly List<PatchCreatorAssetEntry> _patchCreatorAssets = [];
     private readonly List<PatchCreatorAssetEntry> _visiblePatchCreatorAssets = [];
-    private readonly List<IAsset> _patchCreatorIndexAssets = [];
     private readonly List<PatchCreatorOperationDraft> _patchCreatorOperations = [];
     private readonly ImGuiThreePanelLayoutState _patchCreatorLayout = new(0.25f, 0.34f);
     private readonly DevToolsEditorDiagnostics _patchCreatorDiagnostics = new("Patches");
-    private PatchCreatorIndexState _patchCreatorIndexState;
-    private int _patchCreatorIndexAssetIndex;
+    private readonly DevToolsAssetIndexer _patchCreatorIndexer = new(batchSize: 120);
     private string _patchCreatorFilter = "";
     private string _patchCreatorDomainFilter = "";
     private string _patchCreatorCategoryFilter = "";
@@ -109,7 +106,7 @@ public sealed partial class DebugWindowManager
         }
         catch (Exception exception)
         {
-            _patchCreatorIndexState = PatchCreatorIndexState.Failed;
+            _patchCreatorIndexer.Fail();
             _patchCreatorStatus = $"Patch creator error: {exception.Message}";
             _patchCreatorDiagnostics.Exception("Patch creator failed", exception);
             _api.Logger.Error("[InGameDevTools] Patch creator failed: {0}", exception);
@@ -135,40 +132,29 @@ public sealed partial class DebugWindowManager
 
     private void EnsurePatchCreatorAssetsIndexed()
     {
-        if (_patchCreatorIndexState == PatchCreatorIndexState.Ready || _patchCreatorIndexState == PatchCreatorIndexState.Failed) return;
-        if (_patchCreatorIndexState == PatchCreatorIndexState.Idle)
-        {
-            StartPatchCreatorIndexing();
-        }
-
-        ProcessPatchCreatorIndexBatch();
+        _patchCreatorIndexer.EnsureIndexed(StartPatchCreatorIndexing, ProcessPatchCreatorIndexBatch);
     }
 
     private void StartPatchCreatorIndexing()
     {
-        _patchCreatorIndexState = PatchCreatorIndexState.Indexing;
-        _patchCreatorIndexAssetIndex = 0;
+        _patchCreatorIndexer.Begin();
         _patchCreatorAssets.Clear();
         _visiblePatchCreatorAssets.Clear();
-        _patchCreatorIndexAssets.Clear();
         _patchCreatorAssetIndex = 0;
 
-        HashSet<string> locations = new(StringComparer.OrdinalIgnoreCase);
         // Authored patch files first so the user's saved copies win the duplicate check.
-        DevToolsBatching.AddAssets(CollectToolAuthoredAssets("patches"), _patchCreatorIndexAssets, locations, IsPatchCreatorJsonAsset);
-        DevToolsBatching.AddAssets(_api.Assets.AllAssets.Values, _patchCreatorIndexAssets, locations, IsPatchCreatorJsonAsset);
+        _patchCreatorIndexer.AddAssets(CollectToolAuthoredAssets("patches"), IsPatchCreatorJsonAsset);
+        _patchCreatorIndexer.AddAssets(_api.Assets.AllAssets.Values, IsPatchCreatorJsonAsset);
         foreach (string category in PatchCreatorKnownCategories)
         {
-            DevToolsBatching.AddAssetSource(
+            _patchCreatorIndexer.AddSource(
                 $"asset category '{category}'",
                 () => _api.Assets.GetManyInCategory(category, ""),
-                _patchCreatorIndexAssets,
-                locations,
                 IsPatchCreatorJsonAsset,
                 _patchCreatorDiagnostics);
         }
 
-        DevToolsBatching.SortAssetsByLocation(_patchCreatorIndexAssets);
+        _patchCreatorIndexer.SortPendingByLocation();
         _patchCreatorStatus = BuildPatchCreatorIndexProgressText();
     }
 
@@ -181,29 +167,20 @@ public sealed partial class DebugWindowManager
 
     private void ProcessPatchCreatorIndexBatch()
     {
-        if (_patchCreatorIndexState != PatchCreatorIndexState.Indexing) return;
-
-        try
-        {
-            DevToolsBatching.ProcessBatch(
-                _patchCreatorIndexAssets,
-                ref _patchCreatorIndexAssetIndex,
-                PatchCreatorIndexBatchSize,
+        if (!_patchCreatorIndexer.TryProcessBatch(
                 IndexPatchCreatorAsset,
                 CompletePatchCreatorIndexing,
-                () => _patchCreatorStatus = BuildPatchCreatorIndexProgressText());
-        }
-        catch (Exception exception)
+                () => _patchCreatorStatus = BuildPatchCreatorIndexProgressText(),
+                out Exception? error))
         {
-            _patchCreatorIndexState = PatchCreatorIndexState.Failed;
-            _patchCreatorStatus = $"Patch creator indexing failed: {exception.Message}";
-            _patchCreatorDiagnostics.Exception("Patch creator indexing failed", exception);
+            _patchCreatorStatus = $"Patch creator indexing failed: {error?.Message}";
+            _patchCreatorDiagnostics.Exception("Patch creator indexing failed", error!);
         }
     }
 
     private string BuildPatchCreatorIndexProgressText()
     {
-        return $"Indexing JSON assets {_patchCreatorIndexAssetIndex}/{_patchCreatorIndexAssets.Count}.";
+        return $"Indexing JSON assets {_patchCreatorIndexer.Position}/{_patchCreatorIndexer.PendingAssets.Count}.";
     }
 
     private void IndexPatchCreatorAsset(IAsset asset)
@@ -216,7 +193,6 @@ public sealed partial class DebugWindowManager
     private void CompletePatchCreatorIndexing()
     {
         _patchCreatorAssets.Sort((left, right) => string.Compare(left.SortKey, right.SortKey, StringComparison.OrdinalIgnoreCase));
-        _patchCreatorIndexState = PatchCreatorIndexState.Ready;
         RebuildVisiblePatchCreatorAssets();
         _patchCreatorStatus = $"Indexed {_patchCreatorAssets.Count} JSON asset(s).";
         SyncPatchCreatorSelection();
@@ -270,7 +246,7 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.TextDisabled($"{_visiblePatchCreatorAssets.Count}/{_patchCreatorAssets.Count}");
-        if (_patchCreatorIndexState == PatchCreatorIndexState.Indexing)
+        if (_patchCreatorIndexer.IsIndexing)
         {
             ImGui.TextWrapped(_patchCreatorStatus);
         }
@@ -324,7 +300,7 @@ public sealed partial class DebugWindowManager
 
         if (entry == null)
         {
-            ImGui.TextWrapped(_patchCreatorIndexState == PatchCreatorIndexState.Indexing ? _patchCreatorStatus : "No JSON asset selected.");
+            ImGui.TextWrapped(_patchCreatorIndexer.IsIndexing ? _patchCreatorStatus : "No JSON asset selected.");
             ImGui.EndChild();
             return;
         }
@@ -1394,14 +1370,6 @@ public sealed partial class DebugWindowManager
     private static bool TryParsePatchCreatorJson(string text, out JToken? token, out string error)
     {
         return DevToolsJson.TryParseToken(text, out token, out error);
-    }
-
-    private enum PatchCreatorIndexState
-    {
-        Idle,
-        Indexing,
-        Ready,
-        Failed
     }
 
     private enum PatchCreatorOutputFormat

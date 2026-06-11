@@ -23,14 +23,6 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
-    private enum WorldgenIndexState
-    {
-        Idle,
-        Indexing,
-        Ready,
-        Failed
-    }
-
     private enum WorldgenAssetKind
     {
         Other,

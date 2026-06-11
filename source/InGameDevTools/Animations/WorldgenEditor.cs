@@ -23,7 +23,6 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
-    private const int WorldgenIndexBatchSize = 80;
     private const double WorldgenPeekWatchdogSeconds = 10.0;
     private const int WorldgenPreviewModeGradient = 0;
     private const int WorldgenPreviewModeClimate = 1;
@@ -82,15 +81,13 @@ public sealed partial class DebugWindowManager
 
     private readonly List<WorldgenAssetEntry> _worldgenEntries = [];
     private readonly List<WorldgenAssetEntry> _visibleWorldgenEntries = [];
-    private readonly List<IAsset> _worldgenIndexAssets = [];
     private readonly Dictionary<string, WorldgenDraftState> _worldgenDraftStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ImGuiThreePanelLayoutState _worldgenLayout = new(0.26f, 0.30f);
     private readonly DevToolsEditorDiagnostics _worldgenDiagnostics = new("Worldgen");
+    private readonly DevToolsAssetIndexer _worldgenIndexer = new(batchSize: 80);
     private bool _worldgenPreviewPoppedOut;
     private float _worldgenPoppedViewportWidth = 1100f;
     private float _worldgenPoppedViewportHeight = 760f;
-    private WorldgenIndexState _worldgenIndexState;
-    private int _worldgenIndexAssetIndex;
     private bool _worldgenIndexIncludedServerAssets;
     private string _worldgenFilter = "";
     private string _worldgenDomainFilter = "";
@@ -195,7 +192,7 @@ public sealed partial class DebugWindowManager
         }
         catch (Exception exception)
         {
-            _worldgenIndexState = WorldgenIndexState.Failed;
+            _worldgenIndexer.Fail();
             _worldgenStatus = $"Worldgen editor error: {exception.Message}";
             _worldgenDiagnostics.Exception("Worldgen editor failed", exception);
             _api.Logger.Error("[InGameDevTools] Worldgen editor failed: {0}", exception);
@@ -221,7 +218,7 @@ public sealed partial class DebugWindowManager
 
     private void EnsureWorldgenEntriesIndexed()
     {
-        if (_worldgenIndexState == WorldgenIndexState.Ready &&
+        if (_worldgenIndexer.IsReady &&
             _worldgenEntries.Count == 0 &&
             !_worldgenIndexIncludedServerAssets &&
             InGameDevToolsModSystem.ActiveServerApi != null)
@@ -229,24 +226,16 @@ public sealed partial class DebugWindowManager
             StartWorldgenIndexing(clearLoaded: false);
         }
 
-        if (_worldgenIndexState == WorldgenIndexState.Ready || _worldgenIndexState == WorldgenIndexState.Failed) return;
-        if (_worldgenIndexState == WorldgenIndexState.Idle)
-        {
-            StartWorldgenIndexing(clearLoaded: false);
-        }
-
-        ProcessWorldgenIndexBatch();
+        _worldgenIndexer.EnsureIndexed(() => StartWorldgenIndexing(clearLoaded: false), ProcessWorldgenIndexBatch);
     }
 
     private void StartWorldgenIndexing(bool clearLoaded)
     {
         RememberWorldgenDraft();
-        _worldgenIndexState = WorldgenIndexState.Indexing;
-        _worldgenIndexAssetIndex = 0;
+        _worldgenIndexer.Begin();
         _worldgenIndexIncludedServerAssets = false;
         _worldgenEntries.Clear();
         _visibleWorldgenEntries.Clear();
-        _worldgenIndexAssets.Clear();
         _worldgenEntryIndex = 0;
         _worldgenRowIndex = 0;
 
@@ -260,51 +249,40 @@ public sealed partial class DebugWindowManager
             _worldgenDraftStates.Clear();
         }
 
-        HashSet<string> indexedLocations = new(StringComparer.OrdinalIgnoreCase);
         // Authored files first: same-location entries then win the duplicate check, so the
         // editor resumes from the user's saved copy instead of the pristine game asset.
-        DevToolsBatching.AddAssetSource("authored worldgen files", () => CollectToolAuthoredAssets("worldgen"), _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
-        DevToolsBatching.AddAssetSource("client worldgen category", () => _api.Assets.GetManyInCategory("worldgen", ""), _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
-        DevToolsBatching.AddAssetSource("client loaded assets", () => _api.Assets.AllAssets.Values, _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
+        _worldgenIndexer.AddSource("authored worldgen files", () => CollectToolAuthoredAssets("worldgen"), IsWorldgenJsonAsset, _worldgenDiagnostics);
+        _worldgenIndexer.AddSource("client worldgen category", () => _api.Assets.GetManyInCategory("worldgen", ""), IsWorldgenJsonAsset, _worldgenDiagnostics);
+        _worldgenIndexer.AddSource("client loaded assets", () => _api.Assets.AllAssets.Values, IsWorldgenJsonAsset, _worldgenDiagnostics);
 
         ICoreServerAPI? serverApi = InGameDevToolsModSystem.ActiveServerApi;
         if (serverApi != null)
         {
             _worldgenIndexIncludedServerAssets = true;
-            DevToolsBatching.AddAssetSource("server worldgen category", () => serverApi.Assets.GetManyInCategory("worldgen", ""), _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
-            DevToolsBatching.AddAssetSource("server loaded assets", () => serverApi.Assets.AllAssets.Values, _worldgenIndexAssets, indexedLocations, IsWorldgenJsonAsset, _worldgenDiagnostics);
+            _worldgenIndexer.AddSource("server worldgen category", () => serverApi.Assets.GetManyInCategory("worldgen", ""), IsWorldgenJsonAsset, _worldgenDiagnostics);
+            _worldgenIndexer.AddSource("server loaded assets", () => serverApi.Assets.AllAssets.Values, IsWorldgenJsonAsset, _worldgenDiagnostics);
         }
 
-        DevToolsBatching.SortAssetsByLocation(_worldgenIndexAssets);
+        _worldgenIndexer.SortPendingByLocation();
         _worldgenStatus = BuildWorldgenIndexProgressText();
     }
 
     private void ProcessWorldgenIndexBatch()
     {
-        if (_worldgenIndexState != WorldgenIndexState.Indexing) return;
-
-        try
-        {
-            DevToolsBatching.ProcessBatch(
-                _worldgenIndexAssets,
-                ref _worldgenIndexAssetIndex,
-                WorldgenIndexBatchSize,
+        if (!_worldgenIndexer.TryProcessBatch(
                 IndexWorldgenAsset,
                 CompleteWorldgenIndexing,
-                () => _worldgenStatus = BuildWorldgenIndexProgressText());
-        }
-        catch (Exception exception)
+                () => _worldgenStatus = BuildWorldgenIndexProgressText(),
+                out Exception? error))
         {
-            _worldgenIndexState = WorldgenIndexState.Failed;
-            _worldgenStatus = $"Worldgen indexing failed: {exception.Message}";
-            _worldgenDiagnostics.Exception("Worldgen indexing failed", exception);
+            _worldgenStatus = $"Worldgen indexing failed: {error?.Message}";
+            _worldgenDiagnostics.Exception("Worldgen indexing failed", error!);
         }
     }
 
     private void CompleteWorldgenIndexing()
     {
         _worldgenEntries.Sort((left, right) => string.Compare(left.SortKey, right.SortKey, StringComparison.OrdinalIgnoreCase));
-        _worldgenIndexState = WorldgenIndexState.Ready;
         RebuildVisibleWorldgenEntries();
         _worldgenStatus = $"Indexed {_worldgenEntries.Count} worldgen JSON asset(s).";
         if (_visibleWorldgenEntries.Count > 0 && string.IsNullOrWhiteSpace(_worldgenLoadedKey))
@@ -316,7 +294,7 @@ public sealed partial class DebugWindowManager
     private string BuildWorldgenIndexProgressText()
     {
         string serverSuffix = _worldgenIndexIncludedServerAssets ? " including server assets" : " client assets only";
-        return $"Indexing worldgen assets {_worldgenIndexAssetIndex}/{_worldgenIndexAssets.Count}{serverSuffix}.";
+        return $"Indexing worldgen assets {_worldgenIndexer.Position}/{_worldgenIndexer.PendingAssets.Count}{serverSuffix}.";
     }
 
     private void IndexWorldgenAsset(IAsset asset)
@@ -396,7 +374,7 @@ public sealed partial class DebugWindowManager
         ImGui.TextUnformatted($"{_visibleWorldgenEntries.Count}/{_worldgenEntries.Count}");
         ImGui.Separator();
 
-        if (_worldgenIndexState == WorldgenIndexState.Indexing)
+        if (_worldgenIndexer.IsIndexing)
         {
             ImGui.TextWrapped(_worldgenStatus);
         }
@@ -433,7 +411,7 @@ public sealed partial class DebugWindowManager
         WorldgenAssetEntry? entry = SelectedWorldgenEntry;
         if (entry == null)
         {
-            ImGui.TextWrapped(_worldgenIndexState == WorldgenIndexState.Indexing ? _worldgenStatus : "No worldgen JSON asset selected.");
+            ImGui.TextWrapped(_worldgenIndexer.IsIndexing ? _worldgenStatus : "No worldgen JSON asset selected.");
             ImGui.EndChild();
             return;
         }
