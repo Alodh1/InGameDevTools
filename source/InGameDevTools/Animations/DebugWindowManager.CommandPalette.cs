@@ -9,19 +9,23 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
+    private const int CommandPaletteRecentLimit = 8;
+
     private DevToolsTab? _requestedDevToolsTab;
     private bool _commandPaletteOpen;
     private bool _commandPaletteFocusSearch;
     private string _commandPaletteFilter = "";
     private int _commandPaletteSelectedIndex;
     private string _commandPaletteStatus = "";
+    private readonly List<DevToolsCommandPaletteEntry> _commandPaletteRecentEntries = [];
 
     private sealed record DevToolsCommandPaletteEntry(
         string Title,
         string Subtitle,
         string SearchText,
         DevToolsTab TargetTab,
-        Action Execute);
+        Action Execute,
+        int Score = 0);
 
     private void RequestDevToolsTab(DevToolsTab tab)
     {
@@ -170,6 +174,7 @@ public sealed partial class DebugWindowManager
         {
             entry.Execute();
             _commandPaletteStatus = $"Opened {entry.Title}.";
+            RememberCommandPaletteEntry(entry);
         }
         catch (Exception exception)
         {
@@ -179,6 +184,16 @@ public sealed partial class DebugWindowManager
 
         _commandPaletteOpen = false;
         ImGui.CloseCurrentPopup();
+    }
+
+    private void RememberCommandPaletteEntry(DevToolsCommandPaletteEntry entry)
+    {
+        _commandPaletteRecentEntries.RemoveAll(recent => recent.Title.Equals(entry.Title, StringComparison.OrdinalIgnoreCase));
+        _commandPaletteRecentEntries.Insert(0, entry);
+        if (_commandPaletteRecentEntries.Count > CommandPaletteRecentLimit)
+        {
+            _commandPaletteRecentEntries.RemoveRange(CommandPaletteRecentLimit, _commandPaletteRecentEntries.Count - CommandPaletteRecentLimit);
+        }
     }
 
     private List<DevToolsCommandPaletteEntry> BuildCommandPaletteEntries(string filter)
@@ -201,8 +216,10 @@ public sealed partial class DebugWindowManager
 
         if (!includeAssets)
         {
-            _commandPaletteStatus = "Type at least two characters to search assets.";
-            return entries;
+            _commandPaletteStatus = _commandPaletteRecentEntries.Count > 0
+                ? "Recent commands first. Type at least two characters to search assets."
+                : "Type at least two characters to search assets.";
+            return PrependCommandPaletteRecents(entries, normalizedFilter);
         }
 
         AddRuntimeCollectibleCommands(entries, normalizedFilter);
@@ -213,12 +230,33 @@ public sealed partial class DebugWindowManager
         AddPatchCreatorCommands(entries, normalizedFilter);
         AddAiBehaviorCommands(entries, normalizedFilter);
 
-        _commandPaletteStatus = $"{entries.Count} command(s).";
+        _commandPaletteStatus = $"{entries.Count} command(s), best matches first.";
         return entries
-            .OrderBy(entry => GetCommandPaletteTabOrder(entry.TargetTab))
+            .OrderByDescending(entry => entry.Score)
+            .ThenBy(entry => GetCommandPaletteTabOrder(entry.TargetTab))
             .ThenBy(entry => entry.Title, StringComparer.OrdinalIgnoreCase)
             .Take(220)
             .ToList();
+    }
+
+    private List<DevToolsCommandPaletteEntry> PrependCommandPaletteRecents(List<DevToolsCommandPaletteEntry> entries, string filter)
+    {
+        if (_commandPaletteRecentEntries.Count == 0) return entries;
+
+        List<DevToolsCommandPaletteEntry> combined = [];
+        foreach (DevToolsCommandPaletteEntry recent in _commandPaletteRecentEntries)
+        {
+            if (!DevToolsFuzzyMatch.Matches(recent.SearchText, filter)) continue;
+            combined.Add(recent with { Subtitle = $"Recent · {recent.Subtitle}".TrimEnd(' ', '·') });
+        }
+
+        foreach (DevToolsCommandPaletteEntry entry in entries)
+        {
+            if (combined.Any(existing => existing.Title.Equals(entry.Title, StringComparison.OrdinalIgnoreCase))) continue;
+            combined.Add(entry);
+        }
+
+        return combined;
     }
 
     private static int GetCommandPaletteTabOrder(DevToolsTab tab) => tab switch
@@ -239,18 +277,14 @@ public sealed partial class DebugWindowManager
 
     private static void AddCommandPaletteEntry(List<DevToolsCommandPaletteEntry> entries, string filter, string title, string subtitle, string search, DevToolsTab tab, Action execute)
     {
-        if (!CommandPaletteMatches($"{title} {subtitle} {search}", filter)) return;
-        entries.Add(new(title, subtitle, $"{title} {subtitle} {search}", tab, execute));
+        TryAddCommandPaletteEntry(entries, filter, title, subtitle, $"{title} {subtitle} {search}", tab, execute);
     }
 
-    private static bool CommandPaletteMatches(string value, string filter)
+    private static bool TryAddCommandPaletteEntry(List<DevToolsCommandPaletteEntry> entries, string filter, string title, string subtitle, string search, DevToolsTab tab, Action execute)
     {
-        if (string.IsNullOrWhiteSpace(filter)) return true;
-        foreach (string token in filter.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (!value.Contains(token, StringComparison.OrdinalIgnoreCase)) return false;
-        }
-
+        int score = DevToolsFuzzyMatch.Score(search, filter);
+        if (score < 0) return false;
+        entries.Add(new(title, subtitle, search, tab, execute, score));
         return true;
     }
 
@@ -260,10 +294,9 @@ public sealed partial class DebugWindowManager
         {
             if (block?.Code == null) continue;
             string code = block.Code.ToString();
-            string search = $"block {code}";
-            if (!CommandPaletteMatches(search, filter)) continue;
-            entries.Add(new($"Transform block {ImGuiLayoutHelper.CompactAssetCode(code)}", code, search, DevToolsTab.Transforms, () => JumpToTransformAsset($"block:{code}")));
-            entries.Add(new($"Patch block JSON {ImGuiLayoutHelper.CompactAssetCode(code)}", code, search, DevToolsTab.Patches, () => JumpToPatchCreatorAsset($"blocktypes/{block.Code.Path}.json", block.Code.Domain)));
+            string compact = ImGuiLayoutHelper.CompactAssetCode(code);
+            TryAddCommandPaletteEntry(entries, filter, $"Transform block {compact}", code, $"transform block {code}", DevToolsTab.Transforms, () => JumpToTransformAsset($"block:{code}"));
+            TryAddCommandPaletteEntry(entries, filter, $"Patch block JSON {compact}", code, $"patch block json {code}", DevToolsTab.Patches, () => JumpToPatchCreatorAsset($"blocktypes/{block.Code.Path}.json", block.Code.Domain));
             if (entries.Count > 180) return;
         }
 
@@ -271,10 +304,9 @@ public sealed partial class DebugWindowManager
         {
             if (item?.Code == null) continue;
             string code = item.Code.ToString();
-            string search = $"item {code}";
-            if (!CommandPaletteMatches(search, filter)) continue;
-            entries.Add(new($"Transform item {ImGuiLayoutHelper.CompactAssetCode(code)}", code, search, DevToolsTab.Transforms, () => JumpToTransformAsset($"item:{code}")));
-            entries.Add(new($"Patch item JSON {ImGuiLayoutHelper.CompactAssetCode(code)}", code, search, DevToolsTab.Patches, () => JumpToPatchCreatorAsset($"itemtypes/{item.Code.Path}.json", item.Code.Domain)));
+            string compact = ImGuiLayoutHelper.CompactAssetCode(code);
+            TryAddCommandPaletteEntry(entries, filter, $"Transform item {compact}", code, $"transform item {code}", DevToolsTab.Transforms, () => JumpToTransformAsset($"item:{code}"));
+            TryAddCommandPaletteEntry(entries, filter, $"Patch item JSON {compact}", code, $"patch item json {code}", DevToolsTab.Patches, () => JumpToPatchCreatorAsset($"itemtypes/{item.Code.Path}.json", item.Code.Domain));
             if (entries.Count > 180) return;
         }
     }
@@ -285,12 +317,11 @@ public sealed partial class DebugWindowManager
         {
             if (entityType?.Code == null) continue;
             string code = entityType.Code.ToString();
-            string search = $"entity {code}";
-            if (!CommandPaletteMatches(search, filter)) continue;
-            entries.Add(new($"Animate entity {ImGuiLayoutHelper.CompactAssetCode(code)}", code, search, DevToolsTab.Animations, () => JumpToVanillaEntity(code)));
-            entries.Add(new($"Entity AI {ImGuiLayoutHelper.CompactAssetCode(code)}", code, search, DevToolsTab.EntityAi, () => JumpToAiBehaviorEntity(code)));
-            entries.Add(new($"Loot drops for entity {ImGuiLayoutHelper.CompactAssetCode(code)}", code, search, DevToolsTab.LootDrops, () => JumpToLootDropEntry($"entity:{code}")));
-            entries.Add(new($"Patch entity JSON {ImGuiLayoutHelper.CompactAssetCode(code)}", code, search, DevToolsTab.Patches, () => JumpToPatchCreatorAsset($"entities/{entityType.Code.Path}.json", entityType.Code.Domain)));
+            string compact = ImGuiLayoutHelper.CompactAssetCode(code);
+            TryAddCommandPaletteEntry(entries, filter, $"Animate entity {compact}", code, $"animate entity {code}", DevToolsTab.Animations, () => JumpToVanillaEntity(code));
+            TryAddCommandPaletteEntry(entries, filter, $"Entity AI {compact}", code, $"entity ai {code}", DevToolsTab.EntityAi, () => JumpToAiBehaviorEntity(code));
+            TryAddCommandPaletteEntry(entries, filter, $"Loot drops for entity {compact}", code, $"loot drops entity {code}", DevToolsTab.LootDrops, () => JumpToLootDropEntry($"entity:{code}"));
+            TryAddCommandPaletteEntry(entries, filter, $"Patch entity JSON {compact}", code, $"patch entity json {code}", DevToolsTab.Patches, () => JumpToPatchCreatorAsset($"entities/{entityType.Code.Path}.json", entityType.Code.Domain));
             if (entries.Count > 210) return;
         }
     }
@@ -299,8 +330,7 @@ public sealed partial class DebugWindowManager
     {
         foreach ((string key, string title, string subtitle, string search) in _recipeEditor.GetCommandPaletteEntries())
         {
-            if (!CommandPaletteMatches(search, filter)) continue;
-            entries.Add(new($"Recipe {title}", subtitle, search, DevToolsTab.RecipeEditor, () => JumpToRecipe(key)));
+            TryAddCommandPaletteEntry(entries, filter, $"Recipe {title}", subtitle, $"recipe {title} {search}", DevToolsTab.RecipeEditor, () => JumpToRecipe(key));
             if (entries.Count > 210) return;
         }
     }
@@ -309,8 +339,7 @@ public sealed partial class DebugWindowManager
     {
         foreach (LootDropEntry entry in _lootDropEntries)
         {
-            if (!CommandPaletteMatches(entry.SearchText, filter)) continue;
-            entries.Add(new($"Loot/drop {entry.Label}", entry.Tooltip, entry.SearchText, DevToolsTab.LootDrops, () => JumpToLootDropEntry(entry.Key)));
+            TryAddCommandPaletteEntry(entries, filter, $"Loot/drop {entry.Label}", entry.Tooltip, $"loot drop {entry.SearchText}", DevToolsTab.LootDrops, () => JumpToLootDropEntry(entry.Key));
             if (entries.Count > 210) return;
         }
     }
@@ -320,9 +349,7 @@ public sealed partial class DebugWindowManager
         foreach (WorldgenAssetEntry entry in _worldgenEntries)
         {
             string title = $"Worldgen {entry.KindLabel} {entry.Domain}:{entry.AssetPath}";
-            string search = $"{title} {entry.SearchText}";
-            if (!CommandPaletteMatches(search, filter)) continue;
-            entries.Add(new(title, entry.Key, search, DevToolsTab.Worldgen, () => JumpToWorldgenAsset(entry.Key)));
+            TryAddCommandPaletteEntry(entries, filter, title, entry.Key, $"{title} {entry.SearchText}", DevToolsTab.Worldgen, () => JumpToWorldgenAsset(entry.Key));
             if (entries.Count > 210) return;
         }
     }
@@ -332,9 +359,7 @@ public sealed partial class DebugWindowManager
         foreach (PatchCreatorAssetEntry entry in _patchCreatorAssets)
         {
             string title = $"Patch target {entry.Domain}:{entry.AssetPath}";
-            string search = $"{title} {entry.Category}";
-            if (!CommandPaletteMatches(search, filter)) continue;
-            entries.Add(new(title, entry.Category, search, DevToolsTab.Patches, () => JumpToPatchCreatorAsset(entry.Key)));
+            TryAddCommandPaletteEntry(entries, filter, title, entry.Category, $"{title} {entry.Category}", DevToolsTab.Patches, () => JumpToPatchCreatorAsset(entry.Key));
             if (entries.Count > 210) return;
         }
     }
@@ -343,8 +368,7 @@ public sealed partial class DebugWindowManager
     {
         foreach (AiBehaviorEntry entry in _aiBehaviorEntries)
         {
-            if (!CommandPaletteMatches(entry.SearchText, filter)) continue;
-            entries.Add(new($"Entity AI source {entry.DisplayCode}", entry.AssetPath, entry.SearchText, DevToolsTab.EntityAi, () => JumpToAiBehaviorEntry(entry.Key)));
+            TryAddCommandPaletteEntry(entries, filter, $"Entity AI source {entry.DisplayCode}", entry.AssetPath, $"entity ai source {entry.SearchText}", DevToolsTab.EntityAi, () => JumpToAiBehaviorEntry(entry.Key));
             if (entries.Count > 210) return;
         }
     }
