@@ -41,6 +41,11 @@ public sealed partial class DebugWindowManager
     private string _aiBehaviorStatus = "Entity AI editor ready.";
     private string _aiBehaviorNewTaskCode = "wander";
     private int _aiBehaviorKnownTaskCodeIndex;
+    private int _aiBehaviorTypedTaskTypeIndex;
+    private int _aiBehaviorTypedTaskIndex;
+    private string _aiBehaviorNewTaskTypeKey = "";
+    private string _aiBehaviorNewOtherParameterName = "";
+    private string _aiBehaviorNewOtherParameterJson = "\"\"";
     private string[]? _aiBehaviorKnownTaskCodes;
     private readonly List<AiBehaviorLiveTaskInfo> _aiBehaviorLiveTasks = [];
     private readonly List<AiBehaviorLiveTransition> _aiBehaviorLiveTransitions = [];
@@ -433,15 +438,18 @@ public sealed partial class DebugWindowManager
         if (tasks == null)
         {
             ImGui.TextWrapped("This taskai behavior does not have a base aitasks array.");
-            if (tasksByType != null)
-            {
-                ImGui.TextWrapped($"It has {CountAiBehaviorTasksByType(tasksByType)} typed task row(s) in aitasksByType. Typed rows are preserved; V1 edits the base aitasks array.");
-            }
+            if (tasksByType != null) ImGui.TextDisabled($"{behaviorPath}.aitasksByType: {CountAiBehaviorTasksByType(tasksByType)} typed task row(s)");
 
             if (ImGui.Button("Create base aitasks array##entity-ai-create-aitasks", new NVector2(-1, 0)))
             {
                 behavior["aitasks"] = new JArray();
                 SetAiBehaviorCurrentRoot(root);
+            }
+
+            if (tasksByType != null)
+            {
+                ImGui.Separator();
+                DrawAiBehaviorTasksByTypeEditor(root, behavior, tasksByType);
             }
 
             DrawAiBehaviorRawJsonEditor();
@@ -450,68 +458,18 @@ public sealed partial class DebugWindowManager
 
         ImGui.TextDisabled($"{behaviorPath}.aitasks: {tasks.Count} task(s)");
 
-        DrawAiBehaviorTaskToolbar(root, tasks);
-
-        float listHeight = Math.Clamp(ImGui.GetContentRegionAvail().Y * 0.28f, 140f, 320f);
-        if (ImGui.BeginChild("##entity-ai-task-list", new NVector2(-float.Epsilon, listHeight), true))
-        {
-            _aiBehaviorTaskIndex = Math.Clamp(_aiBehaviorTaskIndex, 0, Math.Max(0, tasks.Count - 1));
-            for (int index = 0; index < tasks.Count; index++)
-            {
-                string label = GetAiBehaviorTaskLabel(tasks[index], index);
-                if (ImGui.Selectable($"{label}##entity-ai-task-{index}", index == _aiBehaviorTaskIndex))
-                {
-                    _aiBehaviorTaskIndex = index;
-                    RememberAiBehaviorDraft();
-                }
-
-                if (ImGui.IsItemHovered())
-                {
-                    ImGui.SetTooltip(tasks[index].ToString(Formatting.Indented));
-                }
-            }
-        }
-        ImGui.EndChild();
-
-        if (tasks.Count == 0)
-        {
-            ImGui.TextWrapped("No AI tasks configured.");
-            DrawAiBehaviorRawJsonEditor();
-            return;
-        }
-
-        _aiBehaviorTaskIndex = Math.Clamp(_aiBehaviorTaskIndex, 0, tasks.Count - 1);
-        if (tasks[_aiBehaviorTaskIndex] is not JObject task)
-        {
-            ImGui.TextWrapped("Selected task is not an object. Use raw JSON to repair it.");
-            DrawAiBehaviorRawJsonEditor();
-            return;
-        }
+        DrawAiBehaviorTaskToolbar(root, tasks, ref _aiBehaviorTaskIndex, "base");
+        DrawAiBehaviorTaskListEditor(root, tasks, ref _aiBehaviorTaskIndex, "base", "No base AI tasks configured.");
 
         ImGui.Separator();
-        bool changed = DrawAiBehaviorTaskEditor(task);
-        if (changed)
+        if (tasksByType != null)
         {
-            SetAiBehaviorCurrentRoot(root);
+            DrawAiBehaviorTasksByTypeEditor(root, behavior, tasksByType);
         }
-
-        if (ImGui.CollapsingHeader("Selected task JSON##entity-ai-task-json"))
+        else if (ImGui.Button("Create aitasksByType map##entity-ai-create-typed-tasks", new NVector2(-1, 0)))
         {
-            string taskText = task.ToString(Formatting.Indented);
-            if (ImGui.InputTextMultiline("##entity-ai-selected-task-json", ref taskText, 256 * 1024, new NVector2(-float.Epsilon, 220f), ImGuiInputTextFlags.AllowTabInput))
-            {
-                try
-                {
-                    JToken replacement = JToken.Parse(taskText);
-                    tasks[_aiBehaviorTaskIndex] = replacement;
-                    SetAiBehaviorCurrentRoot(root);
-                }
-                catch (Exception exception)
-                {
-                    _aiBehaviorTextValid = false;
-                    _aiBehaviorValidationStatus = $"Selected task JSON parse error: {exception.Message}";
-                }
-            }
+            behavior["aitasksByType"] = new JObject();
+            SetAiBehaviorCurrentRoot(root);
         }
 
         if (ImGui.CollapsingHeader("Full entity JSON##entity-ai-full-json"))
@@ -520,69 +478,220 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void DrawAiBehaviorTaskListEditor(JObject root, JArray tasks, ref int taskIndex, string idSuffix, string emptyText)
+    {
+        ImGui.PushID($"entity-ai-task-list-editor-{idSuffix}");
+        try
+        {
+            float listHeight = Math.Clamp(ImGui.GetContentRegionAvail().Y * 0.24f, 120f, 280f);
+            if (ImGui.BeginChild("##task-list", new NVector2(-float.Epsilon, listHeight), true))
+            {
+                taskIndex = Math.Clamp(taskIndex, 0, Math.Max(0, tasks.Count - 1));
+                for (int index = 0; index < tasks.Count; index++)
+                {
+                    string label = GetAiBehaviorTaskLabel(tasks[index], index);
+                    if (ImGui.Selectable($"{label}##task-{index}", index == taskIndex))
+                    {
+                        taskIndex = index;
+                        RememberAiBehaviorDraft();
+                    }
+
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip(tasks[index].ToString(Formatting.Indented));
+                    }
+                }
+            }
+            ImGui.EndChild();
+
+            if (tasks.Count == 0)
+            {
+                ImGui.TextWrapped(emptyText);
+                return;
+            }
+
+            taskIndex = Math.Clamp(taskIndex, 0, tasks.Count - 1);
+            if (tasks[taskIndex] is not JObject task)
+            {
+                ImGui.TextWrapped("Selected task is not an object. Use raw JSON to repair it.");
+                return;
+            }
+
+            ImGui.Separator();
+            ImGui.PushID($"selected-task-{idSuffix}-{taskIndex}");
+            bool changed = DrawAiBehaviorTaskEditor(task);
+            ImGui.PopID();
+            if (changed)
+            {
+                SetAiBehaviorCurrentRoot(root);
+            }
+
+            if (ImGui.CollapsingHeader("Selected task JSON##task-json"))
+            {
+                string taskText = task.ToString(Formatting.Indented);
+                if (ImGui.InputTextMultiline("##selected-task-json", ref taskText, 256 * 1024, new NVector2(-float.Epsilon, 220f), ImGuiInputTextFlags.AllowTabInput))
+                {
+                    try
+                    {
+                        JToken replacement = JToken.Parse(taskText);
+                        tasks[taskIndex] = replacement;
+                        SetAiBehaviorCurrentRoot(root);
+                    }
+                    catch (Exception exception)
+                    {
+                        _aiBehaviorTextValid = false;
+                        _aiBehaviorValidationStatus = $"Selected task JSON parse error: {exception.Message}";
+                    }
+                }
+            }
+        }
+        finally
+        {
+            ImGui.PopID();
+        }
+    }
+
+    private void DrawAiBehaviorTasksByTypeEditor(JObject root, JObject behavior, JObject tasksByType)
+    {
+        if (!ImGui.CollapsingHeader("Typed tasks (aitasksByType)##entity-ai-typed-tasks", ImGuiTreeNodeFlags.DefaultOpen)) return;
+
+        behavior["aitasksByType"] = tasksByType;
+
+        ImGui.InputTextWithHint("##entity-ai-new-typed-key", "type key, e.g. idle", ref _aiBehaviorNewTaskTypeKey, 120);
+        ImGui.SameLine();
+        if (ImGui.Button("Add type##entity-ai-add-typed-key"))
+        {
+            string key = string.IsNullOrWhiteSpace(_aiBehaviorNewTaskTypeKey) ? "default" : _aiBehaviorNewTaskTypeKey.Trim();
+            if (tasksByType[key] == null)
+            {
+                tasksByType[key] = new JArray();
+                _aiBehaviorTypedTaskTypeIndex = tasksByType.Properties().Select(property => property.Name).ToList().FindIndex(name => name.Equals(key, StringComparison.OrdinalIgnoreCase));
+                _aiBehaviorTypedTaskIndex = 0;
+                _aiBehaviorNewTaskTypeKey = "";
+                SetAiBehaviorCurrentRoot(root);
+            }
+            else
+            {
+                _aiBehaviorStatus = $"aitasksByType already contains '{key}'.";
+            }
+        }
+
+        List<JProperty> typeProperties = tasksByType.Properties()
+            .OrderBy(property => property.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (typeProperties.Count == 0)
+        {
+            ImGui.TextWrapped("No typed task groups configured.");
+            return;
+        }
+
+        _aiBehaviorTypedTaskTypeIndex = Math.Clamp(_aiBehaviorTypedTaskTypeIndex, 0, typeProperties.Count - 1);
+        string[] labels = typeProperties
+            .Select(property => $"{property.Name} ({(property.Value as JArray)?.Count.ToString(CultureInfo.InvariantCulture) ?? "non-array"})")
+            .ToArray();
+        ImGui.ListBox("Types##entity-ai-typed-types", ref _aiBehaviorTypedTaskTypeIndex, labels, labels.Length);
+
+        JProperty selectedProperty = typeProperties[_aiBehaviorTypedTaskTypeIndex];
+        string selectedKey = selectedProperty.Name;
+
+        ImGui.TextDisabled($"aitasksByType.{selectedKey}");
+        ImGui.SameLine();
+        if (ImGui.Button("Remove type##entity-ai-remove-typed-key"))
+        {
+            selectedProperty.Remove();
+            _aiBehaviorTypedTaskTypeIndex = Math.Clamp(_aiBehaviorTypedTaskTypeIndex, 0, Math.Max(0, typeProperties.Count - 2));
+            _aiBehaviorTypedTaskIndex = 0;
+            SetAiBehaviorCurrentRoot(root);
+            return;
+        }
+
+        if (selectedProperty.Value is not JArray typedTasks)
+        {
+            ImGui.TextWrapped("Selected aitasksByType value is not an array. Convert it to an empty task array or edit the full JSON.");
+            if (ImGui.Button("Convert to empty task array##entity-ai-convert-typed-array"))
+            {
+                selectedProperty.Value = new JArray();
+                _aiBehaviorTypedTaskIndex = 0;
+                SetAiBehaviorCurrentRoot(root);
+            }
+            return;
+        }
+
+        DrawAiBehaviorTaskToolbar(root, typedTasks, ref _aiBehaviorTypedTaskIndex, $"typed-{selectedKey}");
+        DrawAiBehaviorTaskListEditor(root, typedTasks, ref _aiBehaviorTypedTaskIndex, $"typed-{selectedKey}", "No typed AI tasks configured for this type.");
+    }
+
     private void DrawAiBehaviorTaskToolbar(JObject root, JArray tasks)
     {
+        DrawAiBehaviorTaskToolbar(root, tasks, ref _aiBehaviorTaskIndex, "base");
+    }
+
+    private void DrawAiBehaviorTaskToolbar(JObject root, JArray tasks, ref int taskIndex, string idSuffix)
+    {
+        ImGui.PushID($"entity-ai-task-toolbar-{idSuffix}");
         IReadOnlyList<string> knownCodes = GetKnownAiTaskCodes();
         ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X * 0.36f));
-        ImGui.InputText("New task code##entity-ai-new-task-code", ref _aiBehaviorNewTaskCode, 128);
+        ImGui.InputText("New task code##new-task-code", ref _aiBehaviorNewTaskCode, 128);
         if (knownCodes.Count > 0)
         {
             ImGui.SameLine();
             ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X * 0.36f));
             _aiBehaviorKnownTaskCodeIndex = Math.Clamp(_aiBehaviorKnownTaskCodeIndex, 0, knownCodes.Count - 1);
-            if (ImGui.Combo("Known##entity-ai-known-task-code", ref _aiBehaviorKnownTaskCodeIndex, knownCodes.ToArray(), knownCodes.Count))
+            if (ImGui.Combo("Known##known-task-code", ref _aiBehaviorKnownTaskCodeIndex, knownCodes.ToArray(), knownCodes.Count))
             {
                 _aiBehaviorNewTaskCode = knownCodes[_aiBehaviorKnownTaskCodeIndex];
             }
         }
 
-        if (ImGui.Button("Add task##entity-ai-add-task"))
+        if (ImGui.Button("Add task##add-task"))
         {
             string code = string.IsNullOrWhiteSpace(_aiBehaviorNewTaskCode) ? "wander" : _aiBehaviorNewTaskCode.Trim();
             tasks.Add(new JObject { ["code"] = code });
-            _aiBehaviorTaskIndex = tasks.Count - 1;
+            taskIndex = tasks.Count - 1;
             SetAiBehaviorCurrentRoot(root);
         }
         ImGui.SameLine();
 
-        bool hasTask = tasks.Count > 0 && _aiBehaviorTaskIndex >= 0 && _aiBehaviorTaskIndex < tasks.Count;
+        bool hasTask = tasks.Count > 0 && taskIndex >= 0 && taskIndex < tasks.Count;
         if (!hasTask) ImGui.BeginDisabled();
-        if (ImGui.Button("Remove selected##entity-ai-remove-task"))
+        if (ImGui.Button("Remove selected##remove-task"))
         {
-            tasks.RemoveAt(_aiBehaviorTaskIndex);
-            _aiBehaviorTaskIndex = Math.Clamp(_aiBehaviorTaskIndex, 0, Math.Max(0, tasks.Count - 1));
+            tasks.RemoveAt(taskIndex);
+            taskIndex = Math.Clamp(taskIndex, 0, Math.Max(0, tasks.Count - 1));
             SetAiBehaviorCurrentRoot(root);
         }
         ImGui.SameLine();
-        if (ImGui.Button("Duplicate##entity-ai-duplicate-task"))
+        if (ImGui.Button("Duplicate##duplicate-task"))
         {
-            tasks.Insert(_aiBehaviorTaskIndex + 1, tasks[_aiBehaviorTaskIndex].DeepClone());
-            _aiBehaviorTaskIndex++;
+            tasks.Insert(taskIndex + 1, tasks[taskIndex].DeepClone());
+            taskIndex++;
             SetAiBehaviorCurrentRoot(root);
         }
         ImGui.SameLine();
-        if (_aiBehaviorTaskIndex <= 0) ImGui.BeginDisabled();
-        if (ImGui.Button("Up##entity-ai-task-up"))
+        if (taskIndex <= 0) ImGui.BeginDisabled();
+        if (ImGui.Button("Up##task-up"))
         {
-            JToken task = tasks[_aiBehaviorTaskIndex];
-            tasks.RemoveAt(_aiBehaviorTaskIndex);
-            _aiBehaviorTaskIndex--;
-            tasks.Insert(_aiBehaviorTaskIndex, task);
+            JToken task = tasks[taskIndex];
+            tasks.RemoveAt(taskIndex);
+            taskIndex--;
+            tasks.Insert(taskIndex, task);
             SetAiBehaviorCurrentRoot(root);
         }
-        if (_aiBehaviorTaskIndex <= 0) ImGui.EndDisabled();
+        if (taskIndex <= 0) ImGui.EndDisabled();
         ImGui.SameLine();
-        if (_aiBehaviorTaskIndex >= tasks.Count - 1) ImGui.BeginDisabled();
-        if (ImGui.Button("Down##entity-ai-task-down"))
+        if (taskIndex >= tasks.Count - 1) ImGui.BeginDisabled();
+        if (ImGui.Button("Down##task-down"))
         {
-            JToken task = tasks[_aiBehaviorTaskIndex];
-            tasks.RemoveAt(_aiBehaviorTaskIndex);
-            _aiBehaviorTaskIndex++;
-            tasks.Insert(_aiBehaviorTaskIndex, task);
+            JToken task = tasks[taskIndex];
+            tasks.RemoveAt(taskIndex);
+            taskIndex++;
+            tasks.Insert(taskIndex, task);
             SetAiBehaviorCurrentRoot(root);
         }
-        if (_aiBehaviorTaskIndex >= tasks.Count - 1) ImGui.EndDisabled();
+        if (taskIndex >= tasks.Count - 1) ImGui.EndDisabled();
         if (!hasTask) ImGui.EndDisabled();
+        ImGui.PopID();
     }
 
     private bool DrawAiBehaviorTaskEditor(JObject task)
@@ -618,11 +727,140 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.CollapsingHeader("Other parameters##entity-ai-other-params"))
         {
-            foreach (JProperty property in task.Properties().ToList())
+            changed |= DrawAiBehaviorOtherParameters(task);
+        }
+
+        return changed;
+    }
+
+    private bool DrawAiBehaviorOtherParameters(JObject task)
+    {
+        bool changed = false;
+        List<JProperty> otherProperties = task.Properties()
+            .Where(property => !AiBehaviorFirstClassProperties.Contains(property.Name))
+            .ToList();
+
+        if (otherProperties.Count == 0)
+        {
+            ImGui.TextDisabled("No unhandled parameters on this task.");
+        }
+
+        foreach (JProperty property in otherProperties)
+        {
+            ImGui.PushID($"entity-ai-other-{property.Name}");
+            changed |= DrawAiBehaviorGenericJsonProperty(task, property);
+            ImGui.PopID();
+        }
+
+        ImGui.SeparatorText("Add parameter");
+        ImGui.InputTextWithHint("##entity-ai-other-name", "parameter name", ref _aiBehaviorNewOtherParameterName, 128);
+        ImGui.InputTextMultiline("##entity-ai-other-json", ref _aiBehaviorNewOtherParameterJson, 64 * 1024, new NVector2(-float.Epsilon, 82f), ImGuiInputTextFlags.AllowTabInput);
+        if (ImGui.Button("Add parameter##entity-ai-other-add"))
+        {
+            string propertyName = _aiBehaviorNewOtherParameterName.Trim();
+            if (string.IsNullOrWhiteSpace(propertyName))
             {
-                if (AiBehaviorFirstClassProperties.Contains(property.Name)) continue;
-                ImGui.BulletText($"{property.Name}: {SummarizeAiBehaviorToken(property.Value, 110)}");
+                _aiBehaviorValidationStatus = "Other parameter name is empty.";
             }
+            else if (AiBehaviorFirstClassProperties.Contains(propertyName))
+            {
+                _aiBehaviorValidationStatus = $"{propertyName} is already handled by a structured control.";
+            }
+            else if (task[propertyName] != null)
+            {
+                _aiBehaviorValidationStatus = $"{propertyName} already exists on this task.";
+            }
+            else if (!DevToolsJson.TryParseToken(_aiBehaviorNewOtherParameterJson, out JToken? token, out string error) || token == null)
+            {
+                _aiBehaviorValidationStatus = $"Other parameter JSON parse error: {error}";
+            }
+            else
+            {
+                task[propertyName] = token;
+                _aiBehaviorNewOtherParameterName = "";
+                _aiBehaviorNewOtherParameterJson = "\"\"";
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    private bool DrawAiBehaviorGenericJsonProperty(JObject task, JProperty property)
+    {
+        bool changed = false;
+        JToken value = property.Value;
+        ImGui.TextUnformatted(property.Name);
+
+        switch (value.Type)
+        {
+            case JTokenType.Boolean:
+            {
+                bool boolValue = value.Value<bool>();
+                if (ImGui.Checkbox($"##bool-{property.Name}", ref boolValue))
+                {
+                    property.Value = boolValue;
+                    changed = true;
+                }
+                break;
+            }
+            case JTokenType.Integer:
+            {
+                int intValue = value.Value<int>();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputInt($"##int-{property.Name}", ref intValue))
+                {
+                    property.Value = intValue;
+                    changed = true;
+                }
+                break;
+            }
+            case JTokenType.Float:
+            {
+                float floatValue = value.Value<float>();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputFloat($"##float-{property.Name}", ref floatValue, 0, 0, "%.4f"))
+                {
+                    property.Value = floatValue;
+                    changed = true;
+                }
+                break;
+            }
+            case JTokenType.String:
+            {
+                string stringValue = value.ToString();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputText($"##string-{property.Name}", ref stringValue, 1024))
+                {
+                    property.Value = stringValue;
+                    changed = true;
+                }
+                break;
+            }
+            default:
+            {
+                string json = value.ToString(Formatting.Indented);
+                if (ImGui.InputTextMultiline($"##json-{property.Name}", ref json, 256 * 1024, new NVector2(-float.Epsilon, 90f), ImGuiInputTextFlags.AllowTabInput))
+                {
+                    if (DevToolsJson.TryParseToken(json, out JToken? token, out string error) && token != null)
+                    {
+                        property.Value = token;
+                        changed = true;
+                    }
+                    else
+                    {
+                        _aiBehaviorValidationStatus = $"{property.Name} JSON parse error: {error}";
+                    }
+                }
+                break;
+            }
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##remove-{property.Name}"))
+        {
+            task.Remove(property.Name);
+            changed = true;
         }
 
         return changed;
@@ -1482,43 +1720,58 @@ public sealed partial class DebugWindowManager
         }
 
         List<string> warnings = [];
+        IReadOnlyList<string> knownCodes = GetKnownAiTaskCodes();
+        HashSet<string> known = knownCodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (tasks == null)
         {
             warnings.Add("base aitasks array missing");
         }
         else
         {
-            IReadOnlyList<string> knownCodes = GetKnownAiTaskCodes();
-            HashSet<string> known = knownCodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            for (int index = 0; index < tasks.Count; index++)
-            {
-                if (tasks[index] is not JObject task)
-                {
-                    warnings.Add($"task {index} is not an object");
-                    continue;
-                }
-
-                string? code = GetAiBehaviorTaskCode(task);
-                if (string.IsNullOrWhiteSpace(code))
-                {
-                    warnings.Add($"task {index} has no code");
-                }
-                else if (known.Count > 0 && !known.Contains(code))
-                {
-                    warnings.Add($"task {index} code '{code}' is not registered in AiTaskRegistry");
-                }
-            }
+            ValidateAiBehaviorTaskArray(tasks, "task", known, warnings);
         }
 
         if (tasksByType != null)
         {
-            warnings.Add("aitasksByType is preserved but not first-class editable yet");
+            foreach (JProperty property in tasksByType.Properties())
+            {
+                if (property.Value is JArray typedTasks)
+                {
+                    ValidateAiBehaviorTaskArray(typedTasks, $"aitasksByType.{property.Name} task", known, warnings);
+                }
+                else
+                {
+                    warnings.Add($"aitasksByType.{property.Name} is not an array");
+                }
+            }
         }
 
         _aiBehaviorTextValid = warnings.All(warning => !warning.Contains("not an object", StringComparison.OrdinalIgnoreCase) && !warning.Contains("has no code", StringComparison.OrdinalIgnoreCase));
         _aiBehaviorValidationStatus = warnings.Count == 0
             ? "Valid entity AI JSON."
             : $"{warnings.Count} warning(s): {string.Join("; ", warnings.Take(5))}{(warnings.Count > 5 ? $"; ...and {warnings.Count - 5} more" : "")}";
+    }
+
+    private static void ValidateAiBehaviorTaskArray(JArray tasks, string labelPrefix, IReadOnlySet<string> knownTaskCodes, List<string> warnings)
+    {
+        for (int index = 0; index < tasks.Count; index++)
+        {
+            if (tasks[index] is not JObject task)
+            {
+                warnings.Add($"{labelPrefix} {index} is not an object");
+                continue;
+            }
+
+            string? code = GetAiBehaviorTaskCode(task);
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                warnings.Add($"{labelPrefix} {index} has no code");
+            }
+            else if (knownTaskCodes.Count > 0 && !knownTaskCodes.Contains(code))
+            {
+                warnings.Add($"{labelPrefix} {index} code '{code}' is not registered in AiTaskRegistry");
+            }
+        }
     }
 
     private bool IsAiBehaviorTextDirty(string currentText, string originalText)

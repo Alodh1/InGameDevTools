@@ -3306,11 +3306,7 @@ public static class ParticleEditor
         VelocityEditor(id, particleProperties);
         BooleansEditor(id, particleProperties);
         FlagsEditor(id, particleProperties);
-
-        ImGui.BeginDisabled();
-        ImGui.CollapsingHeader($"Secondary particles:##{id}");
-        ImGui.CollapsingHeader($"Death particles:##{id}");
-        ImGui.EndDisabled();
+        ChildParticlesEditor(id, particleProperties);
     }
 
 
@@ -3564,6 +3560,157 @@ public static class ParticleEditor
         particleProperties.VertexFlags = flags.All;
 
         ImGui.Unindent();
+    }
+
+    private static void ChildParticlesEditor(string id, AdvancedParticleProperties particleProperties)
+    {
+        AdvancedParticleProperties[]? secondary = particleProperties.SecondaryParticles;
+        if (ParticleArrayEditor(id, "Secondary particles", ref secondary))
+        {
+            particleProperties.SecondaryParticles = secondary;
+        }
+
+        AdvancedParticleProperties[]? death = particleProperties.DeathParticles;
+        if (ParticleArrayEditor(id, "Death particles", ref death))
+        {
+            particleProperties.DeathParticles = death;
+        }
+    }
+
+    private static bool ParticleArrayEditor(string id, string label, ref AdvancedParticleProperties[]? particles)
+    {
+        if (!ImGui.CollapsingHeader($"{label}:##{id}-{label}")) return false;
+
+        bool changed = false;
+        ImGui.Indent();
+
+        List<AdvancedParticleProperties> list = particles?.Where(particle => particle != null).ToList() ?? [];
+        ImGui.TextDisabled($"{list.Count} child particle(s)");
+
+        if (ImGui.Button($"Add child##{id}-{label}-add"))
+        {
+            list.Add(CreateDefaultChildParticle());
+            particles = list.ToArray();
+            changed = true;
+        }
+
+        for (int index = 0; index < list.Count; index++)
+        {
+            AdvancedParticleProperties child = list[index];
+            ImGui.PushID($"{id}-{label}-{index}");
+
+            bool open = ImGui.TreeNodeEx($"Child {index}##node", ImGuiTreeNodeFlags.DefaultOpen);
+            ImGui.SameLine();
+            if (ImGui.Button("Clone##clone"))
+            {
+                list.Insert(index + 1, CloneChildParticle(child));
+                particles = list.ToArray();
+                changed = true;
+                ImGui.PopID();
+                if (open) ImGui.TreePop();
+                break;
+            }
+
+            ImGui.SameLine();
+            bool disableUp = index <= 0;
+            if (disableUp) ImGui.BeginDisabled();
+            bool moveUp = ImGui.Button("Up##up");
+            if (disableUp) ImGui.EndDisabled();
+            if (moveUp)
+            {
+                (list[index - 1], list[index]) = (list[index], list[index - 1]);
+                particles = list.ToArray();
+                changed = true;
+                ImGui.PopID();
+                if (open) ImGui.TreePop();
+                break;
+            }
+
+            ImGui.SameLine();
+            bool disableDown = index >= list.Count - 1;
+            if (disableDown) ImGui.BeginDisabled();
+            bool moveDown = ImGui.Button("Down##down");
+            if (disableDown) ImGui.EndDisabled();
+            if (moveDown)
+            {
+                (list[index + 1], list[index]) = (list[index], list[index + 1]);
+                particles = list.ToArray();
+                changed = true;
+                ImGui.PopID();
+                if (open) ImGui.TreePop();
+                break;
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Remove##remove"))
+            {
+                list.RemoveAt(index);
+                particles = list.Count == 0 ? null : list.ToArray();
+                changed = true;
+                ImGui.PopID();
+                if (open) ImGui.TreePop();
+                break;
+            }
+
+            if (open)
+            {
+                Draw($"{id}-{label}-child-{index}", child);
+                ImGui.TreePop();
+            }
+
+            ImGui.PopID();
+        }
+
+        ImGui.Unindent();
+        return changed;
+    }
+
+    private static AdvancedParticleProperties CloneChildParticle(AdvancedParticleProperties source)
+    {
+        AdvancedParticleProperties clone = source.Clone();
+        EnsureParticleEditorDefaults(clone);
+        return clone;
+    }
+
+    private static AdvancedParticleProperties CreateDefaultChildParticle()
+    {
+        AdvancedParticleProperties particle = new();
+        EnsureParticleEditorDefaults(particle);
+        return particle;
+    }
+
+    private static void EnsureParticleEditorDefaults(AdvancedParticleProperties particle)
+    {
+        if (particle.HsvaColor == null || particle.HsvaColor.Length < 4)
+        {
+            particle.HsvaColor =
+            [
+                new NatFloat(0f, 0f, EnumDistribution.UNIFORM),
+                new NatFloat(255f, 0f, EnumDistribution.UNIFORM),
+                new NatFloat(255f, 0f, EnumDistribution.UNIFORM),
+                new NatFloat(255f, 0f, EnumDistribution.UNIFORM)
+            ];
+        }
+
+        if (particle.Velocity == null || particle.Velocity.Length < 3)
+        {
+            particle.Velocity =
+            [
+                new NatFloat(0f, 0f, EnumDistribution.UNIFORM),
+                new NatFloat(0f, 0f, EnumDistribution.UNIFORM),
+                new NatFloat(0f, 0f, EnumDistribution.UNIFORM)
+            ];
+        }
+
+        if (particle.PosOffset == null || particle.PosOffset.Length < 3)
+        {
+            particle.PosOffset =
+            [
+                new NatFloat(0f, 0f, EnumDistribution.UNIFORM),
+                new NatFloat(0f, 0f, EnumDistribution.UNIFORM),
+                new NatFloat(0f, 0f, EnumDistribution.UNIFORM)
+            ];
+        }
     }
 
     // SUPPLEMENTARY EDITORS

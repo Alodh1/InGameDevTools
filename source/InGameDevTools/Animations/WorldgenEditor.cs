@@ -60,6 +60,23 @@ public sealed partial class DebugWindowManager
         "3D region",
         "Rock strata"
     ];
+    private static readonly HashSet<string> WorldgenDepositFirstClassKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "code", "generator", "triesPerChunk", "chance", "chanceMultiplier", "withOreMap", "handbookPageCode", "oreMapCode", "attributes"
+    };
+    private static readonly HashSet<string> WorldgenBlockPatchFirstClassKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "blockCodes", "chance", "quantity", "offsetX", "offsetY", "offsetZ",
+        "minTemp", "maxTemp", "minRain", "maxRain", "minForest", "maxForest", "minShrub", "maxShrub", "minFertility", "maxFertility", "minY", "maxY"
+    };
+    private static readonly HashSet<string> WorldgenLandformFirstClassKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "code", "weight", "group", "hexcolor", "terrainOctaves", "terrainOctaveThresholds", "terrainYKeyPositions", "terrainYKeyThresholds"
+    };
+    private static readonly HashSet<string> WorldgenRockStrataFirstClassKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "blockcode", "weight", "rockGroup", "genDir", "hexcolor", "amplitudes", "thresholds", "frequencies", "yKeyPositions", "yKeyThresholds"
+    };
     private static readonly string[] WorldgenPeekPassLabels =
     [
         "Terrain",
@@ -554,6 +571,7 @@ public sealed partial class DebugWindowManager
         changed |= DrawWorldgenStringField(row, "oreMapCode", "Ore map code");
         changed |= DrawWorldgenNatFloatObjects(row, "NatFloat fields");
         changed |= DrawWorldgenObjectJsonField(row, "attributes", "Attributes JSON");
+        changed |= DrawWorldgenAdvancedRowFields(row, WorldgenDepositFirstClassKeys, skipNatFloatObjects: true);
         return changed;
     }
 
@@ -573,6 +591,7 @@ public sealed partial class DebugWindowManager
         changed |= DrawWorldgenRangeField(row, "minShrub", "maxShrub", "Shrub", 0f, 1f, "%.3f");
         changed |= DrawWorldgenRangeField(row, "minFertility", "maxFertility", "Fertility", 0f, 1f, "%.3f");
         changed |= DrawWorldgenRangeField(row, "minY", "maxY", "Y", 0f, 1f, "%.3f");
+        changed |= DrawWorldgenAdvancedRowFields(row, WorldgenBlockPatchFirstClassKeys);
         return changed;
     }
 
@@ -587,6 +606,7 @@ public sealed partial class DebugWindowManager
         changed |= DrawWorldgenFloatArrayField(row, "terrainOctaveThresholds", "Octave thresholds");
         changed |= DrawWorldgenFloatArrayField(row, "terrainYKeyPositions", "Y key positions");
         changed |= DrawWorldgenFloatArrayField(row, "terrainYKeyThresholds", "Y key thresholds");
+        changed |= DrawWorldgenAdvancedRowFields(row, WorldgenLandformFirstClassKeys);
         return changed;
     }
 
@@ -603,6 +623,117 @@ public sealed partial class DebugWindowManager
         changed |= DrawWorldgenFloatArrayField(row, "frequencies", "Frequencies");
         changed |= DrawWorldgenFloatArrayField(row, "yKeyPositions", "Y key positions");
         changed |= DrawWorldgenFloatArrayField(row, "yKeyThresholds", "Y key thresholds");
+        changed |= DrawWorldgenAdvancedRowFields(row, WorldgenRockStrataFirstClassKeys);
+        return changed;
+    }
+
+    private bool DrawWorldgenAdvancedRowFields(JObject row, IReadOnlySet<string> firstClassKeys, bool skipNatFloatObjects = false)
+    {
+        List<JProperty> advancedProperties = row.Properties()
+            .Where(property => !firstClassKeys.Contains(property.Name))
+            .Where(property => !skipNatFloatObjects || property.Value is not JObject obj || !LooksLikeNatFloat(obj))
+            .OrderBy(property => property.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (advancedProperties.Count == 0) return false;
+        if (!ImGui.CollapsingHeader($"Advanced fields ({advancedProperties.Count})##worldgen-advanced-row-fields")) return false;
+
+        bool changed = false;
+        foreach (JProperty property in advancedProperties)
+        {
+            ImGui.PushID($"worldgen-advanced-{property.Name}");
+            changed |= DrawWorldgenAdvancedRowField(row, property);
+            ImGui.PopID();
+        }
+
+        return changed;
+    }
+
+    private bool DrawWorldgenAdvancedRowField(JObject row, JProperty property)
+    {
+        bool changed = false;
+        JToken value = property.Value;
+        ImGui.TextUnformatted(property.Name);
+
+        if (value is JObject obj && LooksLikeNatFloat(obj))
+        {
+            changed |= DrawWorldgenNatFloatObject(obj, property.Name);
+        }
+        else
+        {
+            switch (value.Type)
+            {
+                case JTokenType.Boolean:
+                {
+                    bool boolValue = value.Value<bool>();
+                    if (ImGui.Checkbox($"##bool-{property.Name}", ref boolValue))
+                    {
+                        property.Value = boolValue;
+                        changed = true;
+                    }
+                    break;
+                }
+                case JTokenType.Integer:
+                {
+                    int intValue = value.Value<int>();
+                    ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                    if (ImGui.InputInt($"##int-{property.Name}", ref intValue))
+                    {
+                        property.Value = intValue;
+                        changed = true;
+                    }
+                    break;
+                }
+                case JTokenType.Float:
+                {
+                    float floatValue = value.Value<float>();
+                    ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                    if (ImGui.InputFloat($"##float-{property.Name}", ref floatValue, 0, 0, "%.4f"))
+                    {
+                        property.Value = floatValue;
+                        changed = true;
+                    }
+                    break;
+                }
+                case JTokenType.String:
+                {
+                    string stringValue = value.ToString();
+                    ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                    if (ImGui.InputText($"##string-{property.Name}", ref stringValue, 2048))
+                    {
+                        SetOrRemoveString(row, property.Name, stringValue);
+                        changed = true;
+                    }
+                    break;
+                }
+                default:
+                {
+                    string json = value.ToString(Formatting.Indented);
+                    if (ImGui.InputTextMultiline($"##json-{property.Name}", ref json, 256 * 1024, new NVector2(-float.Epsilon, 110f), ImGuiInputTextFlags.AllowTabInput))
+                    {
+                        if (TryParseJsonToken(json, out JToken? token, out string error) && token != null)
+                        {
+                            property.Value = token;
+                            changed = true;
+                        }
+                        else
+                        {
+                            _worldgenTextValid = false;
+                            _worldgenValidationStatus = $"{property.Name} parse error: {error}";
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove##remove-{property.Name}"))
+        {
+            row.Remove(property.Name);
+            changed = true;
+        }
+
         return changed;
     }
 

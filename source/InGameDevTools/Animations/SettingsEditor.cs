@@ -25,6 +25,7 @@ public sealed partial class DebugWindowManager
     private const string SettingsFontDefault = DevToolsConfig.FontDefault;
     private const string SettingsFontOpenDyslexic = "OpenDyslexic-Regular";
     private static readonly int[] SettingsOpenDyslexicSizes = Enumerable.Range(12, 17).ToArray();
+    private static readonly string[] SettingsAnimationIkModeLabels = ["Auto conservative", "Auto extended", "Manual override"];
     private static readonly string[] SettingsThemePresets =
     [
         SettingsPresetVintageBrown,
@@ -164,6 +165,7 @@ public sealed partial class DebugWindowManager
 
         DrawSettingsFontControls(ref changed);
         DrawSettingsAccessibilityControls(ref changed);
+        DrawSettingsAnimationControls(ref changed);
         DrawSettingsAdvancedColors(ref changed);
         DrawSettingsImportExport(ref changed);
 
@@ -280,6 +282,56 @@ public sealed partial class DebugWindowManager
         }
         if (!enabled) ImGui.EndDisabled();
         return changed;
+    }
+
+    private void DrawSettingsAnimationControls(ref bool changed)
+    {
+        if (!ImGui.CollapsingHeader("Animation##settings-animation")) return;
+
+        int modeIndex = _vanillaIkMode switch
+        {
+            VanillaIkChainMode.AutoExtended => 1,
+            VanillaIkChainMode.ManualOverride => 2,
+            _ => 0
+        };
+        if (ImGui.Combo("IK mode##settings-animation-ik-mode", ref modeIndex, SettingsAnimationIkModeLabels, SettingsAnimationIkModeLabels.Length))
+        {
+            _vanillaIkMode = modeIndex switch
+            {
+                1 => VanillaIkChainMode.AutoExtended,
+                2 => VanillaIkChainMode.ManualOverride,
+                _ => VanillaIkChainMode.AutoConservative
+            };
+            _devToolsConfig.AnimationIkMode = FormatVanillaIkChainMode(_vanillaIkMode);
+            changed = true;
+        }
+
+        bool lockMoveToDragAxis = _vanillaIkLockMoveToDragAxis;
+        if (ImGui.Checkbox("Lock IK move to drag axis##settings-animation-ik-axis", ref lockMoveToDragAxis))
+        {
+            _vanillaIkLockMoveToDragAxis = lockMoveToDragAxis;
+            _devToolsConfig.AnimationIkLockMoveToDragAxis = lockMoveToDragAxis;
+            changed = true;
+        }
+
+        bool preserveDraggedPartRotation = _vanillaIkPreserveDraggedPartRotation;
+        if (ImGui.Checkbox("Preserve dragged part rotation##settings-animation-ik-preserve", ref preserveDraggedPartRotation))
+        {
+            _vanillaIkPreserveDraggedPartRotation = preserveDraggedPartRotation;
+            _devToolsConfig.AnimationIkPreserveDraggedPartRotation = preserveDraggedPartRotation;
+            changed = true;
+        }
+
+        int anchorDocumentCount = _devToolsConfig.AnimationIkAnchors.Count;
+        int anchorCount = _devToolsConfig.AnimationIkAnchors.Values.Sum(anchors => anchors?.Length ?? 0);
+        ImGui.TextDisabled($"Saved manual IK anchors: {anchorCount} anchor(s) across {anchorDocumentCount} shape(s).");
+        if (anchorCount == 0) ImGui.BeginDisabled();
+        if (ImGui.Button("Clear saved IK anchors##settings-animation-ik-clear-anchors"))
+        {
+            _devToolsConfig.AnimationIkAnchors.Clear();
+            changed = true;
+        }
+        if (anchorCount == 0) ImGui.EndDisabled();
     }
 
     private void DrawSettingsAdvancedColors(ref bool changed)
