@@ -1376,7 +1376,8 @@ public sealed partial class DebugWindowManager
                 render.GLDepthMask(true);
                 render.GlDisableCullFace();
                 render.GlToggleBlend(false);
-                GL.ClearColor(0.055f, 0.052f, 0.045f, 1f);
+                System.Numerics.Vector4 clearColor = DevToolsViewportBackground.FillColor;
+                GL.ClearColor(clearColor.X, clearColor.Y, clearColor.Z, 1f);
                 GL.ClearDepth(1.0);
                 GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
                 GL.ColorMask(true, true, true, false);

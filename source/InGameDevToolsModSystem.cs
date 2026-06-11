@@ -238,6 +238,7 @@ public sealed class DevToolsConfig
     public bool AutoRuntimeApply { get; set; }
     public bool WriteLiveBackups { get; set; }
     public string ThemePreset { get; set; } = PresetVintageBrown;
+    public string ViewportBackground { get; set; } = DevToolsViewportBackground.NameDark;
     public bool ApplyStyleGlobally { get; set; }
     public string FontName { get; set; } = FontDefault;
     public int FontSize { get; set; } = 16;
@@ -260,6 +261,7 @@ public sealed class DevToolsConfig
         UiScale = ClampOrDefault(UiScale, 0.75f, 1.75f, 1f);
         FontSize = Math.Clamp(FontSize <= 0 ? 16 : FontSize, 12, 28);
         ThemePreset = string.IsNullOrWhiteSpace(ThemePreset) ? PresetVintageBrown : ThemePreset.Trim();
+        ViewportBackground = DevToolsViewportBackground.NormalizeName(ViewportBackground);
         FontName = string.IsNullOrWhiteSpace(FontName) ? FontDefault : FontName.Trim();
         AnimationIkMode = NormalizeAnimationIkMode(AnimationIkMode);
         AnimationIkAnchors ??= new(StringComparer.OrdinalIgnoreCase);

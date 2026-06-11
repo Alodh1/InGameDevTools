@@ -92,7 +92,8 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
             render.GLDepthMask(true);
             render.GlDisableCullFace();
             render.GlToggleBlend(true, EnumBlendMode.Standard);
-            GL.ClearColor(0.035f, 0.036f, 0.032f, 1f);
+            System.Numerics.Vector4 clearColor = DevToolsViewportBackground.FillColor;
+            GL.ClearColor(clearColor.X, clearColor.Y, clearColor.Z, 1f);
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
             if (instances.Count > 0)

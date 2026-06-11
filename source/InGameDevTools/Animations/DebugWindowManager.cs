@@ -1811,9 +1811,9 @@ public sealed partial class DebugWindowManager : IDisposable
         }
 
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.055f, 0.052f, 0.045f, 1f));
+        uint background = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.FillColor);
         uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 1f));
-        uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.86f, 0.82f, 0.72f, 1f));
+        uint text = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.TextColor);
         drawList.AddRectFilled(min, max, background, 4f);
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"Preview: {animationCode}");

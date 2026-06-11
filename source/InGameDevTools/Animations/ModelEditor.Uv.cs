@@ -1,3 +1,4 @@
+using InGameDevTools.Utils;
 using ImGuiNET;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
@@ -313,7 +314,7 @@ public sealed partial class DebugWindowManager
             }
 
             ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-            uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.05f, 0.05f, 0.045f, 1f));
+            uint background = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.FillColor);
             uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 1f));
             drawList.AddRectFilled(min, max, background, 4f);
             drawList.PushClipRect(min, max, true);

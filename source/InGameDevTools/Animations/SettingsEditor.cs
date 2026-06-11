@@ -1,3 +1,4 @@
+using InGameDevTools.Utils;
 using ImGuiNET;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -55,6 +56,7 @@ public sealed partial class DebugWindowManager
         _vanillaIkMode = ParseVanillaIkChainMode(_devToolsConfig.AnimationIkMode);
         _vanillaIkPreserveDraggedPartRotation = _devToolsConfig.AnimationIkPreserveDraggedPartRotation;
         _vanillaIkLockMoveToDragAxis = _devToolsConfig.AnimationIkLockMoveToDragAxis;
+        DevToolsViewportBackground.Style = DevToolsViewportBackground.Parse(_devToolsConfig.ViewportBackground);
     }
 
     private DevToolsStyleScope BeginDevToolsStyleScope()
@@ -132,6 +134,21 @@ public sealed partial class DebugWindowManager
         {
             ApplyPresetToConfig(SettingsThemePresets[presetIndex]);
             changed = true;
+        }
+
+        int viewportBgIndex = Array.FindIndex(
+            DevToolsViewportBackground.StyleNames,
+            name => name.Equals(_devToolsConfig.ViewportBackground, StringComparison.OrdinalIgnoreCase));
+        if (viewportBgIndex < 0) viewportBgIndex = 0;
+        if (ImGui.Combo("Viewport background##settings-viewport-bg", ref viewportBgIndex, DevToolsViewportBackground.StyleNames, DevToolsViewportBackground.StyleNames.Length))
+        {
+            _devToolsConfig.ViewportBackground = DevToolsViewportBackground.StyleNames[viewportBgIndex];
+            DevToolsViewportBackground.Style = DevToolsViewportBackground.Parse(_devToolsConfig.ViewportBackground);
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Background tone behind 3D/preview viewports. Use Grey or Light to inspect dark models.");
         }
 
         bool global = _devToolsConfig.ApplyStyleGlobally;

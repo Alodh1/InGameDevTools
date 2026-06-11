@@ -1930,14 +1930,14 @@ public class ParticleEffectsManager
         }
 
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        uint background = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.035f, 0.036f, 0.032f, 1f));
+        uint background = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.FillColor);
         uint border = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.55f, 0.49f, 0.38f, 1f));
-        uint grid = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.28f, 0.27f, 0.22f, 0.55f));
+        uint grid = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.GridMinorColor);
         uint axisX = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.85f, 0.25f, 0.16f, 0.9f));
         uint axisY = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.32f, 0.9f, 0.34f, 0.9f));
         uint axisZ = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.25f, 0.42f, 0.95f, 0.9f));
         uint windColor = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.4f, 0.82f, 1f, 0.92f));
-        uint text = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.86f, 0.82f, 0.72f, 1f));
+        uint text = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.TextColor);
 
         drawList.AddRectFilled(min, max, background, 4f);
         drawList.AddRect(min, max, border, 4f);

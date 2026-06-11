@@ -1028,11 +1028,11 @@ public sealed partial class DebugWindowManager
         }
 
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        uint background = ImGui.ColorConvertFloat4ToU32(new NVector4(0.035f, 0.036f, 0.032f, 1f));
+        uint background = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.FillColor);
         uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 1f));
-        uint grid = ImGui.ColorConvertFloat4ToU32(new NVector4(0.28f, 0.27f, 0.22f, 0.42f));
-        uint gridMajor = ImGui.ColorConvertFloat4ToU32(new NVector4(0.45f, 0.42f, 0.33f, 0.72f));
-        uint text = ImGui.ColorConvertFloat4ToU32(new NVector4(0.86f, 0.82f, 0.72f, 1f));
+        uint grid = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.GridMinorColor);
+        uint gridMajor = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.GridMajorColor);
+        uint text = ImGui.ColorConvertFloat4ToU32(DevToolsViewportBackground.TextColor);
         drawList.AddRectFilled(min, max, background, 4f);
 
         BuildTransformPreviewMeshes(asset, slot, transform);
