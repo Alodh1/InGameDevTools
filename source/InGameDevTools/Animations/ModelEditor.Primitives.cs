@@ -10,10 +10,10 @@ namespace InGameDevTools.Animations;
 public sealed partial class DebugWindowManager
 {
     // Prism/primitive helper: Vintage Story elements can only have rectangular faces, so
-    // smooth-looking solids have to be assembled from cuboids. The generator builds them
-    // parametrically: "rotated slabs" use exact polygon math (a solid disc from N crossing
-    // slabs of thickness D*tan(pi/2N) forms a regular 2N-gon whose corners meet exactly),
-    // while "stepped" voxelizes the solid and greedily merges cells into few cuboids.
+    // smooth-looking solids have to be assembled from cuboids. Exact merged mode voxelizes
+    // the intended solid on a shared grid, greedily merges occupied cells into cuboids, and
+    // culls exactly shared internal faces. Smooth legacy mode keeps the old rotated-slab
+    // approximation for users who prefer its silhouette over strict no-overlap geometry.
     private const int ModelPrimitiveMaxElements = 400;
     private const float ModelPrimitiveMaxDimension = 256f;
 
@@ -56,10 +56,12 @@ public sealed partial class DebugWindowManager
     ];
     private static readonly string[] ModelPrimitiveAxisLabels = ["X", "Y", "Z"];
     private static readonly string[] ModelPrimitiveDomeLabels = ["Full", "Top half", "Bottom half"];
+    private static readonly ModelPrimitiveMetrics ModelPrimitiveEmptyMetrics = new();
 
     private bool _modelPrimitiveWindowOpen;
     private int _modelPrimitiveKindIndex = (int)ModelPrimitiveKind.Sphere;
-    private bool _modelPrimitiveStepped;
+    private bool _modelPrimitiveStepped = true;
+    private bool _modelPrimitiveCullInternalFaces = true;
     private int _modelPrimitiveAxis = 1;
     private NVector3 _modelPrimitiveCenter = new(8f, 8f, 8f);
     private NVector3 _modelPrimitiveRotation;
@@ -85,6 +87,25 @@ public sealed partial class DebugWindowManager
     private ModelElementData? _modelPrimitivePreviewParent;
     private string _modelPrimitivePreviewError = "";
     private bool _modelPrimitivePreviewDirty = true;
+    private ModelPrimitiveMetrics _modelPrimitivePreviewMetrics = ModelPrimitiveEmptyMetrics;
+
+    private static bool ModelPrimitiveSupportsExactMergedStyle(ModelPrimitiveKind kind)
+    {
+        return kind is ModelPrimitiveKind.Cylinder or ModelPrimitiveKind.Cone or ModelPrimitiveKind.Sphere or ModelPrimitiveKind.Torus or
+            ModelPrimitiveKind.Capsule or ModelPrimitiveKind.Star or ModelPrimitiveKind.Cross or ModelPrimitiveKind.Arrow or
+            ModelPrimitiveKind.Heart or ModelPrimitiveKind.TrianglePlate or ModelPrimitiveKind.Sector;
+    }
+
+    private static bool ModelPrimitiveUsesExactGridConstruction(ModelPrimitiveKind kind)
+    {
+        return ModelPrimitiveSupportsExactMergedStyle(kind);
+    }
+
+    private static bool ModelPrimitiveUsesExactValidation(ModelPrimitiveKind kind, bool exactMergedSelected)
+    {
+        if (kind == ModelPrimitiveKind.Helix) return false;
+        return !ModelPrimitiveSupportsExactMergedStyle(kind) || exactMergedSelected;
+    }
 
     private void DrawModelPrimitiveWindow()
     {
@@ -113,31 +134,40 @@ public sealed partial class DebugWindowManager
             changed |= ImGui.Combo("Shape##model-prim-kind", ref _modelPrimitiveKindIndex, ModelPrimitiveKindLabels, ModelPrimitiveKindLabels.Length);
             ModelPrimitiveKind kind = (ModelPrimitiveKind)_modelPrimitiveKindIndex;
 
-            bool styleApplies = kind is ModelPrimitiveKind.Cylinder or ModelPrimitiveKind.Cone or ModelPrimitiveKind.Sphere or ModelPrimitiveKind.Torus or ModelPrimitiveKind.Capsule or ModelPrimitiveKind.TrianglePlate or ModelPrimitiveKind.Sector;
+            bool styleApplies = ModelPrimitiveSupportsExactMergedStyle(kind);
             if (styleApplies)
             {
-                int style = _modelPrimitiveStepped ? 1 : 0;
-                changed |= ImGui.RadioButton("Rotated slabs (smooth)##model-prim-style-rotated", ref style, 0);
+                int style = _modelPrimitiveStepped ? 0 : 1;
+                changed |= ImGui.RadioButton("Exact merged##model-prim-style-exact", ref style, 0);
                 if (ImGui.IsItemHovered())
                 {
-                    ImGui.SetTooltip("Builds smooth silhouettes from rotated cuboids; a disc of N slabs forms an exact 2N-sided polygon.");
+                    ImGui.SetTooltip("Grid-based cuboids merged for no intentional overlap, no tiny coordinate gaps, and fewer enabled internal faces.");
                 }
                 ImGui.SameLine();
-                changed |= ImGui.RadioButton("Stepped##model-prim-style-stepped", ref style, 1);
+                changed |= ImGui.RadioButton("Smooth slabs (legacy)##model-prim-style-rotated", ref style, 1);
                 if (ImGui.IsItemHovered())
                 {
-                    ImGui.SetTooltip("Axis-aligned voxel construction merged into as few cuboids as possible. Blockier, but never overlaps.");
+                    ImGui.SetTooltip("Old rotated-cuboid approximation. It can look smoother, but uses intentional overlap and may retain internal coincident faces.");
                 }
-                _modelPrimitiveStepped = style == 1;
+                _modelPrimitiveStepped = style == 0;
             }
             else
             {
+                _modelPrimitiveStepped = true;
                 ImGui.TextDisabled(kind switch
                 {
                     ModelPrimitiveKind.Helix => "Construction: rotated segments.",
-                    ModelPrimitiveKind.Star or ModelPrimitiveKind.Heart or ModelPrimitiveKind.Arrow => "Construction: exact rotated cuboids.",
                     _ => "Construction: exact axis-aligned cuboids."
                 });
+            }
+
+            if (ModelPrimitiveUsesExactValidation(kind, _modelPrimitiveStepped))
+            {
+                changed |= ImGui.Checkbox("Cull internal faces##model-prim-cull-internal", ref _modelPrimitiveCullInternalFaces);
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip("Disables pairs of exactly shared internal cuboid faces. Partial shared faces are left intact to avoid creating visible holes.");
+                }
             }
 
             ImGui.SetNextItemWidth(110f);
@@ -185,10 +215,14 @@ public sealed partial class DebugWindowManager
             }
             else
             {
-                ImGui.TextUnformatted($"{elementCount} cuboid(s), ~{elementCount * 6} faces. Preview shown in the viewport.");
+                ImGui.TextUnformatted($"{_modelPrimitivePreviewMetrics.ModeLabel}: {elementCount} cuboid(s), {_modelPrimitivePreviewMetrics.EnabledFaces} enabled face(s), {_modelPrimitivePreviewMetrics.CulledInternalFaces} internal face(s) culled, quality: {_modelPrimitivePreviewMetrics.QualityLabel}.");
+                if (_modelPrimitivePreviewMetrics.Warnings.Count > 0)
+                {
+                    ImGui.TextColored(new NVector4(1f, 0.72f, 0.32f, 1f), $"{_modelPrimitivePreviewMetrics.Warnings.Count} warning(s): {_modelPrimitivePreviewMetrics.Warnings[0]}");
+                }
             }
 
-            bool canCreate = _modelPrimitivePreviewParent != null && string.IsNullOrEmpty(_modelPrimitivePreviewError);
+            bool canCreate = _modelPrimitivePreviewParent != null && string.IsNullOrEmpty(_modelPrimitivePreviewError) && _modelPrimitivePreviewMetrics.Errors.Count == 0;
             if (!canCreate) ImGui.BeginDisabled();
             if (ImGui.Button("Create##model-prim-create"))
             {
@@ -493,15 +527,14 @@ public sealed partial class DebugWindowManager
                 break;
         }
 
-        bool usesSteppedConstruction = _modelPrimitiveStepped &&
-            kind is ModelPrimitiveKind.Cylinder or ModelPrimitiveKind.Cone or ModelPrimitiveKind.Sphere or ModelPrimitiveKind.Torus or ModelPrimitiveKind.Capsule or ModelPrimitiveKind.Sector;
-        if (usesSteppedConstruction)
+        bool usesExactGridConstruction = _modelPrimitiveStepped && ModelPrimitiveUsesExactGridConstruction(kind);
+        if (usesExactGridConstruction)
         {
             ImGui.SetNextItemWidth(130f);
-            changed |= ImGui.DragFloat("Step##model-prim-step", ref _modelPrimitiveStep, 0.25f, 0.25f, 8f, "%.2f");
+            changed |= ImGui.DragFloat("Grid step##model-prim-step", ref _modelPrimitiveStep, 0.25f, 0.25f, 8f, "%.2f");
             if (ImGui.IsItemHovered())
             {
-                ImGui.SetTooltip("Voxel size in shape units for the stepped construction. Smaller is smoother but uses more cuboids.");
+                ImGui.SetTooltip("Voxel size in shape units for exact merged construction. Smaller follows curves more closely but can use more cuboids.");
             }
         }
 
@@ -642,12 +675,14 @@ public sealed partial class DebugWindowManager
 
             if (children.Count == 0)
             {
+                _modelPrimitivePreviewMetrics = ModelPrimitiveEmptyMetrics;
                 error = "The current parameters produce no cuboids.";
                 return null;
             }
             int cuboidCount = ModelPrimitiveCuboidCount(children);
             if (cuboidCount > ModelPrimitiveMaxElements)
             {
+                _modelPrimitivePreviewMetrics = ModelPrimitiveEmptyMetrics;
                 error = $"Too many cuboids ({cuboidCount} > {ModelPrimitiveMaxElements}). Increase the step or reduce layers/segments.";
                 return null;
             }
@@ -661,10 +696,25 @@ public sealed partial class DebugWindowManager
                 ModelAssignPrimitiveFaces(child, texture);
             }
             parent.Children.AddRange(children);
+            bool exactValidation = ModelPrimitiveUsesExactValidation(kind, _modelPrimitiveStepped);
+            string modeLabel = kind == ModelPrimitiveKind.Helix
+                ? "Rotated segments"
+                : exactValidation ? "Exact merged" : "Smooth legacy";
+            _modelPrimitivePreviewMetrics = ModelAnalyzePrimitive(
+                parent,
+                exactValidation,
+                cullInternalFaces: exactValidation && _modelPrimitiveCullInternalFaces,
+                modeLabel);
+            if (_modelPrimitivePreviewMetrics.Errors.Count > 0)
+            {
+                error = _modelPrimitivePreviewMetrics.Errors[0];
+                return null;
+            }
             return parent;
         }
         catch (Exception exception)
         {
+            _modelPrimitivePreviewMetrics = ModelPrimitiveEmptyMetrics;
             error = $"Generation failed: {exception.Message}";
             return null;
         }
@@ -714,6 +764,244 @@ public sealed partial class DebugWindowManager
             child.Parent = element;
             ModelAssignPrimitiveFaces(child, texture);
         }
+    }
+
+    private ModelPrimitiveMetrics ModelAnalyzePrimitive(ModelElementData parent, bool exactMode, bool cullInternalFaces, string modeLabel)
+    {
+        ModelPrimitiveMetrics metrics = new() { ModeLabel = modeLabel };
+        List<ModelElementData> leaves = ModelPrimitiveLeafElements(parent.Children).ToList();
+        metrics.Cuboids = leaves.Count;
+
+        HashSet<string> seenBoxes = new(StringComparer.Ordinal);
+        for (int index = 0; index < leaves.Count; index++)
+        {
+            ModelElementData element = leaves[index];
+            if (element.SizeX <= 0.0001 || element.SizeY <= 0.0001 || element.SizeZ <= 0.0001)
+            {
+                metrics.Errors.Add($"Generated cuboid {index + 1} has inverted or zero dimensions.");
+            }
+
+            string key = ModelPrimitiveBoxKey(element);
+            if (!seenBoxes.Add(key))
+            {
+                string message = $"Generated duplicate cuboid at {ModelPrimitiveFormatBox(element)}.";
+                if (exactMode) metrics.Errors.Add(message);
+                else metrics.Warnings.Add(message);
+            }
+        }
+
+        for (int leftIndex = 0; leftIndex < leaves.Count; leftIndex++)
+        {
+            ModelElementData left = leaves[leftIndex];
+            for (int rightIndex = leftIndex + 1; rightIndex < leaves.Count; rightIndex++)
+            {
+                ModelElementData right = leaves[rightIndex];
+                if (!ModelPrimitiveBothAxisAligned(left, right))
+                {
+                    if (!exactMode && ModelPrimitiveBoxesMayOverlap(left, right))
+                    {
+                        metrics.Warnings.Add("Smooth legacy mode uses rotated cuboids; overlaps and internal faces are possible.");
+                    }
+                    continue;
+                }
+
+                if (ModelPrimitiveBoxesOverlapVolume(left, right))
+                {
+                    string message = $"Generated cuboids overlap: {ModelPrimitiveFormatBox(left)} and {ModelPrimitiveFormatBox(right)}.";
+                    if (exactMode) metrics.Errors.Add(message);
+                    else metrics.Warnings.Add(message);
+                    continue;
+                }
+
+                if (cullInternalFaces && ModelTryCullSharedPrimitiveFace(left, right))
+                {
+                    metrics.CulledInternalFaces += 2;
+                }
+                else if (exactMode && ModelPrimitiveHasEnabledSharedPrimitiveFace(left, right))
+                {
+                    metrics.Errors.Add($"Generated cuboids have enabled coincident internal faces: {ModelPrimitiveFormatBox(left)} and {ModelPrimitiveFormatBox(right)}.");
+                }
+            }
+        }
+
+        if (!exactMode && metrics.Warnings.Count == 0 && leaves.Any(element => !ModelPrimitiveAxisAligned(element)))
+        {
+            metrics.Warnings.Add("Smooth legacy mode can intentionally overlap rotated slabs; use Exact merged for no-overlap output.");
+        }
+
+        metrics.EnabledFaces = leaves.Sum(ModelPrimitiveEnabledFaceCount);
+        metrics.QualityLabel = metrics.Errors.Count > 0
+            ? "blocked"
+            : metrics.Warnings.Count > 0 ? "review" : exactMode ? "clean exact grid" : "legacy visual";
+        return metrics;
+    }
+
+    private static bool ModelPrimitiveBothAxisAligned(ModelElementData left, ModelElementData right)
+    {
+        return ModelPrimitiveAxisAligned(left) && ModelPrimitiveAxisAligned(right);
+    }
+
+    private static bool ModelPrimitiveAxisAligned(ModelElementData element)
+    {
+        return Math.Abs(element.RotationX) < 0.0001 &&
+            Math.Abs(element.RotationY) < 0.0001 &&
+            Math.Abs(element.RotationZ) < 0.0001;
+    }
+
+    private static bool ModelPrimitiveBoxesOverlapVolume(ModelElementData left, ModelElementData right)
+    {
+        return ModelPrimitiveIntervalOverlap(left.From[0], left.To[0], right.From[0], right.To[0]) > 0.0001 &&
+            ModelPrimitiveIntervalOverlap(left.From[1], left.To[1], right.From[1], right.To[1]) > 0.0001 &&
+            ModelPrimitiveIntervalOverlap(left.From[2], left.To[2], right.From[2], right.To[2]) > 0.0001;
+    }
+
+    private static bool ModelPrimitiveBoxesMayOverlap(ModelElementData left, ModelElementData right)
+    {
+        return ModelPrimitiveIntervalOverlap(left.From[0], left.To[0], right.From[0], right.To[0]) > 0.0001 &&
+            ModelPrimitiveIntervalOverlap(left.From[1], left.To[1], right.From[1], right.To[1]) > 0.0001 &&
+            ModelPrimitiveIntervalOverlap(left.From[2], left.To[2], right.From[2], right.To[2]) > 0.0001;
+    }
+
+    private static double ModelPrimitiveIntervalOverlap(double a0, double a1, double b0, double b1)
+    {
+        return Math.Min(a1, b1) - Math.Max(a0, b0);
+    }
+
+    private static bool ModelTryCullSharedPrimitiveFace(ModelElementData left, ModelElementData right)
+    {
+        const double epsilon = 0.0001;
+
+        if (Math.Abs(left.To[0] - right.From[0]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[1], left.To[1], right.From[1], right.To[1]) &&
+            ModelPrimitiveSameInterval(left.From[2], left.To[2], right.From[2], right.To[2]))
+        {
+            left.Faces[1] = null;
+            right.Faces[3] = null;
+            return true;
+        }
+
+        if (Math.Abs(left.From[0] - right.To[0]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[1], left.To[1], right.From[1], right.To[1]) &&
+            ModelPrimitiveSameInterval(left.From[2], left.To[2], right.From[2], right.To[2]))
+        {
+            left.Faces[3] = null;
+            right.Faces[1] = null;
+            return true;
+        }
+
+        if (Math.Abs(left.To[1] - right.From[1]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[0], left.To[0], right.From[0], right.To[0]) &&
+            ModelPrimitiveSameInterval(left.From[2], left.To[2], right.From[2], right.To[2]))
+        {
+            left.Faces[4] = null;
+            right.Faces[5] = null;
+            return true;
+        }
+
+        if (Math.Abs(left.From[1] - right.To[1]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[0], left.To[0], right.From[0], right.To[0]) &&
+            ModelPrimitiveSameInterval(left.From[2], left.To[2], right.From[2], right.To[2]))
+        {
+            left.Faces[5] = null;
+            right.Faces[4] = null;
+            return true;
+        }
+
+        if (Math.Abs(left.To[2] - right.From[2]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[0], left.To[0], right.From[0], right.To[0]) &&
+            ModelPrimitiveSameInterval(left.From[1], left.To[1], right.From[1], right.To[1]))
+        {
+            left.Faces[2] = null;
+            right.Faces[0] = null;
+            return true;
+        }
+
+        if (Math.Abs(left.From[2] - right.To[2]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[0], left.To[0], right.From[0], right.To[0]) &&
+            ModelPrimitiveSameInterval(left.From[1], left.To[1], right.From[1], right.To[1]))
+        {
+            left.Faces[0] = null;
+            right.Faces[2] = null;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool ModelPrimitiveHasEnabledSharedPrimitiveFace(ModelElementData left, ModelElementData right)
+    {
+        const double epsilon = 0.0001;
+
+        if (Math.Abs(left.To[0] - right.From[0]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[1], left.To[1], right.From[1], right.To[1]) &&
+            ModelPrimitiveSameInterval(left.From[2], left.To[2], right.From[2], right.To[2]))
+        {
+            return left.Faces[1]?.Enabled == true && right.Faces[3]?.Enabled == true;
+        }
+
+        if (Math.Abs(left.From[0] - right.To[0]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[1], left.To[1], right.From[1], right.To[1]) &&
+            ModelPrimitiveSameInterval(left.From[2], left.To[2], right.From[2], right.To[2]))
+        {
+            return left.Faces[3]?.Enabled == true && right.Faces[1]?.Enabled == true;
+        }
+
+        if (Math.Abs(left.To[1] - right.From[1]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[0], left.To[0], right.From[0], right.To[0]) &&
+            ModelPrimitiveSameInterval(left.From[2], left.To[2], right.From[2], right.To[2]))
+        {
+            return left.Faces[4]?.Enabled == true && right.Faces[5]?.Enabled == true;
+        }
+
+        if (Math.Abs(left.From[1] - right.To[1]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[0], left.To[0], right.From[0], right.To[0]) &&
+            ModelPrimitiveSameInterval(left.From[2], left.To[2], right.From[2], right.To[2]))
+        {
+            return left.Faces[5]?.Enabled == true && right.Faces[4]?.Enabled == true;
+        }
+
+        if (Math.Abs(left.To[2] - right.From[2]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[0], left.To[0], right.From[0], right.To[0]) &&
+            ModelPrimitiveSameInterval(left.From[1], left.To[1], right.From[1], right.To[1]))
+        {
+            return left.Faces[2]?.Enabled == true && right.Faces[0]?.Enabled == true;
+        }
+
+        if (Math.Abs(left.From[2] - right.To[2]) < epsilon &&
+            ModelPrimitiveSameInterval(left.From[0], left.To[0], right.From[0], right.To[0]) &&
+            ModelPrimitiveSameInterval(left.From[1], left.To[1], right.From[1], right.To[1]))
+        {
+            return left.Faces[0]?.Enabled == true && right.Faces[2]?.Enabled == true;
+        }
+
+        return false;
+    }
+
+    private static bool ModelPrimitiveSameInterval(double a0, double a1, double b0, double b1)
+    {
+        return Math.Abs(a0 - b0) < 0.0001 && Math.Abs(a1 - b1) < 0.0001;
+    }
+
+    private static int ModelPrimitiveEnabledFaceCount(ModelElementData element)
+    {
+        return element.Faces.Count(face => face?.Enabled == true);
+    }
+
+    private static string ModelPrimitiveBoxKey(ModelElementData element)
+    {
+        return string.Join(',',
+            element.From.Select(value => value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture))
+                .Concat(element.To.Select(value => value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)))
+                .Concat([
+                    element.RotationX.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
+                    element.RotationY.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
+                    element.RotationZ.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)
+                ]));
+    }
+
+    private static string ModelPrimitiveFormatBox(ModelElementData element)
+    {
+        return $"[{element.From[0]:0.###},{element.From[1]:0.###},{element.From[2]:0.###}] to [{element.To[0]:0.###},{element.To[1]:0.###},{element.To[2]:0.###}]";
     }
 
     /// <summary>Maps primitive-local coordinates (u, w = cross-section plane, v = along axis) to model x/y/z.</summary>
@@ -1251,6 +1539,22 @@ public sealed partial class DebugWindowManager
         double thicknessHalf = _modelPrimitiveThickness * 0.5;
         int squares = Math.Clamp(_modelPrimitiveStarSquares, 2, 6);
 
+        if (_modelPrimitiveStepped)
+        {
+            double max = _modelPrimitiveDiameter * 0.5;
+            return ModelBuildExactFlatSolid(-thicknessHalf, thicknessHalf, -max, max, -max, max, (u, w) =>
+            {
+                for (int square = 0; square < squares; square++)
+                {
+                    double radians = -square * (90.0 / squares) * Math.PI / 180.0;
+                    (double ru, double rw) = ModelPrimitiveRotatePoint(u, w, radians);
+                    if (Math.Abs(ru) <= half && Math.Abs(rw) <= half) return true;
+                }
+
+                return false;
+            });
+        }
+
         List<ModelElementData> result = [];
         for (int square = 0; square < squares; square++)
         {
@@ -1265,6 +1569,16 @@ public sealed partial class DebugWindowManager
         double half = _modelPrimitiveDiameter * 0.5;
         double armHalf = Math.Min(_modelPrimitiveMinor * 0.5, half);
         double thicknessHalf = _modelPrimitiveThickness * 0.5;
+
+        if (_modelPrimitiveStepped)
+        {
+            return
+            [
+                ModelPrimitiveBox(-half, -thicknessHalf, -armHalf, -armHalf, thicknessHalf, armHalf, 0.0),
+                ModelPrimitiveBox(-armHalf, -thicknessHalf, -half, armHalf, thicknessHalf, half, 0.0),
+                ModelPrimitiveBox(armHalf, -thicknessHalf, -armHalf, half, thicknessHalf, armHalf, 0.0)
+            ];
+        }
 
         return
         [
@@ -1284,6 +1598,21 @@ public sealed partial class DebugWindowManager
         // Tip at +U: the head is a square rotated 45 degrees around its own center
         // so one corner points forward; the shaft runs up to the head center.
         double headCenterU = length * 0.5 - headHalfDiagonal;
+        if (_modelPrimitiveStepped)
+        {
+            double minU = -length * 0.5;
+            double maxU = length * 0.5;
+            double maxW = Math.Max(headHalfDiagonal, shaftHalf);
+            return ModelBuildExactFlatSolid(-thicknessHalf, thicknessHalf, minU, maxU, -maxW, maxW, (u, w) =>
+            {
+                bool inShaft = u >= minU && u <= headCenterU && Math.Abs(w) <= shaftHalf;
+                double du = u - headCenterU;
+                double dw = w;
+                bool inDiamond = Math.Abs(du) + Math.Abs(dw) <= headHalfDiagonal;
+                return inShaft || inDiamond;
+            });
+        }
+
         List<ModelElementData> result =
         [
             ModelPrimitiveBox(
@@ -1309,6 +1638,20 @@ public sealed partial class DebugWindowManager
         double thicknessHalf = _modelPrimitiveThickness * 0.5;
         int sides = Math.Max(3, _modelPrimitiveSides);
 
+        if (_modelPrimitiveStepped)
+        {
+            double exactLobeOffset = side * Math.Sqrt(2.0) * 0.25;
+            double max = _modelPrimitiveDiameter * 0.55;
+            return ModelBuildExactFlatSolid(-thicknessHalf, thicknessHalf, -max, max, -max, max, (u, w) =>
+            {
+                (double ru, double rw) = ModelPrimitiveRotatePoint(u, w, -45.0 * Math.PI / 180.0);
+                bool inDiamond = Math.Abs(ru) <= half && Math.Abs(rw) <= half;
+                bool inLeftLobe = (u + exactLobeOffset) * (u + exactLobeOffset) + (w - exactLobeOffset) * (w - exactLobeOffset) <= half * half;
+                bool inRightLobe = (u - exactLobeOffset) * (u - exactLobeOffset) + (w - exactLobeOffset) * (w - exactLobeOffset) <= half * half;
+                return inDiamond || inLeftLobe || inRightLobe;
+            });
+        }
+
         List<ModelElementData> result =
         [
             ModelPrimitiveBox(-half, -thicknessHalf, -half, half, thicknessHalf, half, 45.0)
@@ -1326,6 +1669,17 @@ public sealed partial class DebugWindowManager
         double height = _modelPrimitiveRise;
         int rows = Math.Max(1, _modelPrimitiveLayers);
         double thicknessHalf = _modelPrimitiveThickness * 0.5;
+
+        if (_modelPrimitiveStepped)
+        {
+            double baseW = -height * 0.5;
+            double tipW = height * 0.5;
+            return ModelBuildExactFlatSolid(-thicknessHalf, thicknessHalf, -baseHalf, baseHalf, baseW, tipW, (u, w) =>
+            {
+                double fraction = Math.Clamp((w - baseW) / height, 0.0, 1.0);
+                return w >= baseW && w <= tipW && Math.Abs(u) <= baseHalf * (1.0 - fraction);
+            });
+        }
 
         if (!_modelPrimitiveStepped)
         {
@@ -1357,19 +1711,7 @@ public sealed partial class DebugWindowManager
             return smooth;
         }
 
-        double rowHeight = height / rows;
-
-        List<ModelElementData> result = [];
-        for (int row = 0; row < rows; row++)
-        {
-            double w0 = -height * 0.5 + row * rowHeight;
-            double rowHalf = baseHalf * (1.0 - (row + 0.5) / rows);
-            if (rowHalf < 0.025) continue;
-
-            result.Add(ModelPrimitiveBox(-rowHalf, -thicknessHalf, w0, rowHalf, thicknessHalf, w0 + rowHeight, 0.0));
-        }
-
-        return result;
+        return [];
     }
 
     private List<ModelElementData> ModelBuildSector()
@@ -1425,10 +1767,9 @@ public sealed partial class DebugWindowManager
     }
 
     /// <summary>
-    /// Voxelizes a rotationally symmetric solid into layers along the axis. Each layer's
-    /// annulus (outer/inner radius from <paramref name="radiiAt"/>) is rasterized on a grid
-    /// of <see cref="_modelPrimitiveStep"/>-sized cells, scanline-merged into rectangles, and
-    /// consecutive identical layers are extruded into single cuboids.
+    /// Voxelizes a rotationally symmetric solid into a shared 3D grid and greedily merges
+    /// occupied cells into cuboids. The rasterizer is conservative at the shape boundary so
+    /// exact-mode output does not develop holes inside the chosen grid approximation.
     /// </summary>
     private List<ModelElementData> ModelBuildSteppedSolid(double vMin, double vMax, double maxRadius, Func<double, (double Outer, double Inner)> radiiAt, double sweepDegrees = 360.0)
     {
@@ -1439,22 +1780,7 @@ public sealed partial class DebugWindowManager
         double sweepRadians = Math.Clamp(sweepDegrees, 1.0, 360.0) * Math.PI / 180.0;
         bool fullSweep = sweepDegrees >= 359.9;
 
-        List<ModelElementData> result = [];
-        bool[,]? previousMask = null;
-        List<(int U0, int W0, int U1, int W1)> previousRects = [];
-        double batchV0 = vMin;
-        double batchV1 = vMin;
-
-        void FlushBatch()
-        {
-            foreach ((int u0, int w0, int u1, int w1) in previousRects)
-            {
-                result.Add(ModelPrimitiveBox(
-                    -extent + u0 * step, batchV0, -extent + w0 * step,
-                    -extent + (u1 + 1) * step, batchV1, -extent + (w1 + 1) * step,
-                    0.0));
-            }
-        }
+        bool[,,] occupied = new bool[layers, cells, cells];
 
         for (int layer = 0; layer < layers; layer++)
         {
@@ -1462,49 +1788,167 @@ public sealed partial class DebugWindowManager
             double layerV1 = Math.Min(vMax, layerV0 + step);
             (double outerRadius, double innerRadius) = radiiAt((layerV0 + layerV1) * 0.5);
 
-            bool[,] mask = new bool[cells, cells];
-            bool any = false;
             for (int u = 0; u < cells; u++)
             {
-                double uCenter = -extent + (u + 0.5) * step;
+                double u0 = -extent + u * step;
+                double u1 = u0 + step;
                 for (int w = 0; w < cells; w++)
                 {
-                    double wCenter = -extent + (w + 0.5) * step;
-                    double distanceSquared = uCenter * uCenter + wCenter * wCenter;
-                    if (distanceSquared > outerRadius * outerRadius) continue;
-                    if (innerRadius > 0 && distanceSquared < innerRadius * innerRadius) continue;
-                    if (!fullSweep)
-                    {
-                        double angle = Math.Atan2(uCenter, wCenter);
-                        if (Math.Abs(angle) > sweepRadians * 0.5) continue;
-                    }
-                    mask[u, w] = true;
-                    any = true;
+                    double w0 = -extent + w * step;
+                    double w1 = w0 + step;
+                    occupied[layer, u, w] = ModelPrimitiveCellIntersectsAnnularSector(u0, u1, w0, w1, outerRadius, innerRadius, sweepRadians, fullSweep);
                 }
-            }
-
-            bool sameAsPrevious = previousMask != null && ModelMasksEqual(previousMask, mask, cells);
-            if (sameAsPrevious)
-            {
-                batchV1 = layerV1;
-                continue;
-            }
-
-            if (previousMask != null) FlushBatch();
-            previousMask = mask;
-            previousRects = any ? ModelMergeMaskToRects(mask, cells) : [];
-            batchV0 = layerV0;
-            batchV1 = layerV1;
-            if (result.Count + previousRects.Count > ModelPrimitiveMaxElements * 4)
-            {
-                // Bail out early on absurd parameter combinations instead of allocating thousands of cuboids.
-                FlushBatch();
-                return result;
             }
         }
 
-        if (previousMask != null) FlushBatch();
+        return ModelMergeOccupancyToCuboids(occupied, layers, cells, cells, -extent, -extent, vMin, vMax, step);
+    }
+
+    private List<ModelElementData> ModelBuildExactFlatSolid(double vMin, double vMax, double minU, double maxU, double minW, double maxW, Func<double, double, bool> contains)
+    {
+        double step = Math.Clamp(_modelPrimitiveStep, 0.25f, 8f);
+        int cellsU = Math.Max(1, (int)Math.Ceiling((maxU - minU) / step));
+        int cellsW = Math.Max(1, (int)Math.Ceiling((maxW - minW) / step));
+        bool[,,] occupied = new bool[1, cellsU, cellsW];
+
+        for (int u = 0; u < cellsU; u++)
+        {
+            double u0 = minU + u * step;
+            double u1 = Math.Min(maxU, u0 + step);
+            for (int w = 0; w < cellsW; w++)
+            {
+                double w0 = minW + w * step;
+                double w1 = Math.Min(maxW, w0 + step);
+                occupied[0, u, w] = ModelPrimitiveCellIntersectsShape(u0, u1, w0, w1, contains);
+            }
+        }
+
+        return ModelMergeOccupancyToCuboids(occupied, 1, cellsU, cellsW, minU, minW, vMin, vMax, step);
+    }
+
+    private List<ModelElementData> ModelMergeOccupancyToCuboids(bool[,,] occupied, int layers, int cellsU, int cellsW, double minU, double minW, double vMin, double vMax, double step)
+    {
+        List<ModelElementData> result = [];
+        bool[,,] consumed = new bool[layers, cellsU, cellsW];
+
+        for (int v = 0; v < layers; v++)
+        {
+            for (int u = 0; u < cellsU; u++)
+            {
+                for (int w = 0; w < cellsW; w++)
+                {
+                    if (!occupied[v, u, w] || consumed[v, u, w]) continue;
+
+                    int uEnd = u;
+                    while (uEnd + 1 < cellsU && occupied[v, uEnd + 1, w] && !consumed[v, uEnd + 1, w])
+                    {
+                        uEnd++;
+                    }
+
+                    int wEnd = w;
+                    while (wEnd + 1 < cellsW && ModelPrimitiveRectAvailable(occupied, consumed, v, u, uEnd, wEnd + 1))
+                    {
+                        wEnd++;
+                    }
+
+                    int vEnd = v;
+                    while (vEnd + 1 < layers && ModelPrimitiveBoxAvailable(occupied, consumed, vEnd + 1, u, uEnd, w, wEnd))
+                    {
+                        vEnd++;
+                    }
+
+                    for (int vv = v; vv <= vEnd; vv++)
+                    {
+                        for (int uu = u; uu <= uEnd; uu++)
+                        {
+                            for (int ww = w; ww <= wEnd; ww++)
+                            {
+                                consumed[vv, uu, ww] = true;
+                            }
+                        }
+                    }
+
+                    double u0 = minU + u * step;
+                    double u1 = minU + (uEnd + 1) * step;
+                    double w0 = minW + w * step;
+                    double w1 = minW + (wEnd + 1) * step;
+                    double vv0 = vMin + v * step;
+                    double vv1 = vEnd + 1 >= layers ? vMax : vMin + (vEnd + 1) * step;
+                    result.Add(ModelPrimitiveBox(u0, vv0, w0, u1, vv1, w1, 0.0));
+                }
+            }
+        }
+
         return result;
+    }
+
+    private static bool ModelPrimitiveRectAvailable(bool[,,] occupied, bool[,,] consumed, int v, int u0, int u1, int w)
+    {
+        for (int u = u0; u <= u1; u++)
+        {
+            if (!occupied[v, u, w] || consumed[v, u, w]) return false;
+        }
+
+        return true;
+    }
+
+    private static bool ModelPrimitiveBoxAvailable(bool[,,] occupied, bool[,,] consumed, int v, int u0, int u1, int w0, int w1)
+    {
+        for (int u = u0; u <= u1; u++)
+        {
+            for (int w = w0; w <= w1; w++)
+            {
+                if (!occupied[v, u, w] || consumed[v, u, w]) return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool ModelPrimitiveCellIntersectsAnnularSector(double u0, double u1, double w0, double w1, double outerRadius, double innerRadius, double sweepRadians, bool fullSweep)
+    {
+        if (outerRadius <= 0.0) return false;
+
+        double closestU = u0 > 0 ? u0 : u1 < 0 ? u1 : 0.0;
+        double closestW = w0 > 0 ? w0 : w1 < 0 ? w1 : 0.0;
+        if (closestU * closestU + closestW * closestW > outerRadius * outerRadius) return false;
+
+        if (innerRadius > 0.0)
+        {
+            double farthestDistanceSquared = Math.Max(
+                Math.Max(u0 * u0 + w0 * w0, u0 * u0 + w1 * w1),
+                Math.Max(u1 * u1 + w0 * w0, u1 * u1 + w1 * w1));
+            if (farthestDistanceSquared < innerRadius * innerRadius) return false;
+        }
+
+        if (fullSweep) return true;
+
+        return ModelPrimitiveCellIntersectsShape(u0, u1, w0, w1, (u, w) =>
+        {
+            double distanceSquared = u * u + w * w;
+            if (distanceSquared > outerRadius * outerRadius) return false;
+            if (innerRadius > 0.0 && distanceSquared < innerRadius * innerRadius) return false;
+            double angle = Math.Atan2(u, w);
+            return Math.Abs(angle) <= sweepRadians * 0.5;
+        });
+    }
+
+    private static bool ModelPrimitiveCellIntersectsShape(double u0, double u1, double w0, double w1, Func<double, double, bool> contains)
+    {
+        double centerU = (u0 + u1) * 0.5;
+        double centerW = (w0 + w1) * 0.5;
+        return contains(centerU, centerW) ||
+            contains(u0, w0) ||
+            contains(u0, w1) ||
+            contains(u1, w0) ||
+            contains(u1, w1);
+    }
+
+    private static (double U, double W) ModelPrimitiveRotatePoint(double u, double w, double radians)
+    {
+        double cos = Math.Cos(radians);
+        double sin = Math.Sin(radians);
+        return (u * cos - w * sin, u * sin + w * cos);
     }
 
     private static bool ModelMasksEqual(bool[,] left, bool[,] right, int cells)
@@ -1571,5 +2015,16 @@ public sealed partial class DebugWindowManager
         }
 
         return closed;
+    }
+
+    private sealed class ModelPrimitiveMetrics
+    {
+        public string ModeLabel { get; set; } = "Exact merged";
+        public string QualityLabel { get; set; } = "clean exact grid";
+        public int Cuboids { get; set; }
+        public int EnabledFaces { get; set; }
+        public int CulledInternalFaces { get; set; }
+        public List<string> Warnings { get; } = [];
+        public List<string> Errors { get; } = [];
     }
 }

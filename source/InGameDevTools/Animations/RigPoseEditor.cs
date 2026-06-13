@@ -1,4 +1,5 @@
 using InGameDevTools.Integration.Transpilers;
+using InGameDevTools.Utils;
 using ImGuiNET;
 using NVector3 = System.Numerics.Vector3;
 using OpenTK.Mathematics;
@@ -199,7 +200,8 @@ public sealed partial class DebugWindowManager
             translationAxes: selectedAxes,
             allowScale: false,
             dragStarted: () => BeginRigGizmoDrag(animationCode, animation, selectedPart),
-            dragEnded: () => EndRigGizmoDrag(animationCode, animation));
+            dragEnded: () => EndRigGizmoDrag(animationCode, animation),
+            drawPicker: false);
 
         ImGui.TextDisabled($"Editing {animationCode} / keyframe {animation._playerFrameIndex} / {selectedPart}.");
         return true;
@@ -1440,6 +1442,12 @@ public sealed partial class DebugWindowManager
         public static RigIkMatrix3 FromMatrixf(Matrixf matrix)
         {
             float[] v = matrix.Values;
+            return new RigIkMatrix3(v[0], v[4], v[8], v[1], v[5], v[9], v[2], v[6], v[10]);
+        }
+
+        public static RigIkMatrix3 FromMatrixd(Matrixd matrix)
+        {
+            double[] v = matrix.Values;
             return new RigIkMatrix3(v[0], v[4], v[8], v[1], v[5], v[9], v[2], v[6], v[10]);
         }
 

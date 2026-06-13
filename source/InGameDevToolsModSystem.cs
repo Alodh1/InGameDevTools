@@ -171,6 +171,8 @@ public sealed class InGameDevToolsModSystem : ModSystem
         TryRegister(api, "collectible behavior InGameDevTools:AnimatableAttachable", () => api.RegisterCollectibleBehaviorClass("InGameDevTools:AnimatableAttachable", typeof(AnimatableAttachable)));
         TryRegister(api, "collectible behavior AnimationsLib:Animatable", () => api.RegisterCollectibleBehaviorClass("AnimationsLib:Animatable", typeof(Animatable)));
         TryRegister(api, "collectible behavior AnimationsLib:AnimatableAttachable", () => api.RegisterCollectibleBehaviorClass("AnimationsLib:AnimatableAttachable", typeof(AnimatableAttachable)));
+        TryRegister(api, "block entity InGameDevToolsAnimatedBlock", () => api.RegisterBlockEntityClass("InGameDevToolsAnimatedBlock", typeof(InGameDevToolsAnimatedBlockEntity)));
+        TryRegister(api, "block entity behavior InGameDevTools:AnimatedBlock", () => api.RegisterBlockEntityBehaviorClass("InGameDevTools:AnimatedBlock", typeof(InGameDevToolsAnimatedBlockBehavior)));
     }
 
     private static void TryRegister(ICoreAPI api, string target, Action register)
@@ -243,6 +245,7 @@ public sealed class DevToolsConfig
     public string FontName { get; set; } = FontDefault;
     public int FontSize { get; set; } = 16;
     public string AnimationIkMode { get; set; } = "AutoConservative";
+    public string AnimationIkSolver { get; set; } = "Ccd";
     public bool AnimationIkPreserveDraggedPartRotation { get; set; } = true;
     public bool AnimationIkLockMoveToDragAxis { get; set; } = true;
     public Dictionary<string, string[]> AnimationIkAnchors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -264,6 +267,7 @@ public sealed class DevToolsConfig
         ViewportBackground = DevToolsViewportBackground.NormalizeName(ViewportBackground);
         FontName = string.IsNullOrWhiteSpace(FontName) ? FontDefault : FontName.Trim();
         AnimationIkMode = NormalizeAnimationIkMode(AnimationIkMode);
+        AnimationIkSolver = NormalizeAnimationIkSolver(AnimationIkSolver);
         AnimationIkAnchors ??= new(StringComparer.OrdinalIgnoreCase);
         AnimationIkAnchors = AnimationIkAnchors
             .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value != null)
@@ -317,6 +321,11 @@ public sealed class DevToolsConfig
         if (string.Equals(value, "AutoExtended", StringComparison.OrdinalIgnoreCase)) return "AutoExtended";
         if (string.Equals(value, "ManualOverride", StringComparison.OrdinalIgnoreCase)) return "ManualOverride";
         return "AutoConservative";
+    }
+
+    private static string NormalizeAnimationIkSolver(string? value)
+    {
+        return string.Equals(value, "Fabrik", StringComparison.OrdinalIgnoreCase) ? "Fabrik" : "Ccd";
     }
 }
 

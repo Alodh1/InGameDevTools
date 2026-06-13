@@ -5,6 +5,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using OpenTK.Mathematics;
 using ProtoBuf;
+using System.Globalization;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
@@ -2195,7 +2196,9 @@ public class ParticleEffectsManager
                 }
 
                 ParticleReferenceModel? entityModel = BuildReferenceModelFromMesh(clientApi, $"entity:{entityType.Code}", mesh, null);
-                return new ParticlePreviewPlacement(entityModel, entityModel?.ParticleOrigin ?? Vector3.Zero);
+                // EntityShapeRenderer translates entity shapes by (-0.5, 0, -0.5), so shape-space
+                // (0.5, 0, 0.5) is where the entity position (and entity-anchored particles) sits.
+                return new ParticlePreviewPlacement(entityModel, new Vector3(0.5f, 0f, 0.5f));
             }
         }
         catch (Exception exception)
@@ -2510,19 +2513,16 @@ public class ParticleEffectsManager
 
     private static Vector3 GetCollectibleParticleOrigin(CollectibleObject collectible, DevToolsPreviewBounds meshBounds)
     {
-        if (collectible is Block && TryGetCollectibleTopMiddle(collectible, out Vector3 blockOrigin))
+        // Block.OnAsyncClientParticleTick spawns at pos + TopMiddlePos; using TopMiddlePos for items
+        // too keeps the editor on the same engine convention modded spawners follow.
+        if (TryGetCollectibleTopMiddle(collectible, out Vector3 origin))
         {
-            return blockOrigin;
+            return origin;
         }
 
         if (meshBounds.IsValid)
         {
             return DevToolsPreviewPlacement.TopCenter(meshBounds);
-        }
-
-        if (TryGetCollectibleTopMiddle(collectible, out Vector3 origin))
-        {
-            return origin;
         }
 
         return new Vector3(0.5f, 1f, 0.5f);
@@ -3298,6 +3298,40 @@ public static class ParticleEditor
     private static bool _includeVelocityEvolveInJsonOutput;
     private static readonly Dictionary<string, string> _jsonEditBuffers = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> _jsonEditStatuses = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> _advancedProviderBuffers = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> _advancedProviderStatuses = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> _firstClassParticleMembers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ParticleModel",
+        "HsvaColor",
+        "ColorByBlock",
+        "OpacityEvolve",
+        "RedEvolve",
+        "GreenEvolve",
+        "BlueEvolve",
+        "GravityEffect",
+        "LifeLength",
+        "Quantity",
+        "SecondarySpawnInterval",
+        "WindAffectednes",
+        "WindAffectedness",
+        "Bounciness",
+        "PosOffset",
+        "Size",
+        "SizeEvolve",
+        "Velocity",
+        "VelocityEvolve",
+        "DieOnRainHeightmap",
+        "RandomVelocityChange",
+        "DieInAir",
+        "DieInLiquid",
+        "SwimOnLiquid",
+        "SelfPropelled",
+        "TerrainCollision",
+        "VertexFlags",
+        "SecondaryParticles",
+        "DeathParticles"
+    };
 
     public static void Draw(string id, AdvancedParticleProperties particleProperties)
     {
@@ -3310,6 +3344,7 @@ public static class ParticleEditor
         VelocityEditor(id, particleProperties);
         BooleansEditor(id, particleProperties);
         FlagsEditor(id, particleProperties);
+        AdvancedProviderFieldsEditor(id, particleProperties);
         ChildParticlesEditor(id, particleProperties);
     }
 
@@ -3656,6 +3691,245 @@ public static class ParticleEditor
         particleProperties.VertexFlags = flags.All;
 
         ImGui.Unindent();
+    }
+
+    private static void AdvancedProviderFieldsEditor(string id, AdvancedParticleProperties particleProperties)
+    {
+        List<System.Reflection.MemberInfo> members = GetAdvancedParticleProviderMembers()
+            .Where(member => !_firstClassParticleMembers.Contains(member.Name))
+            .OrderBy(member => member.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (!ImGui.CollapsingHeader($"Advanced provider fields ({members.Count})##{id}")) return;
+        ImGui.Indent();
+
+        if (members.Count == 0)
+        {
+            ImGui.TextDisabled("All serialized provider fields are covered by named editors.");
+        }
+
+        foreach (System.Reflection.MemberInfo member in members)
+        {
+            ImGui.PushID($"particle-advanced-provider-{id}-{member.Name}");
+            DrawAdvancedParticleProviderMember(id, particleProperties, member);
+            ImGui.PopID();
+        }
+
+        ImGui.Unindent();
+    }
+
+    private static IEnumerable<System.Reflection.MemberInfo> GetAdvancedParticleProviderMembers()
+    {
+        Type type = typeof(AdvancedParticleProperties);
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        foreach (System.Reflection.PropertyInfo property in type.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+        {
+            if (!property.CanRead || !property.CanWrite || property.GetIndexParameters().Length > 0) continue;
+            if (seen.Add(property.Name)) yield return property;
+        }
+
+        foreach (System.Reflection.FieldInfo field in type.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+        {
+            if (field.IsInitOnly || field.IsLiteral) continue;
+            if (seen.Add(field.Name)) yield return field;
+        }
+    }
+
+    private static void DrawAdvancedParticleProviderMember(string id, AdvancedParticleProperties particleProperties, System.Reflection.MemberInfo member)
+    {
+        Type memberType = GetParticleProviderMemberType(member);
+        object? value = GetParticleProviderMemberValue(member, particleProperties);
+        Type editableType = Nullable.GetUnderlyingType(memberType) ?? memberType;
+
+        if (editableType == typeof(bool))
+        {
+            bool boolValue = value is bool typed && typed;
+            if (ImGui.Checkbox($"{member.Name}##particle-advanced-bool", ref boolValue))
+            {
+                SetParticleProviderMemberValue(member, particleProperties, boolValue);
+            }
+            return;
+        }
+
+        if (IsParticleIntegerType(editableType))
+        {
+            int intValue = value == null ? 0 : Convert.ToInt32(value, CultureInfo.InvariantCulture);
+            ImGui.SetNextItemWidth(140f);
+            if (ImGui.InputInt($"{member.Name}##particle-advanced-int", ref intValue))
+            {
+                SetParticleProviderMemberValue(member, particleProperties, ConvertParticleNumber(intValue, editableType));
+            }
+            return;
+        }
+
+        if (IsParticleFloatType(editableType))
+        {
+            float floatValue = value == null ? 0f : Convert.ToSingle(value, CultureInfo.InvariantCulture);
+            ImGui.SetNextItemWidth(140f);
+            if (ImGui.InputFloat($"{member.Name}##particle-advanced-float", ref floatValue, 0, 0, "%.4f"))
+            {
+                SetParticleProviderMemberValue(member, particleProperties, ConvertParticleNumber(floatValue, editableType));
+            }
+            return;
+        }
+
+        if (editableType == typeof(string))
+        {
+            string stringValue = value?.ToString() ?? "";
+            ImGui.SetNextItemWidth(Math.Max(180f, ImGui.GetContentRegionAvail().X - 90f));
+            if (ImGui.InputText($"{member.Name}##particle-advanced-string", ref stringValue, 4096))
+            {
+                SetParticleProviderMemberValue(member, particleProperties, string.IsNullOrWhiteSpace(stringValue) ? null : stringValue);
+            }
+            return;
+        }
+
+        if (editableType.IsEnum)
+        {
+            string[] names = Enum.GetNames(editableType);
+            int index = Math.Max(0, Array.FindIndex(names, name => string.Equals(name, value?.ToString(), StringComparison.OrdinalIgnoreCase)));
+            ImGui.SetNextItemWidth(180f);
+            if (ImGui.Combo($"{member.Name}##particle-advanced-enum", ref index, names, names.Length))
+            {
+                SetParticleProviderMemberValue(member, particleProperties, Enum.Parse(editableType, names[Math.Clamp(index, 0, names.Length - 1)]));
+            }
+            return;
+        }
+
+        DrawAdvancedParticleProviderJsonMember(id, particleProperties, member, memberType, value);
+    }
+
+    private static void DrawAdvancedParticleProviderJsonMember(string id, AdvancedParticleProperties particleProperties, System.Reflection.MemberInfo member, Type memberType, object? value)
+    {
+        string bufferKey = $"{id}:{member.Name}";
+        JsonSerializerSettings settings = new()
+        {
+            NullValueHandling = NullValueHandling.Ignore
+        };
+        JsonSerializer serializer = JsonSerializer.Create(settings);
+        string current = value == null ? "null" : JToken.FromObject(value, serializer).ToString(Formatting.Indented);
+        if (!_advancedProviderBuffers.TryGetValue(bufferKey, out string? buffer))
+        {
+            buffer = current;
+            _advancedProviderBuffers[bufferKey] = buffer;
+        }
+
+        if (!ImGui.TreeNodeEx($"{member.Name} JSON##particle-advanced-json-node", ImGuiTreeNodeFlags.DefaultOpen)) return;
+
+        ImGui.InputTextMultiline("##particle-advanced-json", ref buffer, 256 * 1024, new(500, 120), ImGuiInputTextFlags.AllowTabInput);
+        _advancedProviderBuffers[bufferKey] = buffer;
+
+        if (_advancedProviderStatuses.TryGetValue(bufferKey, out string? status) && !string.IsNullOrWhiteSpace(status))
+        {
+            ImGui.TextWrapped(status);
+        }
+
+        if (ImGui.Button("Load current##particle-advanced-load"))
+        {
+            _advancedProviderBuffers[bufferKey] = current;
+            _advancedProviderStatuses[bufferKey] = "Loaded current provider field JSON.";
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Format##particle-advanced-format"))
+        {
+            if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
+            {
+                _advancedProviderBuffers[bufferKey] = formatted;
+                _advancedProviderStatuses[bufferKey] = "Formatted provider field JSON.";
+            }
+            else
+            {
+                _advancedProviderStatuses[bufferKey] = $"Format failed: {formatError}";
+            }
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Apply##particle-advanced-apply"))
+        {
+            if (DevToolsJson.TryParseToken(buffer, out JToken? token, out string parseError) && token != null)
+            {
+                try
+                {
+                    object? replacement = token.Type == JTokenType.Null ? null : token.ToObject(memberType, serializer);
+                    SetParticleProviderMemberValue(member, particleProperties, replacement);
+                    _advancedProviderBuffers[bufferKey] = replacement == null
+                        ? "null"
+                        : JToken.FromObject(replacement, serializer).ToString(Formatting.Indented);
+                    _advancedProviderStatuses[bufferKey] = "Applied provider field JSON.";
+                }
+                catch (Exception exception)
+                {
+                    _advancedProviderStatuses[bufferKey] = $"Apply failed: {exception.Message}";
+                }
+            }
+            else
+            {
+                _advancedProviderStatuses[bufferKey] = $"Apply failed: {parseError}";
+            }
+        }
+
+        if (!memberType.IsValueType || Nullable.GetUnderlyingType(memberType) != null)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("Clear##particle-advanced-clear"))
+            {
+                SetParticleProviderMemberValue(member, particleProperties, null);
+                _advancedProviderBuffers[bufferKey] = "null";
+                _advancedProviderStatuses[bufferKey] = "Cleared provider field.";
+            }
+        }
+
+        ImGui.TreePop();
+    }
+
+    private static Type GetParticleProviderMemberType(System.Reflection.MemberInfo member)
+    {
+        return member switch
+        {
+            System.Reflection.PropertyInfo property => property.PropertyType,
+            System.Reflection.FieldInfo field => field.FieldType,
+            _ => typeof(object)
+        };
+    }
+
+    private static object? GetParticleProviderMemberValue(System.Reflection.MemberInfo member, AdvancedParticleProperties particleProperties)
+    {
+        return member switch
+        {
+            System.Reflection.PropertyInfo property => property.GetValue(particleProperties),
+            System.Reflection.FieldInfo field => field.GetValue(particleProperties),
+            _ => null
+        };
+    }
+
+    private static void SetParticleProviderMemberValue(System.Reflection.MemberInfo member, AdvancedParticleProperties particleProperties, object? value)
+    {
+        switch (member)
+        {
+            case System.Reflection.PropertyInfo property:
+                property.SetValue(particleProperties, value);
+                break;
+            case System.Reflection.FieldInfo field:
+                field.SetValue(particleProperties, value);
+                break;
+        }
+    }
+
+    private static bool IsParticleIntegerType(Type type)
+    {
+        return type == typeof(byte) || type == typeof(sbyte) ||
+            type == typeof(short) || type == typeof(ushort) ||
+            type == typeof(int) || type == typeof(uint) ||
+            type == typeof(long) || type == typeof(ulong);
+    }
+
+    private static bool IsParticleFloatType(Type type)
+    {
+        return type == typeof(float) || type == typeof(double) || type == typeof(decimal);
+    }
+
+    private static object ConvertParticleNumber<T>(T value, Type targetType) where T : IConvertible
+    {
+        return Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
     }
 
     private static void ChildParticlesEditor(string id, AdvancedParticleProperties particleProperties)

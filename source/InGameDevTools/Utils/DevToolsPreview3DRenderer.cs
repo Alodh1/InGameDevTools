@@ -103,11 +103,25 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
                 activeShader.Use();
                 ApplyStandardShaderUniforms(activeShader, camera);
 
-                foreach (DevToolsPreviewMeshInstance instance in instances)
+                foreach (DevToolsPreviewMeshInstance instance in instances.Where(instance => instance.Tint.W >= 0.999f))
                 {
-                    if (instance.Mesh.MeshRef.Disposed || !instance.Mesh.MeshRef.Initialized) continue;
-                    SetUniformMatrix(activeShader, "modelMatrix", instance.ModelMatrix.Values);
-                    render.RenderMultiTextureMesh(instance.Mesh.MeshRef, "tex", 0);
+                    RenderPreviewMeshInstance(render, activeShader, instance);
+                }
+
+                bool depthMaskDisabled = false;
+                foreach (DevToolsPreviewMeshInstance instance in instances.Where(instance => instance.Tint.W < 0.999f))
+                {
+                    if (!depthMaskDisabled)
+                    {
+                        render.GLDepthMask(false);
+                        depthMaskDisabled = true;
+                    }
+
+                    RenderPreviewMeshInstance(render, activeShader, instance);
+                }
+                if (depthMaskDisabled)
+                {
+                    render.GLDepthMask(true);
                 }
 
                 activeShader.Stop();
@@ -187,6 +201,15 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         SetUniformMatrix(shader, "projectionMatrix", camera.Projection.Values);
         SetUniformMatrix(shader, "viewMatrix", camera.View.Values);
         SetUniform(shader, "lightPosition", -0.35f, 0.85f, -0.38f);
+    }
+
+    private void RenderPreviewMeshInstance(IRenderAPI render, IShaderProgram shader, DevToolsPreviewMeshInstance instance)
+    {
+        if (instance.Mesh.MeshRef.Disposed || !instance.Mesh.MeshRef.Initialized) return;
+
+        SetUniform(shader, "rgbaTint", instance.Tint.X, instance.Tint.Y, instance.Tint.Z, instance.Tint.W);
+        SetUniformMatrix(shader, "modelMatrix", instance.ModelMatrix.Values);
+        render.RenderMultiTextureMesh(instance.Mesh.MeshRef, "tex", 0);
     }
 
     private FrameBufferRef EnsureFrameBuffer(int width, int height)
@@ -728,7 +751,24 @@ internal sealed class DevToolsPreviewMesh : IDisposable
     }
 }
 
-internal readonly record struct DevToolsPreviewMeshInstance(DevToolsPreviewMesh Mesh, Matrixf ModelMatrix);
+internal readonly record struct DevToolsPreviewMeshInstance
+{
+    public DevToolsPreviewMeshInstance(DevToolsPreviewMesh mesh, Matrixf modelMatrix)
+        : this(mesh, modelMatrix, new Vector4(1f, 1f, 1f, 1f))
+    {
+    }
+
+    public DevToolsPreviewMeshInstance(DevToolsPreviewMesh mesh, Matrixf modelMatrix, Vector4 tint)
+    {
+        Mesh = mesh;
+        ModelMatrix = modelMatrix;
+        Tint = tint;
+    }
+
+    public DevToolsPreviewMesh Mesh { get; }
+    public Matrixf ModelMatrix { get; }
+    public Vector4 Tint { get; }
+}
 
 internal static class DevToolsPreviewMeshFactory
 {

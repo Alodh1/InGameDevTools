@@ -3,6 +3,7 @@ using InGameDevTools.Utils;
 using OpenTK.Mathematics;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
+using Vintagestory.API.Common.Entities;
 using Vintagestory.API.MathTools;
 using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
@@ -20,13 +21,25 @@ public sealed partial class DebugWindowManager
 
     private DevToolsPreview3DRenderer? _modelPreviewRenderer;
     private DevToolsPreviewMesh? _modelPreviewMesh;
+    private DevToolsPreviewMesh? _modelReferenceMesh;
+    private ModelShapeAssetEntry? _modelReferenceEntry;
+    private EntityProperties? _modelReferenceEntityType;
+    private string? _modelReferenceEntityDisplay;
     private string? _modelPreviewSkipReason;
+    private string? _modelReferenceSkipReason;
     private float _modelViewportYaw = 0.7f;
     private float _modelViewportPitch = -0.45f;
     private float _modelViewportDistance = 2.4f;
     private Vector3 _modelViewportTarget = new(0.5f, 0.5f, 0.5f);
     private bool _modelCameraFitPending;
     private bool _modelViewportScreenshotQueued;
+    private bool _modelReferenceVisible = true;
+    private bool _modelReferenceDirty;
+    private float _modelReferenceOpacity = 0.42f;
+    private float _modelReferenceScale = 1f;
+    private float _modelReferenceOffsetX;
+    private float _modelReferenceOffsetY;
+    private float _modelReferenceOffsetZ;
 
     private bool _modelGizmoDragging;
     private int _modelGizmoDragAxis = -1;
@@ -68,6 +81,16 @@ public sealed partial class DebugWindowManager
         (3, 7, 4), (3, 4, 0)
     ];
 
+    private readonly record struct ModelCutPreview(
+        ModelElementData Element,
+        int FaceAxis,
+        bool FacePositive,
+        int CutAxis,
+        double CutCoordinate,
+        Vector3[] PlaneCorners,
+        Vector3 LineStart,
+        Vector3 LineEnd);
+
     // Local box corner index layout: bit0 = +X, bit1 = +Y, bit2 = +Z is NOT used here;
     // corners follow the same winding as AnimationElementPicking boxes.
     private static Vector3[] ModelLocalBoxCorners(ModelElementData element)
@@ -96,6 +119,10 @@ public sealed partial class DebugWindowManager
             return;
         }
 
+        DrawModelReferenceControls();
+        ModelRebuildPreviewMeshIfNeeded();
+        ModelRebuildReferenceMeshIfNeeded();
+
         if (ImGui.SmallButton("Focus selection##model-vp-focus"))
         {
             ModelFocusCameraOnSelection();
@@ -110,15 +137,135 @@ public sealed partial class DebugWindowManager
             ModelFitCameraToMesh();
         }
         ImGui.SameLine();
+        bool hasReferenceMesh = _modelReferenceVisible && _modelReferenceMesh != null;
+        if (!hasReferenceMesh) ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Fit reference##model-vp-fit-reference"))
+        {
+            ModelFitCameraToReference();
+        }
+        if (!hasReferenceMesh) ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Center the camera on the reference model.");
+        }
+        ImGui.SameLine();
+        bool hasSceneBounds = ModelViewportSceneBounds().IsValid;
+        if (!hasSceneBounds) ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Fit all##model-vp-fit-all"))
+        {
+            ModelFitCameraToScene();
+        }
+        if (!hasSceneBounds) ImGui.EndDisabled();
+        ImGui.SameLine();
         if (ImGui.SmallButton("Screenshot##model-vp-screenshot"))
         {
             _modelViewportScreenshotQueued = true;
         }
         ImGui.SameLine();
-        ImGui.TextDisabled("RMB orbit, MMB/Shift+RMB pan, wheel zoom, LMB select/drag gizmo, Home focus");
+        ImGui.TextDisabled("RMB orbit, MMB/Shift+RMB pan, wheel zoom, Ctrl+wheel nudge axis, arrows nudge plane");
 
-        ModelRebuildPreviewMeshIfNeeded();
         DrawModelViewportSurface();
+    }
+
+    private void DrawModelReferenceControls()
+    {
+        EnsureModelShapeIndex();
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled("Reference");
+        ImGui.SameLine();
+
+        List<ModelShapeAssetEntry> index = _modelShapeIndex ?? [];
+        List<string> options = index.Select(ModelReferenceLabel).ToList();
+        string current = ModelReferenceDisplay() ?? "(none)";
+        float comboWidth = Math.Clamp(ImGui.GetContentRegionAvail().X * 0.46f, 220f, 520f);
+        ImGui.SetNextItemWidth(comboWidth);
+        if (ModelFilteredCombo("##model-reference-shape", current, options, out string selectedReference, allowCustom: false, filterHint: "filter reference shapes"))
+        {
+            ModelShapeAssetEntry? entry = index.FirstOrDefault(candidate =>
+                string.Equals(ModelReferenceLabel(candidate), selectedReference, StringComparison.Ordinal));
+            ModelSetReferenceEntry(entry);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Load another shape as a non-editable reference in the viewport. It is not saved into this model file.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Player##model-reference-player"))
+        {
+            ModelSetPlayerReference();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Use the current player entity shape as the reference model.");
+        }
+
+        ImGui.SameLine();
+        bool hasReference = _modelReferenceEntry != null || _modelReferenceEntityType != null;
+        if (!hasReference) ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Clear##model-reference-clear"))
+        {
+            ModelSetReferenceEntry(null);
+        }
+        if (!hasReference) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Show##model-reference-visible", ref _modelReferenceVisible);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Toggle the reference model without clearing it.");
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(116f);
+        if (ImGui.SliderFloat("Opacity##model-reference-opacity", ref _modelReferenceOpacity, 0.12f, 1f, "%.2f"))
+        {
+            _modelReferenceOpacity = Math.Clamp(_modelReferenceOpacity, 0.12f, 1f);
+        }
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled("Transform");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(92f);
+        if (ImGui.DragFloat("Scale##model-reference-scale", ref _modelReferenceScale, 0.01f, 0.01f, 20f, "%.2f"))
+        {
+            _modelReferenceScale = Math.Clamp(_modelReferenceScale, 0.01f, 20f);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Reference scale in rendered model space.");
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("Offset");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(74f);
+        ImGui.DragFloat("X##model-reference-offset-x", ref _modelReferenceOffsetX, 0.01f, -64f, 64f, "%.2f");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(74f);
+        ImGui.DragFloat("Y##model-reference-offset-y", ref _modelReferenceOffsetY, 0.01f, -64f, 64f, "%.2f");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(74f);
+        ImGui.DragFloat("Z##model-reference-offset-z", ref _modelReferenceOffsetZ, 0.01f, -64f, 64f, "%.2f");
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Reference offset in rendered block units.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Reset##model-reference-transform-reset"))
+        {
+            _modelReferenceScale = 1f;
+            _modelReferenceOffsetX = 0f;
+            _modelReferenceOffsetY = 0f;
+            _modelReferenceOffsetZ = 0f;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_modelReferenceSkipReason))
+        {
+            ImGui.TextColored(new NVector4(0.95f, 0.72f, 0.42f, 1f), _modelReferenceSkipReason);
+        }
     }
 
     private void DrawModelViewportSurface()
@@ -131,6 +278,9 @@ public sealed partial class DebugWindowManager
         NVector2 min = ImGui.GetItemRectMin();
         NVector2 max = ImGui.GetItemRectMax();
         bool hovered = ImGui.IsItemHovered();
+        NVector2 afterViewportCursor = ImGui.GetCursorScreenPos();
+        bool toolOverlayActive = HandleModelViewportToolOverlayInput(min, max);
+        if (toolOverlayActive) hovered = false;
 
         if (hovered && !_modelGizmoDragging)
         {
@@ -153,7 +303,14 @@ public sealed partial class DebugWindowManager
             float wheel = ImGui.GetIO().MouseWheel;
             if (Math.Abs(wheel) > 0.001f)
             {
-                _modelViewportDistance = Math.Clamp(_modelViewportDistance * MathF.Pow(0.88f, wheel), 0.2f, 80f);
+                if (IsDevToolsCtrlDown() && ModelNudgeSelectedElements(_modelWheelNudgeAxis, wheel * ModelNudgeStep()))
+                {
+                    // Ctrl+wheel is reserved for selection nudging; plain wheel stays camera zoom.
+                }
+                else
+                {
+                    _modelViewportDistance = Math.Clamp(_modelViewportDistance * MathF.Pow(0.88f, wheel), 0.2f, 80f);
+                }
             }
         }
 
@@ -167,6 +324,13 @@ public sealed partial class DebugWindowManager
 
         DevToolsPreviewCamera camera = BuildModelViewportCamera(min, max);
         List<DevToolsPreviewMeshInstance> instances = [];
+        if (_modelReferenceVisible && _modelReferenceMesh != null)
+        {
+            instances.Add(new(
+                _modelReferenceMesh,
+                ModelReferenceMatrix(),
+                new Vector4(0.72f, 0.86f, 1f, _modelReferenceOpacity)));
+        }
         if (_modelPreviewMesh != null)
         {
             instances.Add(new(_modelPreviewMesh, CreateIdentityMatrix()));
@@ -214,6 +378,14 @@ public sealed partial class DebugWindowManager
             if (selected != null && _modelDoc.EnumerateElements().Contains(selected))
             {
                 DrawModelSelectionOverlay(drawList, camera, selected, active: true);
+            }
+
+            if (_modelGizmoTool == ModelGizmoTool.Cut)
+            {
+                gizmoConsumedMouse = DrawModelCutTool(drawList, camera, hovered);
+            }
+            else if (selected != null && _modelDoc.EnumerateElements().Contains(selected))
+            {
                 gizmoConsumedMouse = DrawModelGizmo(drawList, camera, selected, hovered);
             }
             else if (_modelGizmoDragging)
@@ -233,7 +405,7 @@ public sealed partial class DebugWindowManager
             if (hovered && !gizmoConsumedMouse && !_modelGizmoDragging && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {
                 ModelElementData? picked = ModelPickElement(camera, ImGui.GetMousePos());
-                bool additive = ImGui.GetIO().KeyCtrl;
+                bool additive = IsDevToolsCtrlDown();
                 if (picked != null || !additive)
                 {
                     ModelSelectElement(picked, additive: additive);
@@ -241,10 +413,17 @@ public sealed partial class DebugWindowManager
             }
 
             drawList.AddText(min + new NVector2(12f, 10f), text, _modelDoc.DisplayPath);
+            float nextTextY = 28f;
             if (selected != null)
             {
                 drawList.AddText(min + new NVector2(12f, 28f), text,
                     $"{selected.Name}  from [{selected.From[0]:0.##}, {selected.From[1]:0.##}, {selected.From[2]:0.##}]  size [{selected.SizeX:0.##}, {selected.SizeY:0.##}, {selected.SizeZ:0.##}]  selected {selectedElements.Count}");
+                nextTextY = 46f;
+            }
+            string? referenceDisplay = ModelReferenceDisplay();
+            if (_modelReferenceVisible && referenceDisplay != null)
+            {
+                drawList.AddText(min + new NVector2(12f, nextTextY), text, $"Ref: {referenceDisplay}");
             }
         }
         finally
@@ -252,6 +431,133 @@ public sealed partial class DebugWindowManager
             drawList.PopClipRect();
         }
         drawList.AddRect(min, max, border, 4f);
+        DrawModelViewportToolOverlay(min, max);
+        ImGui.SetCursorScreenPos(afterViewportCursor);
+    }
+
+    private NVector2 ModelViewportToolOverlayPosition(NVector2 viewportMin, NVector2 viewportMax)
+    {
+        return new NVector2(viewportMax.X - ModelViewportToolOverlaySize().X - 12f, viewportMin.Y + 12f);
+    }
+
+    private NVector2 ModelViewportToolOverlaySize()
+    {
+        float rowHeight = Math.Max(20f, ImGui.GetFrameHeight());
+        float spacingY = ImGui.GetStyle().ItemSpacing.Y;
+        int rows = _modelGizmoTool == ModelGizmoTool.Cut ? 10 : 5;
+        return new NVector2(112f, rowHeight * rows + spacingY * (rows - 1) + 10f);
+    }
+
+    private bool HandleModelViewportToolOverlayInput(NVector2 viewportMin, NVector2 viewportMax)
+    {
+        NVector2 point = ImGui.GetMousePos();
+        NVector2 position = ModelViewportToolOverlayPosition(viewportMin, viewportMax);
+        NVector2 size = ModelViewportToolOverlaySize();
+        bool inside = point.X >= position.X && point.X <= position.X + size.X &&
+            point.Y >= position.Y && point.Y <= position.Y + size.Y;
+        if (!inside) return false;
+
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            float localY = point.Y - position.Y - 5f;
+            float rowStride = Math.Max(20f, ImGui.GetFrameHeight()) + ImGui.GetStyle().ItemSpacing.Y;
+            int row = (int)MathF.Floor(localY / Math.Max(1f, rowStride));
+            if (row >= 0 && row < 5)
+            {
+                if (_modelGizmoDragging) ModelEndGizmoDrag(commit: true);
+                _modelGizmoTool = row switch
+                {
+                    0 => ModelGizmoTool.None,
+                    1 => ModelGizmoTool.Move,
+                    2 => ModelGizmoTool.Resize,
+                    3 => ModelGizmoTool.Rotate,
+                    _ => ModelGizmoTool.Cut
+                };
+            }
+            else if (_modelGizmoTool == ModelGizmoTool.Cut && row >= 6 && row < 10)
+            {
+                _modelCutOrientation = row switch
+                {
+                    7 => ModelCutOrientation.X,
+                    8 => ModelCutOrientation.Y,
+                    9 => ModelCutOrientation.Z,
+                    _ => ModelCutOrientation.Auto
+                };
+            }
+        }
+
+        return true;
+    }
+
+    private bool DrawModelViewportToolOverlay(NVector2 viewportMin, NVector2 viewportMax)
+    {
+        NVector2 position = ModelViewportToolOverlayPosition(viewportMin, viewportMax);
+        NVector2 size = ModelViewportToolOverlaySize();
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        uint fill = ImGui.ColorConvertFloat4ToU32(new NVector4(0.06f, 0.055f, 0.05f, 0.84f));
+        uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 0.92f));
+        drawList.AddRectFilled(position - new NVector2(6f, 5f), position + size, fill, 4f);
+        drawList.AddRect(position - new NVector2(6f, 5f), position + size, border, 4f);
+
+        ImGui.SetCursorScreenPos(position);
+        ImGui.PushID("model-viewport-tools");
+        bool hoveredOrActive = false;
+        try
+        {
+            float rowStride = Math.Max(20f, ImGui.GetFrameHeight()) + ImGui.GetStyle().ItemSpacing.Y;
+            DrawModelViewportToolRadio(position, rowStride, 0, "Select", ModelGizmoTool.None, "Select elements in the viewport (Ctrl+Shift+1).", ref hoveredOrActive);
+            DrawModelViewportToolRadio(position, rowStride, 1, "Move", ModelGizmoTool.Move, "Drag the axis arrows to translate the selection (Ctrl+Shift+2).", ref hoveredOrActive);
+            DrawModelViewportToolRadio(position, rowStride, 2, "Resize", ModelGizmoTool.Resize, "Drag face or corner handles to resize/deform the selection (Ctrl+Shift+3).", ref hoveredOrActive);
+            DrawModelViewportToolRadio(position, rowStride, 3, "Rotate", ModelGizmoTool.Rotate, "Drag the rings to rotate around the rotation origin (Ctrl+Shift+4).", ref hoveredOrActive);
+            DrawModelViewportToolRadio(position, rowStride, 4, "Cut", ModelGizmoTool.Cut, "Hover a cuboid to preview a cut line, then click to split it (Ctrl+Shift+5).", ref hoveredOrActive);
+            if (_modelGizmoTool == ModelGizmoTool.Cut)
+            {
+                ImGui.SetCursorScreenPos(position + new NVector2(0f, 5f * rowStride));
+                ImGui.TextDisabled("Cut axis");
+                hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+                DrawModelCutOrientationRadio(position, rowStride, 6, "Auto", ModelCutOrientation.Auto, "Pick the best cut axis from the hovered face.", ref hoveredOrActive);
+                DrawModelCutOrientationRadio(position, rowStride, 7, "X", ModelCutOrientation.X, "Cut along the element's local X axis.", ref hoveredOrActive);
+                DrawModelCutOrientationRadio(position, rowStride, 8, "Y", ModelCutOrientation.Y, "Cut along the element's local Y axis.", ref hoveredOrActive);
+                DrawModelCutOrientationRadio(position, rowStride, 9, "Z", ModelCutOrientation.Z, "Cut along the element's local Z axis.", ref hoveredOrActive);
+            }
+        }
+        finally
+        {
+            ImGui.PopID();
+        }
+
+        return hoveredOrActive;
+    }
+
+    private void DrawModelViewportToolRadio(NVector2 position, float rowStride, int row, string label, ModelGizmoTool tool, string tooltip, ref bool hoveredOrActive)
+    {
+        ImGui.SetCursorScreenPos(position + new NVector2(0f, row * rowStride));
+        if (ImGui.RadioButton($"{label}##{label}", _modelGizmoTool == tool))
+        {
+            if (_modelGizmoDragging) ModelEndGizmoDrag(commit: true);
+            _modelGizmoTool = tool;
+        }
+
+        hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(tooltip);
+        }
+    }
+
+    private void DrawModelCutOrientationRadio(NVector2 position, float rowStride, int row, string label, ModelCutOrientation orientation, string tooltip, ref bool hoveredOrActive)
+    {
+        ImGui.SetCursorScreenPos(position + new NVector2(0f, row * rowStride));
+        if (ImGui.RadioButton($"{label}##cut-orientation-{label}", _modelCutOrientation == orientation))
+        {
+            _modelCutOrientation = orientation;
+        }
+
+        hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(tooltip);
+        }
     }
 
     private DevToolsPreviewCamera BuildModelViewportCamera(NVector2 min, NVector2 max)
@@ -268,6 +574,8 @@ public sealed partial class DebugWindowManager
     {
         _modelPreviewMesh?.Dispose();
         _modelPreviewMesh = null;
+        _modelReferenceMesh?.Dispose();
+        _modelReferenceMesh = null;
         _modelPreviewRenderer?.Dispose();
         _modelPreviewRenderer = null;
     }
@@ -285,38 +593,7 @@ public sealed partial class DebugWindowManager
         try
         {
             string json = ModelSerializeDocument(_modelDoc, includeInvisible: false, indented: false);
-            Shape? shape = JsonUtil.ToObject<Shape>(json, _modelDoc.Domain);
-            if (shape?.Elements == null || shape.Elements.Length == 0)
-            {
-                _modelPreviewSkipReason = "No visible elements.";
-                return;
-            }
-
-            try
-            {
-                shape.ResolveReferences(_api.Logger, "ingamedevtools-model-editor");
-            }
-            catch (Exception exception)
-            {
-                LoggerUtil.Verbose(_api, this, $"Model preview reference resolve failed: {exception.Message}");
-            }
-
-            ShapeTextureSource textureSource = new(_api, shape, "ingamedevtools-model-editor");
-            TesselationMetaData meta = new()
-            {
-                TexSource = textureSource,
-                WithJointIds = false,
-                WithDamageEffect = false,
-                TypeForLogging = "ingamedevtools-model-editor"
-            };
-            _api.Tesselator.TesselateShape(meta, shape, out MeshData mesh);
-            if (mesh == null || mesh.VerticesCount <= 0)
-            {
-                _modelPreviewSkipReason = "Tesselation produced no geometry.";
-                return;
-            }
-
-            _modelPreviewMesh = DevToolsPreviewMeshFactory.FromMesh(_api, _modelDoc.DisplayPath, mesh);
+            _modelPreviewMesh = ModelBuildShapePreviewMesh(json, _modelDoc.Domain, _modelDoc.DisplayPath, out _modelPreviewSkipReason);
             if (_modelCameraFitPending)
             {
                 _modelCameraFitPending = false;
@@ -328,6 +605,295 @@ public sealed partial class DebugWindowManager
             _modelPreviewSkipReason = $"Preview failed: {exception.Message}";
             _modelDiagnostics.Exception("Model preview tesselation failed", exception);
         }
+    }
+
+    private void ModelRebuildReferenceMeshIfNeeded()
+    {
+        if (!_modelReferenceDirty) return;
+
+        _modelReferenceDirty = false;
+        _modelReferenceMesh?.Dispose();
+        _modelReferenceMesh = null;
+        _modelReferenceSkipReason = null;
+
+        if (_modelReferenceEntityType != null)
+        {
+            try
+            {
+                string label = _modelReferenceEntityDisplay ?? $"entity:{_modelReferenceEntityType.Code}";
+                _modelReferenceMesh = ModelBuildEntityReferencePreviewMesh(_modelReferenceEntityType, label, out _modelReferenceSkipReason);
+                if (_modelReferenceMesh == null && string.IsNullOrWhiteSpace(_modelReferenceSkipReason))
+                {
+                    _modelReferenceSkipReason = $"Reference preview failed for {label}.";
+                }
+            }
+            catch (Exception exception)
+            {
+                _modelReferenceSkipReason = $"Reference failed: {exception.Message}";
+                _modelDiagnostics.Exception("Model entity reference tesselation failed", exception);
+            }
+
+            return;
+        }
+
+        if (_modelReferenceEntry == null) return;
+
+        try
+        {
+            string json = _modelReferenceEntry.Asset.ToText();
+            _modelReferenceMesh = ModelBuildShapePreviewMesh(json, _modelReferenceEntry.Domain, $"ref:{_modelReferenceEntry.Display}", out _modelReferenceSkipReason);
+            if (_modelReferenceMesh == null && string.IsNullOrWhiteSpace(_modelReferenceSkipReason))
+            {
+                _modelReferenceSkipReason = $"Reference preview failed for {_modelReferenceEntry.Display}.";
+            }
+        }
+        catch (Exception exception)
+        {
+            _modelReferenceSkipReason = $"Reference failed: {exception.Message}";
+            _modelDiagnostics.Exception("Model reference tesselation failed", exception);
+        }
+    }
+
+    private DevToolsPreviewMesh? ModelBuildShapePreviewMesh(string json, string domain, string label, out string? skipReason)
+    {
+        skipReason = null;
+        Shape? shape = JsonUtil.ToObject<Shape>(json, domain);
+        return ModelBuildShapePreviewMesh(
+            shape,
+            label,
+            _ => null,
+            resolvedShape => new ShapeTextureSource(_api, resolvedShape, label),
+            out skipReason);
+    }
+
+    private DevToolsPreviewMesh? ModelBuildEntityReferencePreviewMesh(EntityProperties entityType, string label, out string? skipReason)
+    {
+        skipReason = null;
+        EntityClientProperties? client = entityType.Client;
+        Shape? sourceShape = client?.LoadedShapeForEntity ?? client?.LoadedShape;
+        Shape? shape = sourceShape?.Clone();
+        if (shape == null)
+        {
+            skipReason = "Player reference has no loaded shape.";
+            return null;
+        }
+
+        CompositeShape? compositeShape = client?.ShapeForEntity ?? client?.Shape;
+        IDictionary<string, CompositeTexture> textures = client?.Textures ?? new Dictionary<string, CompositeTexture>();
+        return ModelBuildShapePreviewMesh(
+            shape,
+            label,
+            _ => compositeShape,
+            resolvedShape => new VanillaEntityTextureSource(_api, resolvedShape, label, textures),
+            out skipReason);
+    }
+
+    private DevToolsPreviewMesh? ModelBuildShapePreviewMesh(
+        Shape? shape,
+        string label,
+        System.Func<Shape, CompositeShape?> compositeShapeSelector,
+        System.Func<Shape, ITexPositionSource> textureSourceFactory,
+        out string? skipReason)
+    {
+        skipReason = null;
+        if (shape?.Elements == null || shape.Elements.Length == 0)
+        {
+            skipReason = "No visible elements.";
+            return null;
+        }
+
+        try
+        {
+            shape.ResolveReferences(_api.Logger, label);
+        }
+        catch (Exception exception)
+        {
+            LoggerUtil.Verbose(_api, this, $"Model preview reference resolve failed for {label}: {exception.Message}");
+        }
+
+        CompositeShape? compositeShape = compositeShapeSelector(shape);
+        ITexPositionSource textureSource = textureSourceFactory(shape);
+        TesselationMetaData meta = new()
+        {
+            TexSource = textureSource,
+            WithJointIds = compositeShape != null,
+            WithDamageEffect = compositeShape != null,
+            TypeForLogging = label,
+            QuantityElements = compositeShape?.QuantityElements,
+            SelectiveElements = compositeShape?.SelectiveElements,
+            IgnoreElements = compositeShape?.IgnoreElements,
+            Rotation = compositeShape == null
+                ? null
+                : new Vec3f(compositeShape.rotateX, compositeShape.rotateY, compositeShape.rotateZ)
+        };
+        _api.Tesselator.TesselateShape(meta, shape, out MeshData mesh);
+        if (mesh == null || mesh.VerticesCount <= 0)
+        {
+            skipReason = "Tesselation produced no geometry.";
+            return null;
+        }
+
+        if (compositeShape != null)
+        {
+            mesh.Translate(compositeShape.offsetX, compositeShape.offsetY, compositeShape.offsetZ);
+        }
+
+        return DevToolsPreviewMeshFactory.FromMesh(_api, label, mesh);
+    }
+
+    private void ModelSetReferenceEntry(ModelShapeAssetEntry? entry)
+    {
+        if (_modelReferenceEntry != null &&
+            entry != null &&
+            string.Equals(_modelReferenceEntry.Display, entry.Display, StringComparison.OrdinalIgnoreCase) &&
+            _modelReferenceEntry.Authored == entry.Authored &&
+            _modelReferenceEntityType == null)
+        {
+            return;
+        }
+
+        _modelReferenceEntry = entry;
+        _modelReferenceEntityType = null;
+        _modelReferenceEntityDisplay = null;
+        _modelReferenceDirty = true;
+        _modelReferenceSkipReason = null;
+        if (entry == null)
+        {
+            _modelReferenceMesh?.Dispose();
+            _modelReferenceMesh = null;
+        }
+    }
+
+    private void ModelSetReferenceEntity(EntityProperties entityType, string display)
+    {
+        if (ReferenceEquals(_modelReferenceEntityType, entityType) &&
+            string.Equals(_modelReferenceEntityDisplay, display, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _modelReferenceEntry = null;
+        _modelReferenceEntityType = entityType;
+        _modelReferenceEntityDisplay = display;
+        _modelReferenceDirty = true;
+        _modelReferenceSkipReason = null;
+    }
+
+    private void ModelSetPlayerReference()
+    {
+        EntityProperties? playerEntityType = _api.World?.Player?.Entity?.Properties;
+        if (ModelCanUseEntityReference(playerEntityType))
+        {
+            ModelSetReferenceEntity(playerEntityType!, "current player");
+            _modelStatus = "Reference set to current player.";
+            return;
+        }
+
+        playerEntityType = ModelFindPlayerEntityReference();
+        if (ModelCanUseEntityReference(playerEntityType))
+        {
+            string code = playerEntityType!.Code?.ToString() ?? "player";
+            ModelSetReferenceEntity(playerEntityType, $"entity:{code}");
+            _modelStatus = $"Reference set to entity:{code}.";
+            return;
+        }
+
+        ModelShapeAssetEntry? player = ModelFindPlayerReferenceEntry();
+        if (player != null)
+        {
+            ModelSetReferenceEntry(player);
+            _modelStatus = $"Reference set to {player.Display}.";
+            return;
+        }
+
+        _modelStatus = "No player-like shape found in loaded assets.";
+    }
+
+    private EntityProperties? ModelFindPlayerEntityReference()
+    {
+        try
+        {
+            IEnumerable<EntityProperties>? entityTypes = _api.World?.EntityTypes;
+            if (entityTypes == null) return null;
+
+            return entityTypes
+                .Where(ModelCanUseEntityReference)
+                .OrderBy(ModelPlayerEntityReferenceScore)
+                .ThenBy(entityType => entityType.Code?.ToString() ?? "", StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(entityType => ModelPlayerEntityReferenceScore(entityType) < int.MaxValue);
+        }
+        catch (Exception exception)
+        {
+            _modelDiagnostics.Exception("Player entity reference lookup failed", exception);
+            return null;
+        }
+    }
+
+    private static bool ModelCanUseEntityReference(EntityProperties? entityType)
+    {
+        Shape? shape = entityType?.Client?.LoadedShapeForEntity ?? entityType?.Client?.LoadedShape;
+        return shape?.Elements != null && shape.Elements.Length > 0;
+    }
+
+    private static int ModelPlayerEntityReferenceScore(EntityProperties entityType)
+    {
+        string code = entityType.Code?.ToString()?.ToLowerInvariant() ?? "";
+        if (code == "game:player") return 0;
+        if (code.EndsWith(":player", StringComparison.Ordinal)) return 1;
+        if (code.Contains("humanoid/player", StringComparison.Ordinal)) return 5;
+        if (code.Contains("player", StringComparison.Ordinal)) return 10;
+        if (code.Contains("seraph", StringComparison.Ordinal)) return 20;
+        if (code.Contains("humanoid", StringComparison.Ordinal)) return 30;
+        return int.MaxValue;
+    }
+
+    private string? ModelReferenceDisplay()
+    {
+        if (_modelReferenceEntityType != null) return _modelReferenceEntityDisplay ?? $"entity:{_modelReferenceEntityType.Code}";
+        return _modelReferenceEntry == null ? null : ModelReferenceLabel(_modelReferenceEntry);
+    }
+
+    private ModelShapeAssetEntry? ModelFindPlayerReferenceEntry()
+    {
+        EnsureModelShapeIndex();
+        List<ModelShapeAssetEntry> index = _modelShapeIndex ?? [];
+        if (index.Count == 0) return null;
+
+        return index
+            .Select(entry => (Entry: entry, Score: ModelPlayerReferenceScore(entry)))
+            .Where(candidate => candidate.Score < int.MaxValue)
+            .OrderBy(candidate => candidate.Score)
+            .ThenBy(candidate => candidate.Entry.AssetPath.Length)
+            .ThenBy(candidate => candidate.Entry.AssetPath, StringComparer.OrdinalIgnoreCase)
+            .Select(candidate => candidate.Entry)
+            .FirstOrDefault();
+    }
+
+    private static int ModelPlayerReferenceScore(ModelShapeAssetEntry entry)
+    {
+        string display = entry.Display.ToLowerInvariant();
+        string path = entry.AssetPath.ToLowerInvariant();
+        int domainBonus = entry.Domain.Equals("game", StringComparison.OrdinalIgnoreCase) ? 0 : 1000;
+
+        if (display == "game:shapes/entity/humanoid/seraph-faceless.json") return domainBonus;
+        if (display == "game:shapes/entity/humanoid/player.json") return domainBonus + 1;
+        if (display == "game:shapes/entity/player.json") return domainBonus + 2;
+        if (display == "game:shapes/entity/humanoid/seraph-hairless.json") return domainBonus + 3;
+        if (display == "game:shapes/entity/humanoid/seraph.json") return domainBonus + 4;
+        if (path.Contains("shapes/entity/humanoid", StringComparison.Ordinal) && path.Contains("player", StringComparison.Ordinal)) return domainBonus + 10;
+        if (path.Contains("shapes/entity/humanoid", StringComparison.Ordinal) && path.Contains("seraph-faceless", StringComparison.Ordinal)) return domainBonus + 11;
+        if (path.Contains("shapes/entity/humanoid", StringComparison.Ordinal) && path.Contains("seraph", StringComparison.Ordinal)) return domainBonus + 12;
+        if (path.Contains("shapes/entity/player", StringComparison.Ordinal)) return domainBonus + 20;
+        if (path.Contains("shapes/entity/humanoid", StringComparison.Ordinal)) return domainBonus + 30;
+        if (path.Contains("player", StringComparison.Ordinal)) return domainBonus + 60;
+        if (path.Contains("seraph", StringComparison.Ordinal)) return domainBonus + 70;
+        if (path.Contains("human", StringComparison.Ordinal)) return domainBonus + 90;
+        return int.MaxValue;
+    }
+
+    private static string ModelReferenceLabel(ModelShapeAssetEntry entry)
+    {
+        return entry.Display + (entry.Authored ? " [authored]" : "");
     }
 
     private void ModelResetCameraToFit()
@@ -342,10 +908,24 @@ public sealed partial class DebugWindowManager
     private void ModelFitCameraToMesh()
     {
         DevToolsPreviewBounds bounds = _modelPreviewMesh?.Bounds ?? DevToolsPreviewBounds.Empty;
-        if (!bounds.IsValid) return;
+        ModelFitCameraToBounds(bounds, 2.6f);
+    }
 
+    private void ModelFitCameraToReference()
+    {
+        ModelFitCameraToBounds(ModelReferenceTransformedBounds(), 2.8f);
+    }
+
+    private void ModelFitCameraToScene()
+    {
+        ModelFitCameraToBounds(ModelViewportSceneBounds(), 2.8f);
+    }
+
+    private void ModelFitCameraToBounds(DevToolsPreviewBounds bounds, float distanceScale)
+    {
+        if (!bounds.IsValid) return;
         _modelViewportTarget = bounds.Center;
-        _modelViewportDistance = Math.Clamp(bounds.Radius * 2.6f, 0.4f, 70f);
+        _modelViewportDistance = Math.Clamp(bounds.Radius * distanceScale, 0.4f, 70f);
     }
 
     private void ModelFocusCameraOnSelection()
@@ -438,10 +1018,40 @@ public sealed partial class DebugWindowManager
         return corners;
     }
 
+    private Matrixf ModelReferenceMatrix()
+    {
+        Matrixf matrix = new();
+        matrix.Identity();
+        matrix.Translate(_modelReferenceOffsetX, _modelReferenceOffsetY, _modelReferenceOffsetZ);
+        matrix.Scale(_modelReferenceScale, _modelReferenceScale, _modelReferenceScale);
+        return matrix;
+    }
+
+    private DevToolsPreviewBounds ModelReferenceTransformedBounds()
+    {
+        if (!_modelReferenceVisible || _modelReferenceMesh == null) return DevToolsPreviewBounds.Empty;
+
+        DevToolsPreviewBounds bounds = DevToolsPreviewBounds.Empty;
+        foreach (Vector3 corner in ModelTransformBoundsCorners(ModelReferenceMatrix(), _modelReferenceMesh.Bounds))
+        {
+            bounds = bounds.Include(corner);
+        }
+
+        return bounds;
+    }
+
+    private DevToolsPreviewBounds ModelViewportSceneBounds()
+    {
+        DevToolsPreviewBounds bounds = DevToolsPreviewBounds.Empty;
+        if (_modelPreviewMesh != null) bounds = bounds.Include(_modelPreviewMesh.Bounds);
+        bounds = bounds.Include(ModelReferenceTransformedBounds());
+        return bounds;
+    }
+
     private void DrawModelViewportGrid(ImDrawListPtr drawList, DevToolsPreviewCamera camera, uint minorColor, uint majorColor)
     {
         const int subdivisions = 16;
-        (int minX, int maxX, int minY, int maxY, int minZ, int maxZ) = ModelReferenceBlockRange(_modelPreviewMesh?.Bounds ?? DevToolsPreviewBounds.Empty);
+        (int minX, int maxX, int minY, int maxY, int minZ, int maxZ) = ModelReferenceBlockRange(ModelViewportSceneBounds());
 
         uint referenceColor = ImGui.ColorConvertFloat4ToU32(new NVector4(0.36f, 0.35f, 0.28f, 0.42f));
         uint referenceGround = ImGui.ColorConvertFloat4ToU32(new NVector4(0.48f, 0.45f, 0.34f, 0.55f));
@@ -718,6 +1328,282 @@ public sealed partial class DebugWindowManager
             ModelGizmoTool.Rotate => DrawModelRotateGizmo(drawList, camera, element, hovered),
             _ => false
         };
+    }
+
+    private bool DrawModelCutTool(ImDrawListPtr drawList, DevToolsPreviewCamera camera, bool hovered)
+    {
+        if (!hovered || _modelDoc == null) return false;
+        if (!ModelTryPickCutPreview(camera, ImGui.GetMousePos(), out ModelCutPreview preview)) return false;
+
+        uint plane = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.62f, 0.18f, 0.82f));
+        uint line = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.96f, 0.78f, 1f));
+        for (int index = 0; index < 4; index++)
+        {
+            DrawModelViewportLine(drawList, camera, preview.PlaneCorners[index], preview.PlaneCorners[(index + 1) & 3], plane, 1.8f);
+        }
+        DrawModelViewportLine(drawList, camera, preview.LineStart, preview.LineEnd, line, 3.1f);
+
+        if (camera.Project((preview.LineStart + preview.LineEnd) * 0.5f, out NVector2 labelPosition, out _))
+        {
+            drawList.AddText(labelPosition + new NVector2(8f, -18f), line, $"Cut {ModelAxisName(preview.CutAxis)} {preview.CutCoordinate:0.###}");
+        }
+
+        ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            ModelCutElementAtCoordinate(preview.Element, preview.CutAxis, preview.CutCoordinate);
+        }
+
+        return true;
+    }
+
+    private bool ModelTryPickCutPreview(DevToolsPreviewCamera camera, NVector2 mouse, out ModelCutPreview preview)
+    {
+        preview = default;
+        if (_modelDoc == null) return false;
+
+        Vector3 rayOrigin = camera.Position;
+        if (!ModelViewportMouseRay(camera, mouse, out Vector3 rayDirection)) return false;
+
+        ModelElementData? bestElement = null;
+        double[] bestLocalUnits = [0, 0, 0];
+        int bestFaceAxis = -1;
+        bool bestFacePositive = false;
+        float bestDistance = float.MaxValue;
+        int bestDepth = -1;
+
+        void Visit(ModelElementData element, int depth)
+        {
+            if (!element.Visible) return;
+
+            if (ModelElementHasRenderableBox(element) &&
+                ModelTryRayElementLocalHit(element, rayOrigin, rayDirection, out float distance, out double[] localUnits, out int faceAxis, out bool facePositive))
+            {
+                bool better = distance < bestDistance - 0.001f ||
+                    (Math.Abs(distance - bestDistance) <= 0.001f && depth > bestDepth);
+                if (better)
+                {
+                    bestElement = element;
+                    bestLocalUnits = localUnits;
+                    bestFaceAxis = faceAxis;
+                    bestFacePositive = facePositive;
+                    bestDistance = distance;
+                    bestDepth = depth;
+                }
+            }
+
+            foreach (ModelElementData child in element.Children)
+            {
+                Visit(child, depth + 1);
+            }
+        }
+
+        foreach (ModelElementData root in _modelDoc.Roots)
+        {
+            Visit(root, 0);
+        }
+
+        return bestElement != null &&
+            ModelTryBuildCutPreview(camera, bestElement, bestLocalUnits, bestFaceAxis, bestFacePositive, out preview);
+    }
+
+    private bool ModelTryBuildCutPreview(
+        DevToolsPreviewCamera camera,
+        ModelElementData element,
+        double[] localUnits,
+        int faceAxis,
+        bool facePositive,
+        out ModelCutPreview preview)
+    {
+        preview = default;
+        if (faceAxis < 0 || faceAxis > 2) return false;
+
+        double[] size =
+        [
+            Math.Max(0.0, element.SizeX),
+            Math.Max(0.0, element.SizeY),
+            Math.Max(0.0, element.SizeZ)
+        ];
+        int[] candidates = ModelCutCandidateAxes(faceAxis);
+        if (candidates.Length == 0) return false;
+
+        Matrixf matrix = ModelComputeElementMatrix(element);
+        bool alternate = _modelCutOrientation == ModelCutOrientation.Auto && IsDevToolsShiftDown();
+        bool found = false;
+        float bestScore = float.MinValue;
+        ModelCutPreview best = default;
+
+        foreach (int cutAxis in candidates)
+        {
+            double cutLocal = Math.Clamp(localUnits[cutAxis], 0.0, size[cutAxis]);
+            double cutCoordinate = Math.Round(element.From[cutAxis] + cutLocal, 6);
+            if (!ModelIsCutCoordinateInside(element, cutAxis, cutCoordinate)) continue;
+
+            int lineAxis = 3 - faceAxis - cutAxis;
+            Vector3[] planeCorners = ModelCutPlaneWorldCorners(matrix, size, cutAxis, cutLocal);
+            double[] lineStartUnits = [0, 0, 0];
+            double[] lineEndUnits = [0, 0, 0];
+            lineStartUnits[faceAxis] = facePositive ? size[faceAxis] : 0.0;
+            lineEndUnits[faceAxis] = lineStartUnits[faceAxis];
+            lineStartUnits[cutAxis] = cutLocal;
+            lineEndUnits[cutAxis] = cutLocal;
+            lineStartUnits[lineAxis] = 0.0;
+            lineEndUnits[lineAxis] = size[lineAxis];
+            Vector3 lineStart = ModelLocalUnitsPoint(matrix, lineStartUnits);
+            Vector3 lineEnd = ModelLocalUnitsPoint(matrix, lineEndUnits);
+
+            float score = (lineEnd - lineStart).LengthSquared;
+            if (camera.Project(lineStart, out NVector2 screenA, out _) && camera.Project(lineEnd, out NVector2 screenB, out _))
+            {
+                score = (screenB - screenA).LengthSquared();
+            }
+            if (alternate) score = -score;
+
+            if (!found || score > bestScore)
+            {
+                bestScore = score;
+                best = new ModelCutPreview(element, faceAxis, facePositive, cutAxis, cutCoordinate, planeCorners, lineStart, lineEnd);
+                found = true;
+            }
+        }
+
+        preview = best;
+        return found;
+    }
+
+    private int[] ModelCutCandidateAxes(int faceAxis)
+    {
+        if (_modelCutOrientation == ModelCutOrientation.Auto)
+        {
+            return faceAxis switch
+            {
+                0 => [1, 2],
+                1 => [0, 2],
+                2 => [0, 1],
+                _ => []
+            };
+        }
+
+        int axis = ModelCutOrientationAxis(_modelCutOrientation);
+        return axis >= 0 && axis != faceAxis ? [axis] : [];
+    }
+
+    private static int ModelCutOrientationAxis(ModelCutOrientation orientation)
+    {
+        return orientation switch
+        {
+            ModelCutOrientation.X => 0,
+            ModelCutOrientation.Y => 1,
+            ModelCutOrientation.Z => 2,
+            _ => -1
+        };
+    }
+
+    private static bool ModelViewportMouseRay(DevToolsPreviewCamera camera, NVector2 mouse, out Vector3 rayDirection)
+    {
+        NVector2 offset = mouse - camera.Center;
+        rayDirection = camera.Forward
+            + camera.Right * (offset.X / camera.FocalLength)
+            - camera.Up * (offset.Y / camera.FocalLength);
+        if (rayDirection.LengthSquared < 0.000001f) return false;
+
+        rayDirection = Vector3.Normalize(rayDirection);
+        return true;
+    }
+
+    private static bool ModelTryRayElementLocalHit(
+        ModelElementData element,
+        Vector3 rayOrigin,
+        Vector3 rayDirection,
+        out float distance,
+        out double[] localUnits,
+        out int faceAxis,
+        out bool facePositive)
+    {
+        distance = float.MaxValue;
+        localUnits = [0, 0, 0];
+        faceAxis = -1;
+        facePositive = false;
+
+        Matrixf matrix = ModelComputeElementMatrix(element);
+        Vector3[] corners = ModelTransformBoxCorners(matrix, element);
+        if (!ModelRayIntersectsBox(rayOrigin, rayDirection, corners, out distance)) return false;
+
+        Vector3 hitWorld = rayOrigin + rayDirection * distance;
+        try
+        {
+            Matrixd inverse = ModelMatrixd(matrix).Clone().Invert();
+            Vec4d local = inverse.TransformVector(new Vec4d(hitWorld.X, hitWorld.Y, hitWorld.Z, 1.0));
+            localUnits = [local.X * ModelUnitsPerBlock, local.Y * ModelUnitsPerBlock, local.Z * ModelUnitsPerBlock];
+        }
+        catch
+        {
+            return false;
+        }
+
+        double[] size = [element.SizeX, element.SizeY, element.SizeZ];
+        double best = double.MaxValue;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            double toMin = Math.Abs(localUnits[axis]);
+            if (toMin < best)
+            {
+                best = toMin;
+                faceAxis = axis;
+                facePositive = false;
+            }
+
+            double toMax = Math.Abs(size[axis] - localUnits[axis]);
+            if (toMax < best)
+            {
+                best = toMax;
+                faceAxis = axis;
+                facePositive = true;
+            }
+
+            localUnits[axis] = Math.Clamp(localUnits[axis], 0.0, Math.Max(0.0, size[axis]));
+        }
+
+        return faceAxis >= 0;
+    }
+
+    private static Vector3[] ModelCutPlaneWorldCorners(Matrixf matrix, double[] size, int cutAxis, double cutLocal)
+    {
+        int axisA = cutAxis == 0 ? 1 : 0;
+        int axisB = cutAxis == 2 ? 1 : 2;
+        if (axisA == cutAxis) axisA = 2;
+        if (axisB == cutAxis || axisB == axisA) axisB = Enumerable.Range(0, 3).First(axis => axis != cutAxis && axis != axisA);
+
+        double[][] points =
+        [
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0]
+        ];
+        foreach (double[] point in points)
+        {
+            point[cutAxis] = cutLocal;
+        }
+
+        points[0][axisA] = 0.0;
+        points[0][axisB] = 0.0;
+        points[1][axisA] = size[axisA];
+        points[1][axisB] = 0.0;
+        points[2][axisA] = size[axisA];
+        points[2][axisB] = size[axisB];
+        points[3][axisA] = 0.0;
+        points[3][axisB] = size[axisB];
+
+        return points.Select(point => ModelLocalUnitsPoint(matrix, point)).ToArray();
+    }
+
+    private static Vector3 ModelLocalUnitsPoint(Matrixf matrix, double[] localUnits)
+    {
+        return ModelTransformPoint(matrix, new Vector3(
+            (float)(localUnits[0] / ModelUnitsPerBlock),
+            (float)(localUnits[1] / ModelUnitsPerBlock),
+            (float)(localUnits[2] / ModelUnitsPerBlock)));
     }
 
     private List<ModelElementData> ModelGizmoTargets(ModelElementData fallback)

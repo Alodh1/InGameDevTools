@@ -720,12 +720,13 @@ public sealed partial class DebugWindowManager
                 taskSpecificDrawn++;
             }
         }
-        if (taskSpecificDrawn == 0)
+        int discoveredDrawn = DrawAiBehaviorDiscoveredParameterSection(task);
+        if (taskSpecificDrawn == 0 && discoveredDrawn == 0)
         {
             ImGui.TextWrapped("No schema-backed task-specific parameters are set on this task yet.");
         }
 
-        if (ImGui.CollapsingHeader("Other parameters##entity-ai-other-params"))
+        if (ImGui.CollapsingHeader("Add JSON parameter##entity-ai-other-params"))
         {
             changed |= DrawAiBehaviorOtherParameters(task);
         }
@@ -733,26 +734,45 @@ public sealed partial class DebugWindowManager
         return changed;
     }
 
-    private bool DrawAiBehaviorOtherParameters(JObject task)
+    private int DrawAiBehaviorDiscoveredParameterSection(JObject task)
     {
-        bool changed = false;
-        List<JProperty> otherProperties = task.Properties()
+        List<JProperty> discoveredProperties = task.Properties()
             .Where(property => !AiBehaviorFirstClassProperties.Contains(property.Name))
+            .OrderBy(property => property.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
+        if (discoveredProperties.Count == 0) return 0;
 
-        if (otherProperties.Count == 0)
+        ImGui.SeparatorText($"Discovered typed parameters ({discoveredProperties.Count})");
+        bool changed = false;
+        foreach (JProperty property in discoveredProperties)
         {
-            ImGui.TextDisabled("No unhandled parameters on this task.");
-        }
-
-        foreach (JProperty property in otherProperties)
-        {
-            ImGui.PushID($"entity-ai-other-{property.Name}");
-            changed |= DrawAiBehaviorGenericJsonProperty(task, property);
+            ImGui.PushID($"entity-ai-discovered-{property.Name}");
+            changed |= DrawAiBehaviorDiscoveredParameter(task, property);
             ImGui.PopID();
         }
 
-        ImGui.SeparatorText("Add parameter");
+        if (changed)
+        {
+            return discoveredProperties.Count;
+        }
+
+        return discoveredProperties.Count;
+    }
+
+    private bool DrawAiBehaviorDiscoveredParameter(JObject task, JProperty property)
+    {
+        if (property.Value is JArray array)
+        {
+            return DrawAiBehaviorArrayParameter(task, property.Name, array);
+        }
+
+        return DrawAiBehaviorGenericJsonProperty(task, property);
+    }
+
+    private bool DrawAiBehaviorOtherParameters(JObject task)
+    {
+        bool changed = false;
+        ImGui.TextDisabled("Existing custom parameters are edited in the discovered typed parameter section above.");
         ImGui.InputTextWithHint("##entity-ai-other-name", "parameter name", ref _aiBehaviorNewOtherParameterName, 128);
         ImGui.InputTextMultiline("##entity-ai-other-json", ref _aiBehaviorNewOtherParameterJson, 64 * 1024, new NVector2(-float.Epsilon, 82f), ImGuiInputTextFlags.AllowTabInput);
         if (ImGui.Button("Add parameter##entity-ai-other-add"))
@@ -784,6 +804,153 @@ public sealed partial class DebugWindowManager
         }
 
         return changed;
+    }
+
+    private bool DrawAiBehaviorArrayParameter(JObject task, string propertyName, JArray array)
+    {
+        bool changed = false;
+        if (array.Count == 2 && TryReadAiBehaviorFloat(array[0], out float minValue) && TryReadAiBehaviorFloat(array[1], out float maxValue))
+        {
+            ImGui.TextUnformatted(propertyName);
+            ImGui.SameLine();
+            float lower = Math.Min(minValue, maxValue);
+            float upper = Math.Max(minValue, maxValue);
+            float span = Math.Max(1f, upper - lower);
+            ImGui.SetNextItemWidth(Math.Max(90f, (ImGui.GetContentRegionAvail().X - 110f) * 0.5f));
+            bool minChanged = ImGui.DragFloat($"Min##range-min-{propertyName}", ref minValue, span / 500f, lower - span, upper + span, "%.3f");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(Math.Max(90f, (ImGui.GetContentRegionAvail().X - 76f) * 0.5f));
+            bool maxChanged = ImGui.DragFloat($"Max##range-max-{propertyName}", ref maxValue, span / 500f, lower - span, upper + span, "%.3f");
+            if (minChanged || maxChanged)
+            {
+                array[0] = minValue;
+                array[1] = maxValue;
+                changed = true;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{propertyName}"))
+            {
+                task.Remove(propertyName);
+                return true;
+            }
+            return changed;
+        }
+
+        if (!ImGui.TreeNodeEx($"{propertyName} array ({array.Count})##array-{propertyName}", ImGuiTreeNodeFlags.DefaultOpen)) return false;
+
+        int removeIndex = -1;
+        for (int index = 0; index < array.Count; index++)
+        {
+            JToken item = array[index];
+            ImGui.PushID($"entity-ai-array-{propertyName}-{index}");
+            ImGui.TextUnformatted($"[{index}]");
+            ImGui.SameLine();
+            changed |= DrawAiBehaviorArrayItem(item, replacement => array[index] = replacement, () => removeIndex = index);
+            ImGui.PopID();
+        }
+
+        if (removeIndex >= 0)
+        {
+            array.RemoveAt(removeIndex);
+            changed = true;
+        }
+
+        if (ImGui.Button($"Add value##add-{propertyName}"))
+        {
+            array.Add(CreateAiBehaviorArrayDefault(array));
+            changed = true;
+        }
+        ImGui.SameLine();
+        if (ImGui.Button($"Remove parameter##remove-array-{propertyName}"))
+        {
+            task.Remove(propertyName);
+            changed = true;
+        }
+
+        ImGui.TreePop();
+        return changed;
+    }
+
+    private bool DrawAiBehaviorArrayItem(JToken item, Action<JToken> replace, Action remove)
+    {
+        switch (item.Type)
+        {
+            case JTokenType.Boolean:
+            {
+                bool boolValue = item.Value<bool>();
+                if (ImGui.Checkbox("##array-bool", ref boolValue))
+                {
+                    replace(boolValue);
+                    return true;
+                }
+                break;
+            }
+            case JTokenType.Integer:
+            {
+                int intValue = item.Value<int>();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputInt("##array-int", ref intValue))
+                {
+                    replace(intValue);
+                    return true;
+                }
+                break;
+            }
+            case JTokenType.Float:
+            {
+                float floatValue = item.Value<float>();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputFloat("##array-float", ref floatValue, 0, 0, "%.4f"))
+                {
+                    replace(floatValue);
+                    return true;
+                }
+                break;
+            }
+            default:
+            {
+                string stringValue = item.Type == JTokenType.Null ? "" : item.ToString();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputText("##array-string", ref stringValue, 2048))
+                {
+                    replace(stringValue);
+                    return true;
+                }
+                break;
+            }
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Remove##array-item-remove"))
+        {
+            remove();
+            return true;
+        }
+
+        return false;
+    }
+
+    private static JToken CreateAiBehaviorArrayDefault(JArray array)
+    {
+        JToken? first = array.FirstOrDefault(token => token.Type != JTokenType.Null);
+        return first?.Type switch
+        {
+            JTokenType.Boolean => false,
+            JTokenType.Integer => 0,
+            JTokenType.Float => 0f,
+            JTokenType.Object => new JObject(),
+            JTokenType.Array => new JArray(),
+            _ => ""
+        };
+    }
+
+    private static bool TryReadAiBehaviorFloat(JToken? token, out float value)
+    {
+        value = 0f;
+        if (token == null) return false;
+        if (token.Type is not (JTokenType.Integer or JTokenType.Float)) return false;
+        value = token.Value<float>();
+        return true;
     }
 
     private bool DrawAiBehaviorGenericJsonProperty(JObject task, JProperty property)

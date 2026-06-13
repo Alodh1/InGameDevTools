@@ -105,6 +105,12 @@ public sealed partial class DebugWindowManager
         ManualOverride
     }
 
+    private enum VanillaIkSolverKind
+    {
+        Ccd,
+        Fabrik
+    }
+
     private enum VanillaIkEffectorMode
     {
         DistalEndpoint,
@@ -118,7 +124,7 @@ public sealed partial class DebugWindowManager
     }
 
     private readonly record struct VanillaSymmetryPairCandidate(string ElementName, VanillaSymmetrySide SourceSide);
-    private readonly record struct VanillaSymmetryResult(bool Applied, int Written, int CreatedKeyFrames, int OverwrittenElements, string Message);
+    private readonly record struct VanillaSymmetryResult(bool Applied, int Written, int CreatedKeyFrames, int OverwrittenElements, string Message, IReadOnlyList<string>? WrittenElements = null);
     private readonly record struct VanillaIkManualChain(IReadOnlyList<string> ElementNames, string EndElementName, string DisplayName);
     private readonly record struct VanillaIkChainNode(string ElementName, string ParentElementName, int Depth);
     private readonly record struct VanillaIkPoseInfo(ElementPose Pose, Vec3d Origin, RigIkMatrix3 WorldRotation, RigIkMatrix3 ParentWorldRotation, Vec3d BaseRotationDegrees);
@@ -136,6 +142,12 @@ public sealed partial class DebugWindowManager
     {
         Grouped,
         Exact
+    }
+
+    private enum VanillaAnimationSourceMode
+    {
+        Entities,
+        Blocks
     }
 
     private sealed record VanillaEntityOption(
@@ -197,6 +209,25 @@ public sealed partial class DebugWindowManager
         public string Domain => ConfigLocation.Domain;
         public string FullCode => Code.Contains(':', StringComparison.Ordinal) ? Code : $"{Domain}:{Code}";
         public bool UsesOwnAnimations => AnimationMode == VanillaPlayerModelAnimationMode.OwnShape;
+    }
+
+    private sealed record VanillaBlockOption(
+        Block Block,
+        string Label,
+        string FullLabel,
+        string Domain,
+        string SearchText,
+        VanillaBlockSourceInfo? Source)
+    {
+        public string Code => Block.Code?.ToString() ?? FullLabel;
+    }
+
+    private sealed record VanillaBlockSourceInfo(
+        AssetLocation Location,
+        string AssetPath,
+        JObject? SourceJson)
+    {
+        public string Key => $"{Location.Domain}:{AssetPath}";
     }
 
     private sealed record VanillaGroupTargets(IReadOnlyList<EntityProperties> Targets, int Skipped);

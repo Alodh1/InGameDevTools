@@ -43,6 +43,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _transformGizmoRenderer = new TransformGizmoRenderer(api, this);
         _imguiAnimationViewportRenderer = new ImGuiAnimationViewportRenderer(api);
         _detachedEditorCamera = new DetachedEditorCamera(api);
+        _inputSuppressionTickListener = api.Event.RegisterGameTickListener(_ => SuppressGameControlsIfExpandedEditorOpen(), 20, 20);
         _instance = this;
 
         _colliders.Clear();
@@ -58,10 +59,17 @@ public sealed partial class DebugWindowManager : IDisposable
     public void Dispose()
     {
         ClearLiveApplyState();
+        RestoreExpandedEditorInputSuppression();
         RestoreWorldgenPreviewForEditorTeardown("devtools disposed");
         DisposeWorldgenPreviewRasterTexture();
         ModelDisposePreviewResources();
         FlushDevToolsConfigSave(force: true);
+        if (_inputSuppressionTickListener != -1)
+        {
+            _api.Event.UnregisterGameTickListener(_inputSuppressionTickListener);
+            _inputSuppressionTickListener = -1;
+        }
+
         if (!_drawSubscribed || _imguiModSystem == null) return;
 
         _imguiModSystem.Draw -= DrawEditor;
@@ -205,7 +213,17 @@ public sealed partial class DebugWindowManager : IDisposable
         if (collectible.Attributes?.Token is not JObject source) return;
 
         JObject attributes = (JObject)source.DeepClone();
-        attributes[attributeCode] = TransformToToken(transform);
+        if (IsFirepitTransformAttribute(attributeCode))
+        {
+            // The firepit renderer only reads inFirePitProps.transform.
+            JObject firePitProps = attributes["inFirePitProps"] as JObject ?? new JObject();
+            firePitProps["transform"] = TransformToToken(transform);
+            attributes["inFirePitProps"] = firePitProps;
+        }
+        else
+        {
+            attributes[attributeCode] = TransformToToken(transform);
+        }
         collectible.Attributes = new JsonObject(attributes);
     }
 
@@ -678,12 +696,43 @@ public sealed partial class DebugWindowManager : IDisposable
     internal static DebugWindowManager _instance = null!;
     private readonly ImGuiModSystem? _imguiModSystem;
     private bool _drawSubscribed;
+    private long _inputSuppressionTickListener = -1;
     private SourceAssetIndex? _sourceAssetIndex;
     private bool _fovReflectionWarningLogged;
     private bool _showEditorDiagnostics;
     private readonly DevToolsEditorDiagnostics _devToolsDiagnostics = new("Dev tools");
     private readonly DevToolsEditorDiagnostics _animationDiagnostics = new("Animations");
     private readonly DevToolsEditorDiagnostics _transformDiagnostics = new("Transforms");
+    private bool _devToolsInputSuppressionActive;
+    private bool _devToolsPreviousAllowCameraControl;
+    private bool _devToolsRawKeyboardInitialized;
+    private readonly HashSet<GlKeys> _devToolsRawKeysDownPrevious = [];
+    private readonly HashSet<GlKeys> _devToolsRawKeysDownCurrent = [];
+    private readonly HashSet<GlKeys> _devToolsRawKeysPressedThisFrame = [];
+    private static readonly GlKeys[] DevToolsTrackedRawKeys =
+    [
+        GlKeys.ControlLeft,
+        GlKeys.ControlRight,
+        GlKeys.ShiftLeft,
+        GlKeys.ShiftRight,
+        GlKeys.AltLeft,
+        GlKeys.AltRight,
+        GlKeys.C,
+        GlKeys.D,
+        GlKeys.P,
+        GlKeys.V,
+        GlKeys.Y,
+        GlKeys.Z,
+        GlKeys.Number1,
+        GlKeys.Number2,
+        GlKeys.Number3,
+        GlKeys.Number4,
+        GlKeys.Number5,
+        GlKeys.Left,
+        GlKeys.Right,
+        GlKeys.Up,
+        GlKeys.Down
+    ];
 
     private string _animationsFilter = "";
     private string _legacyTransformFilter = "";
@@ -720,6 +769,8 @@ public sealed partial class DebugWindowManager : IDisposable
     private DetachedEditorCamera? _detachedEditorCamera;
     private float _devToolsUiScale = 1f;
     private DevToolsTab _activeDevToolsTab = DevToolsTab.Animations;
+    private readonly ImGuiThreePanelLayoutState _legacyAnimationLayout = new(0.22f, 0.28f);
+    private float _legacyAnimationLayoutBottomFraction = 0.27f;
     private float _imguiViewportYaw;
     private float _imguiViewportZoom = 1f;
     private float _imguiViewportPanX;
@@ -836,8 +887,12 @@ public sealed partial class DebugWindowManager : IDisposable
         if (!_showAnimationEditor)
         {
             OnDebugEditorClosed();
+            RestoreExpandedEditorInputSuppression();
+            ResetDevToolsKeyboardState();
             return CallbackGUIStatus.Closed;
         }
+
+        UpdateDevToolsKeyboardState();
 
         NVector2 displaySize = ImGui.GetIO().DisplaySize;
         if (displaySize.X <= 0 || displaySize.Y <= 0)
@@ -849,6 +904,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGuiWindowFlags windowFlags = ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings;
         if (_devToolsCollapsed)
         {
+            RestoreExpandedEditorInputSuppression();
             ClearAiBehaviorLiveApplyState();
             RestoreWorldgenPreviewForEditorTeardown("devtools collapsed");
             DrawCollapsedDevToolsWindow(displaySize, windowFlags);
@@ -856,6 +912,8 @@ public sealed partial class DebugWindowManager : IDisposable
             FlushDevToolsConfigSave(force: false);
             return _showAnimationEditor ? CallbackGUIStatus.DontGrabMouse : CallbackGUIStatus.Closed;
         }
+
+        SuppressGameControlsForExpandedEditor();
 
         ImGui.SetNextWindowPos(NVector2.Zero, ImGuiCond.Always);
         ImGui.SetNextWindowSize(displaySize, ImGuiCond.Always);
@@ -982,6 +1040,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGui.End();
         if (!_showAnimationEditor)
         {
+            RestoreExpandedEditorInputSuppression();
             RestoreWorldgenPreviewForEditorTeardown("devtools window closed");
         }
 
@@ -991,6 +1050,185 @@ public sealed partial class DebugWindowManager : IDisposable
         FlushDevToolsConfigSave(force: false);
 
         return _showAnimationEditor ? CallbackGUIStatus.GrabMouse : CallbackGUIStatus.Closed;
+    }
+
+    private void UpdateDevToolsKeyboardState()
+    {
+        _devToolsRawKeysDownPrevious.Clear();
+        foreach (GlKeys key in _devToolsRawKeysDownCurrent)
+        {
+            _devToolsRawKeysDownPrevious.Add(key);
+        }
+
+        _devToolsRawKeysDownCurrent.Clear();
+        _devToolsRawKeysPressedThisFrame.Clear();
+
+        foreach (GlKeys key in DevToolsTrackedRawKeys)
+        {
+            if (!IsDevToolsRawKeyDown(key)) continue;
+
+            _devToolsRawKeysDownCurrent.Add(key);
+            if (_devToolsRawKeyboardInitialized && !_devToolsRawKeysDownPrevious.Contains(key))
+            {
+                _devToolsRawKeysPressedThisFrame.Add(key);
+            }
+        }
+
+        _devToolsRawKeyboardInitialized = true;
+    }
+
+    private void ResetDevToolsKeyboardState()
+    {
+        _devToolsRawKeyboardInitialized = false;
+        _devToolsRawKeysDownPrevious.Clear();
+        _devToolsRawKeysDownCurrent.Clear();
+        _devToolsRawKeysPressedThisFrame.Clear();
+    }
+
+    private bool IsDevToolsRawKeyDown(GlKeys key)
+    {
+        bool[] keyboardState = _api.Input.KeyboardKeyStateRaw;
+        int index = (int)key;
+        return index >= 0 && index < keyboardState.Length && keyboardState[index];
+    }
+
+    private bool IsDevToolsCtrlDown()
+    {
+        return ImGui.GetIO().KeyCtrl ||
+            _devToolsRawKeysDownCurrent.Contains(GlKeys.ControlLeft) ||
+            _devToolsRawKeysDownCurrent.Contains(GlKeys.ControlRight);
+    }
+
+    private bool IsDevToolsShiftDown()
+    {
+        return ImGui.GetIO().KeyShift ||
+            _devToolsRawKeysDownCurrent.Contains(GlKeys.ShiftLeft) ||
+            _devToolsRawKeysDownCurrent.Contains(GlKeys.ShiftRight);
+    }
+
+    private bool IsDevToolsAltDown()
+    {
+        return ImGui.GetIO().KeyAlt ||
+            _devToolsRawKeysDownCurrent.Contains(GlKeys.AltLeft) ||
+            _devToolsRawKeysDownCurrent.Contains(GlKeys.AltRight);
+    }
+
+    private bool IsDevToolsShortcutPressed(ImGuiKey imguiKey, GlKeys rawKey)
+    {
+        return ImGui.IsKeyPressed(imguiKey) || _devToolsRawKeysPressedThisFrame.Contains(rawKey);
+    }
+
+    private bool IsDevToolsShortcutPressed(ImGuiKey imguiKey, GlKeys rawKey, bool repeat)
+    {
+        return ImGui.IsKeyPressed(imguiKey, repeat) || _devToolsRawKeysPressedThisFrame.Contains(rawKey);
+    }
+
+    private void SuppressGameControlsForExpandedEditor()
+    {
+        if (_api.World is ClientMain client)
+        {
+            if (!_devToolsInputSuppressionActive)
+            {
+                _devToolsPreviousAllowCameraControl = client.AllowCameraControl;
+                _devToolsInputSuppressionActive = true;
+            }
+
+            client.AllowCameraControl = false;
+            client.MouseDeltaX = 0;
+            client.MouseDeltaY = 0;
+            client.DelayedMouseDeltaX = 0;
+            client.DelayedMouseDeltaY = 0;
+        }
+
+        EntityPlayer? player = _api.World?.Player?.Entity;
+        if (player == null) return;
+
+        ClearGameControls(player.Controls);
+        ClearGameControls(player.ServerControls);
+    }
+
+    private void SuppressGameControlsIfExpandedEditorOpen()
+    {
+        if (_showAnimationEditor && !_devToolsCollapsed)
+        {
+            SuppressGameControlsForExpandedEditor();
+        }
+        else
+        {
+            RestoreExpandedEditorInputSuppression();
+        }
+    }
+
+    private void RestoreExpandedEditorInputSuppression()
+    {
+        if (!_devToolsInputSuppressionActive) return;
+
+        if (_api.World is ClientMain client)
+        {
+            client.AllowCameraControl = _devToolsPreviousAllowCameraControl;
+        }
+
+        _devToolsInputSuppressionActive = false;
+    }
+
+    private static void ClearGameControls(EntityControls? controls)
+    {
+        if (controls == null) return;
+
+        controls.Forward = false;
+        controls.Backward = false;
+        controls.Left = false;
+        controls.Right = false;
+        controls.Jump = false;
+        controls.Sneak = false;
+        controls.Sprint = false;
+        controls.Up = false;
+        controls.Down = false;
+        controls.WalkVector.Set(0, 0, 0);
+        controls.FlyVector.Set(0, 0, 0);
+
+        ClearOptionalControlMembers(controls);
+    }
+
+    private static void ClearOptionalControlMembers(EntityControls controls)
+    {
+        string[] memberNames =
+        [
+            "LeftMouseDown",
+            "RightMouseDown",
+            "LeftMousePressed",
+            "RightMousePressed",
+            "HandUse",
+            "HandUseActive",
+            "HandUseCancel",
+            "HandUseComplete",
+            "CtrlKey",
+            "ShiftKey",
+            "TriesToMove",
+            "FloorSitting",
+            "Gliding",
+            "Flying",
+            "NoClip",
+            "SprintKey",
+            "SneakKey",
+            "JumpKey"
+        ];
+
+        BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.IgnoreCase;
+        Type type = controls.GetType();
+        foreach (string memberName in memberNames)
+        {
+            MemberInfo? member = type.GetMember(memberName, flags).FirstOrDefault();
+            switch (member)
+            {
+                case FieldInfo { FieldType: { } fieldType } field when fieldType == typeof(bool):
+                    field.SetValue(controls, false);
+                    break;
+                case PropertyInfo { CanWrite: true, PropertyType: { } propertyType } property when property.GetIndexParameters().Length == 0 && propertyType == typeof(bool):
+                    property.SetValue(controls, false);
+                    break;
+            }
+        }
     }
 
     private void DrawGuardedEditorTab(string editorName, DevToolsEditorDiagnostics diagnostics, Action draw)
@@ -1192,6 +1430,13 @@ public sealed partial class DebugWindowManager : IDisposable
         ResetWorldgenLayout();
         ResetPatchCreatorLayout();
         ResetAiBehaviorLayout();
+        ResetLegacyAnimationLayout();
+    }
+
+    private void ResetLegacyAnimationLayout()
+    {
+        _legacyAnimationLayout.Reset();
+        _legacyAnimationLayoutBottomFraction = 0.27f;
     }
 
     private void CollidersTab()
@@ -1417,19 +1662,28 @@ public sealed partial class DebugWindowManager : IDisposable
         }
 
         NVector2 available = ImGui.GetContentRegionAvail();
-        float spacingX = ImGui.GetStyle().ItemSpacing.X;
-        float spacingY = ImGui.GetStyle().ItemSpacing.Y;
-        float bottomHeight = Math.Clamp(available.Y * 0.27f, 230f, 360f);
-        float topHeight = Math.Max(360f, available.Y - bottomHeight - spacingY);
-        float leftWidth = Math.Clamp(available.X * 0.22f, 280f, 430f);
-        float rightWidth = Math.Clamp(available.X * 0.28f, 360f, 540f);
-        float centerWidth = available.X - leftWidth - rightWidth - spacingX * 2f;
-        if (centerWidth < 520f)
-        {
-            leftWidth = Math.Clamp(available.X * 0.20f, 240f, 330f);
-            rightWidth = Math.Clamp(available.X * 0.25f, 300f, 420f);
-            centerWidth = Math.Max(360f, available.X - leftWidth - rightWidth - spacingX * 2f);
-        }
+        float splitterThickness = Math.Max(5f, 6f * _devToolsUiScale);
+        float topBottomAvailableHeight = Math.Max(1f, available.Y - splitterThickness);
+        float bottomMin = Math.Min(topBottomAvailableHeight * 0.45f, 150f * _devToolsUiScale);
+        float topMin = Math.Min(topBottomAvailableHeight - bottomMin, 300f * _devToolsUiScale);
+        float bottomMax = Math.Max(bottomMin, topBottomAvailableHeight - topMin);
+        float bottomHeight = Math.Clamp(topBottomAvailableHeight * _legacyAnimationLayoutBottomFraction, bottomMin, bottomMax);
+        float topHeight = Math.Max(topMin, topBottomAvailableHeight - bottomHeight);
+        float minCenterWidth = 320f * _devToolsUiScale;
+        ImGuiLayoutHelper.CalculateThreePanelWidths(
+            available.X,
+            splitterThickness,
+            _legacyAnimationLayout,
+            220f * _devToolsUiScale,
+            620f * _devToolsUiScale,
+            minCenterWidth,
+            260f * _devToolsUiScale,
+            720f * _devToolsUiScale,
+            out float panelAvailableWidth,
+            out float leftWidth,
+            out float centerWidth,
+            out float rightWidth);
+        _legacyAnimationLayoutBottomFraction = Math.Clamp(bottomHeight / topBottomAvailableHeight, 0.05f, 0.9f);
 
         ImGui.BeginChild("##animation-left-panel", new NVector2(leftWidth, topHeight), true);
         ImGui.SeparatorText("Animations");
@@ -1527,7 +1781,9 @@ public sealed partial class DebugWindowManager : IDisposable
         }
         ImGui.EndChild();
 
-        ImGui.SameLine();
+        ImGui.SameLine(0, 0);
+        ImGuiLayoutHelper.DrawVerticalSplitter("##animation-left-splitter", topHeight, splitterThickness, panelAvailableWidth, ref _legacyAnimationLayout.LeftFraction, 220f * _devToolsUiScale, Math.Max(220f * _devToolsUiScale, panelAvailableWidth - rightWidth - minCenterWidth));
+        ImGui.SameLine(0, 0);
 
         string selectedAnimationCode = codes[_selectedAnimationIndex];
         Animation selectedAnimation = AnimationsManager._instance.Animations[selectedAnimationCode];
@@ -1539,7 +1795,9 @@ public sealed partial class DebugWindowManager : IDisposable
         DrawImGuiAnimationViewport(selectedAnimationCode, new NVector2(centerAvailable.X, Math.Max(260f, centerAvailable.Y)));
         ImGui.EndChild();
 
-        ImGui.SameLine();
+        ImGui.SameLine(0, 0);
+        ImGuiLayoutHelper.DrawVerticalSplitter("##animation-right-splitter", topHeight, splitterThickness, panelAvailableWidth, ref _legacyAnimationLayout.RightFraction, 260f * _devToolsUiScale, Math.Max(260f * _devToolsUiScale, panelAvailableWidth - leftWidth - minCenterWidth), invertDrag: true);
+        ImGui.SameLine(0, 0);
 
         ImGui.BeginChild("##animation-right-panel", new NVector2(rightWidth, topHeight), true);
         ImGui.SeparatorText("Tools");
@@ -1572,6 +1830,8 @@ public sealed partial class DebugWindowManager : IDisposable
         DrawRigPoseEditor(selectedAnimationCode, selectedAnimation);
         TrackAnimationEditorChanges(selectedAnimationCode, beforeEdit, beforeEditSerialized, selectedAnimation, "Editor edit");
         ImGui.EndChild();
+
+        ImGuiLayoutHelper.DrawHorizontalSplitter("##animation-timeline-splitter", available.X, splitterThickness, topBottomAvailableHeight, ref _legacyAnimationLayoutBottomFraction, bottomMin, bottomMax);
 
         ImGui.BeginChild("##animation-bottom-panel", new NVector2(available.X, bottomHeight), true);
         selectedAnimation = AnimationsManager._instance.Animations[selectedAnimationCode];
@@ -1727,39 +1987,37 @@ public sealed partial class DebugWindowManager : IDisposable
         }
         if (!_editorPlaybackPlaying) ImGui.EndDisabled();
 
-        ImGui.SameLine();
-        if (ImGui.Button("Step keyframe <##editor-playback"))
+        if (ImGui.Button("Key <##editor-playback"))
         {
             StepEditorKeyframe(animation, -1);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Step keyframe >##editor-playback"))
+        if (ImGui.Button("Key >##editor-playback"))
         {
             StepEditorKeyframe(animation, 1);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Step frame <##editor-playback"))
+        if (ImGui.Button("Frame <##editor-playback"))
         {
             StepEditorFrame(animation, -1);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Step frame >##editor-playback"))
+        if (ImGui.Button("Frame >##editor-playback"))
         {
             StepEditorFrame(animation, 1);
         }
 
         int maxKeyframe = animation.PlayerKeyFrames.Count - 1;
-        ImGui.SetNextItemWidth(180);
+        ImGui.SetNextItemWidth(Math.Min(180f, Math.Max(120f, ImGui.GetContentRegionAvail().X)));
         if (ImGui.SliderInt("Loop start keyframe##editor-playback", ref _editorPlaybackLoopStartKeyframe, 0, maxKeyframe))
         {
             ClampEditorPlaybackRange(animation);
         }
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(180);
+        ImGui.SetNextItemWidth(Math.Min(180f, Math.Max(120f, ImGui.GetContentRegionAvail().X)));
         if (ImGui.SliderInt("Loop end keyframe##editor-playback", ref _editorPlaybackLoopEndKeyframe, 0, maxKeyframe))
         {
             ClampEditorPlaybackRange(animation);
@@ -1786,6 +2044,8 @@ public sealed partial class DebugWindowManager : IDisposable
         NVector2 min = ImGui.GetItemRectMin();
         NVector2 max = ImGui.GetItemRectMax();
         bool hovered = ImGui.IsItemHovered();
+        bool toolOverlayActive = HandleTransformViewportToolOverlayInput(min, max, TransformGizmoContext.RigPart, allowScale: false);
+        if (toolOverlayActive) hovered = false;
 
         if (hovered)
         {
@@ -1817,6 +2077,7 @@ public sealed partial class DebugWindowManager : IDisposable
         drawList.AddRectFilled(min, max, background, 4f);
         drawList.AddRect(min, max, border, 4f);
         drawList.AddText(new NVector2(min.X + 12f, min.Y + 10f), text, $"Preview: {animationCode}");
+        DrawTransformViewportToolOverlay(min, max, $"legacy-animation-{animationCode}", TransformGizmoContext.RigPart, allowScale: false);
 
         _imguiAnimationViewportRenderer?.SetViewport(
             min.X,
@@ -3104,14 +3365,14 @@ public sealed partial class DebugWindowManager : IDisposable
     private void HandleAnimationHistoryShortcuts(string animationCode)
     {
         ImGuiIOPtr io = ImGui.GetIO();
-        if (io.WantTextInput || !io.KeyCtrl) return;
+        if (io.WantTextInput || !IsDevToolsCtrlDown()) return;
 
-        if (ImGui.IsKeyPressed(ImGuiKey.Z))
+        if (IsDevToolsShortcutPressed(ImGuiKey.Z, GlKeys.Z))
         {
             CommitPendingAnimationEdit(animationCode);
             _animationHistory.Undo(animationCode, AnimationsManager._instance.Animations, out _transformSaveStatus);
         }
-        else if (ImGui.IsKeyPressed(ImGuiKey.Y))
+        else if (IsDevToolsShortcutPressed(ImGuiKey.Y, GlKeys.Y))
         {
             CommitPendingAnimationEdit(animationCode);
             _animationHistory.Redo(animationCode, AnimationsManager._instance.Animations, out _transformSaveStatus);
@@ -3525,13 +3786,54 @@ public sealed partial class DebugWindowManager : IDisposable
         _activeGizmoContext = TransformGizmoContext.Free;
     }
 
-    private void DrawTransformGizmoControls(string id, ModelTransform transform, TransformGizmoContext context, Action<ModelTransform>? apply, BlockPos? blockPos = null, Vec3d? worldCenter = null, TransformGizmoAxes? worldAxes = null, TransformGizmoAxes? parentAxes = null, TransformGizmoAxes? translationAxes = null, bool allowMove = true, bool allowScale = true, bool allowRotate = true, Action? dragStarted = null, Action? dragEnded = null, bool registerActive = true)
+    private void DrawTransformGizmoControls(string id, ModelTransform transform, TransformGizmoContext context, Action<ModelTransform>? apply, BlockPos? blockPos = null, Vec3d? worldCenter = null, TransformGizmoAxes? worldAxes = null, TransformGizmoAxes? parentAxes = null, TransformGizmoAxes? translationAxes = null, bool allowMove = true, bool allowScale = true, bool allowRotate = true, bool allowCut = false, Action? dragStarted = null, Action? dragEnded = null, bool drawPicker = true, bool registerActive = true)
     {
-        ImGui.SeparatorText("Gizmo");
+        NormalizeTransformGizmoOptions(context, allowMove, allowScale, allowRotate, allowCut);
+        if (drawPicker)
+        {
+            DrawTransformGizmoPicker(id, context, allowMove, allowScale, allowRotate, allowCut);
+        }
 
+        if (!registerActive) return;
+
+        _activeGizmoTransform = transform;
+        _activeGizmoContext = context;
+        _activeGizmoApply = apply;
+        _activeGizmoDragStarted = dragStarted;
+        _activeGizmoDragEnded = dragEnded;
+        _activeGizmoBlockPos = blockPos;
+        _activeGizmoWorldCenter = worldCenter;
+        _activeGizmoWorldAxes = worldAxes;
+        _activeGizmoParentAxes = parentAxes;
+        _activeGizmoTranslationAxes = translationAxes;
+    }
+
+    private void NormalizeTransformGizmoOptions(TransformGizmoContext context, bool allowMove, bool allowScale, bool allowRotate, bool allowCut = false)
+    {
         if (GizmoMode == TransformGizmoMode.Move && !allowMove) GizmoMode = allowRotate ? TransformGizmoMode.Rotate : TransformGizmoMode.None;
         if (GizmoMode == TransformGizmoMode.Scale && !allowScale) GizmoMode = allowRotate ? TransformGizmoMode.Rotate : TransformGizmoMode.None;
         if (GizmoMode == TransformGizmoMode.Rotate && !allowRotate) GizmoMode = allowMove ? TransformGizmoMode.Move : TransformGizmoMode.None;
+        if (GizmoMode == TransformGizmoMode.Cut && !allowCut) GizmoMode = allowMove ? TransformGizmoMode.Move : allowRotate ? TransformGizmoMode.Rotate : TransformGizmoMode.None;
+
+        if (context != TransformGizmoContext.RigPart && GizmoSpace == TransformGizmoSpace.Parent)
+        {
+            GizmoSpace = TransformGizmoSpace.Local;
+        }
+    }
+
+    private void DrawTransformGizmoPicker(string id, TransformGizmoContext context, bool allowMove = true, bool allowScale = true, bool allowRotate = true, bool allowCut = false, bool compact = false)
+    {
+        NormalizeTransformGizmoOptions(context, allowMove, allowScale, allowRotate, allowCut);
+        if (compact)
+        {
+            ImGui.Separator();
+            ImGui.TextDisabled("Gizmo");
+            ImGui.SameLine();
+        }
+        else
+        {
+            ImGui.SeparatorText("Gizmo");
+        }
 
         if (allowMove)
         {
@@ -3548,12 +3850,12 @@ public sealed partial class DebugWindowManager : IDisposable
             if (ImGui.RadioButton($"Rotate##gizmo-mode-{id}", GizmoMode == TransformGizmoMode.Rotate)) GizmoMode = TransformGizmoMode.Rotate;
             ImGui.SameLine();
         }
-        if (ImGui.RadioButton($"Off##gizmo-mode-{id}", GizmoMode == TransformGizmoMode.None)) GizmoMode = TransformGizmoMode.None;
-
-        if (context != TransformGizmoContext.RigPart && GizmoSpace == TransformGizmoSpace.Parent)
+        if (allowCut)
         {
-            GizmoSpace = TransformGizmoSpace.Local;
+            if (ImGui.RadioButton($"Cut##gizmo-mode-{id}", GizmoMode == TransformGizmoMode.Cut)) GizmoMode = TransformGizmoMode.Cut;
+            ImGui.SameLine();
         }
+        if (ImGui.RadioButton($"Off##gizmo-mode-{id}", GizmoMode == TransformGizmoMode.None)) GizmoMode = TransformGizmoMode.None;
 
         if (ImGui.RadioButton($"World axes##gizmo-space-world-{id}", GizmoSpace == TransformGizmoSpace.World)) GizmoSpace = TransformGizmoSpace.World;
         ImGui.SameLine();
@@ -3573,20 +3875,235 @@ public sealed partial class DebugWindowManager : IDisposable
             TransformGizmoIncrement = Math.Max(0.001f, increment);
         }
 
-        ImGui.TextDisabled("Drag colored axes in-world.");
+        if (!compact)
+        {
+            ImGui.TextDisabled("Drag colored axes in-world.");
+        }
+    }
 
-        if (!registerActive) return;
+    private bool HandleTransformViewportToolOverlayInput(NVector2 viewportMin, NVector2 viewportMax, TransformGizmoContext context, bool allowMove = true, bool allowScale = true, bool allowRotate = true, bool allowCut = false, Action? modeChanged = null)
+    {
+        NormalizeTransformGizmoOptions(context, allowMove, allowScale, allowRotate, allowCut);
+        NVector2 point = ImGui.GetMousePos();
+        NVector2 position = TransformViewportToolOverlayPosition(viewportMin, viewportMax, context, allowCut);
+        NVector2 size = TransformViewportToolOverlaySize(context, allowCut);
+        bool inside = point.X >= position.X && point.X <= position.X + size.X &&
+            point.Y >= position.Y && point.Y <= position.Y + size.Y;
+        if (!inside) return false;
 
-        _activeGizmoTransform = transform;
-        _activeGizmoContext = context;
-        _activeGizmoApply = apply;
-        _activeGizmoDragStarted = dragStarted;
-        _activeGizmoDragEnded = dragEnded;
-        _activeGizmoBlockPos = blockPos;
-        _activeGizmoWorldCenter = worldCenter;
-        _activeGizmoWorldAxes = worldAxes;
-        _activeGizmoParentAxes = parentAxes;
-        _activeGizmoTranslationAxes = translationAxes;
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            float localY = point.Y - position.Y - 5f;
+            float rowStride = TransformViewportToolRowStride();
+            int row = (int)MathF.Floor(localY / Math.Max(1f, rowStride));
+            int modeRows = allowCut ? 5 : 4;
+            if (row >= 0 && row < modeRows)
+            {
+                TransformGizmoMode? requested = row switch
+                {
+                    0 => TransformGizmoMode.None,
+                    1 when allowMove => TransformGizmoMode.Move,
+                    2 when allowScale => TransformGizmoMode.Scale,
+                    3 when allowRotate => TransformGizmoMode.Rotate,
+                    4 when allowCut => TransformGizmoMode.Cut,
+                    _ => null
+                };
+                if (requested.HasValue)
+                {
+                    SetTransformViewportToolMode(requested.Value, modeChanged);
+                }
+            }
+            else if (allowCut && GizmoMode == TransformGizmoMode.Cut)
+            {
+                int orientationRow = row - modeRows - 1;
+                if (orientationRow >= 0 && orientationRow < 4)
+                {
+                    _modelCutOrientation = orientationRow switch
+                    {
+                        1 => ModelCutOrientation.X,
+                        2 => ModelCutOrientation.Y,
+                        3 => ModelCutOrientation.Z,
+                        _ => ModelCutOrientation.Auto
+                    };
+                }
+            }
+            else
+            {
+                int axisRow = row - modeRows - 1;
+                if (axisRow >= 0 && axisRow < 3)
+                {
+                    TransformGizmoSpace requested = axisRow switch
+                    {
+                        1 => TransformGizmoSpace.Local,
+                        2 => TransformGizmoSpace.Parent,
+                        _ => TransformGizmoSpace.World
+                    };
+                    if (requested != TransformGizmoSpace.Parent || context == TransformGizmoContext.RigPart)
+                    {
+                        GizmoSpace = requested;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private bool DrawTransformViewportToolOverlay(NVector2 viewportMin, NVector2 viewportMax, string id, TransformGizmoContext context, bool allowMove = true, bool allowScale = true, bool allowRotate = true, bool allowCut = false, Action? modeChanged = null)
+    {
+        NormalizeTransformGizmoOptions(context, allowMove, allowScale, allowRotate, allowCut);
+        NVector2 position = TransformViewportToolOverlayPosition(viewportMin, viewportMax, context, allowCut);
+        NVector2 size = TransformViewportToolOverlaySize(context, allowCut);
+        NVector2 restoreCursor = ImGui.GetCursorScreenPos();
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        uint fill = ImGui.ColorConvertFloat4ToU32(new NVector4(0.06f, 0.055f, 0.05f, 0.84f));
+        uint border = ImGui.ColorConvertFloat4ToU32(new NVector4(0.55f, 0.49f, 0.38f, 0.92f));
+        drawList.AddRectFilled(position - new NVector2(6f, 5f), position + size, fill, 4f);
+        drawList.AddRect(position - new NVector2(6f, 5f), position + size, border, 4f);
+
+        ImGui.SetCursorScreenPos(position);
+        ImGui.PushID($"transform-viewport-tools-{id}");
+        bool hoveredOrActive = false;
+        try
+        {
+            float rowStride = TransformViewportToolRowStride();
+            int row = 0;
+            DrawTransformViewportToolModeRadio(position, rowStride, row++, "Select", TransformGizmoMode.None, true, "Select without drawing a transform gizmo.", modeChanged, ref hoveredOrActive);
+            DrawTransformViewportToolModeRadio(position, rowStride, row++, "Move", TransformGizmoMode.Move, allowMove, "Drag the colored axes to move the selection.", modeChanged, ref hoveredOrActive);
+            DrawTransformViewportToolModeRadio(position, rowStride, row++, "Resize", TransformGizmoMode.Scale, allowScale, "Drag the colored axes to resize the selection.", modeChanged, ref hoveredOrActive);
+            DrawTransformViewportToolModeRadio(position, rowStride, row++, "Rotate", TransformGizmoMode.Rotate, allowRotate, "Drag the colored rings to rotate the selection.", modeChanged, ref hoveredOrActive);
+            if (allowCut)
+            {
+                DrawTransformViewportToolModeRadio(position, rowStride, row++, "Cut", TransformGizmoMode.Cut, true, "Hover a cuboid to preview a cut line, then click to split it.", modeChanged, ref hoveredOrActive);
+            }
+
+            ImGui.SetCursorScreenPos(position + new NVector2(0f, row++ * rowStride));
+            if (allowCut && GizmoMode == TransformGizmoMode.Cut)
+            {
+                ImGui.TextDisabled("Cut axis");
+                hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+                DrawTransformViewportCutOrientationRadio(position, rowStride, row++, "Auto", ModelCutOrientation.Auto, "Pick the best cut axis from the hovered face.", ref hoveredOrActive);
+                DrawTransformViewportCutOrientationRadio(position, rowStride, row++, "X", ModelCutOrientation.X, "Cut along the element's local X axis.", ref hoveredOrActive);
+                DrawTransformViewportCutOrientationRadio(position, rowStride, row++, "Y", ModelCutOrientation.Y, "Cut along the element's local Y axis.", ref hoveredOrActive);
+                DrawTransformViewportCutOrientationRadio(position, rowStride, row++, "Z", ModelCutOrientation.Z, "Cut along the element's local Z axis.", ref hoveredOrActive);
+            }
+            else
+            {
+                ImGui.TextDisabled("Axes");
+                hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+                DrawTransformViewportSpaceRadio(position, rowStride, row++, "World", TransformGizmoSpace.World, true, "Use world axes.", ref hoveredOrActive);
+                DrawTransformViewportSpaceRadio(position, rowStride, row++, "Local", TransformGizmoSpace.Local, true, "Use selected element axes.", ref hoveredOrActive);
+                DrawTransformViewportSpaceRadio(position, rowStride, row++, "Parent", TransformGizmoSpace.Parent, context == TransformGizmoContext.RigPart, "Use parent axes for rig elements.", ref hoveredOrActive);
+
+                ImGui.SetCursorScreenPos(position + new NVector2(0f, row++ * rowStride));
+                bool snap = IncludeGizmoInIncrement;
+                if (ImGui.Checkbox("Snap##viewport-gizmo-snap", ref snap))
+                {
+                    IncludeGizmoInIncrement = snap;
+                }
+                hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip("Snap viewport drags to the increment value.");
+                }
+
+                ImGui.SetCursorScreenPos(position + new NVector2(0f, row++ * rowStride));
+                float increment = TransformGizmoIncrement;
+                ImGui.SetNextItemWidth(88f);
+                if (ImGui.DragFloat("Step##viewport-gizmo-increment", ref increment, 0.01f, 0.001f, 90f, "%.3g"))
+                {
+                    TransformGizmoIncrement = Math.Max(0.001f, increment);
+                }
+                hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip("Movement/rotation/resize increment for snapped viewport drags.");
+                }
+            }
+        }
+        finally
+        {
+            ImGui.PopID();
+            ImGui.SetCursorScreenPos(restoreCursor);
+        }
+
+        return hoveredOrActive;
+    }
+
+    private NVector2 TransformViewportToolOverlayPosition(NVector2 viewportMin, NVector2 viewportMax, TransformGizmoContext context, bool allowCut)
+    {
+        return new NVector2(viewportMax.X - TransformViewportToolOverlaySize(context, allowCut).X - 12f, viewportMin.Y + 12f);
+    }
+
+    private NVector2 TransformViewportToolOverlaySize(TransformGizmoContext context, bool allowCut)
+    {
+        float rowHeight = Math.Max(20f, ImGui.GetFrameHeight());
+        float spacingY = ImGui.GetStyle().ItemSpacing.Y;
+        int modeRows = allowCut ? 5 : 4;
+        int detailRows = allowCut && GizmoMode == TransformGizmoMode.Cut ? 5 : 6;
+        int rows = modeRows + detailRows;
+        return new NVector2(138f, rowHeight * rows + spacingY * (rows - 1) + 10f);
+    }
+
+    private static float TransformViewportToolRowStride()
+    {
+        return Math.Max(20f, ImGui.GetFrameHeight()) + ImGui.GetStyle().ItemSpacing.Y;
+    }
+
+    private void DrawTransformViewportToolModeRadio(NVector2 position, float rowStride, int row, string label, TransformGizmoMode mode, bool enabled, string tooltip, Action? modeChanged, ref bool hoveredOrActive)
+    {
+        ImGui.SetCursorScreenPos(position + new NVector2(0f, row * rowStride));
+        if (!enabled) ImGui.BeginDisabled();
+        if (ImGui.RadioButton($"{label}##mode-{label}", GizmoMode == mode))
+        {
+            SetTransformViewportToolMode(mode, modeChanged);
+        }
+        if (!enabled) ImGui.EndDisabled();
+
+        hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(enabled ? tooltip : $"{label} is not available in this viewport.");
+        }
+    }
+
+    private void DrawTransformViewportSpaceRadio(NVector2 position, float rowStride, int row, string label, TransformGizmoSpace space, bool enabled, string tooltip, ref bool hoveredOrActive)
+    {
+        ImGui.SetCursorScreenPos(position + new NVector2(0f, row * rowStride));
+        if (!enabled) ImGui.BeginDisabled();
+        if (ImGui.RadioButton($"{label}##space-{label}", GizmoSpace == space))
+        {
+            GizmoSpace = space;
+        }
+        if (!enabled) ImGui.EndDisabled();
+
+        hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(enabled ? tooltip : $"{label} axes are not available in this viewport.");
+        }
+    }
+
+    private void DrawTransformViewportCutOrientationRadio(NVector2 position, float rowStride, int row, string label, ModelCutOrientation orientation, string tooltip, ref bool hoveredOrActive)
+    {
+        ImGui.SetCursorScreenPos(position + new NVector2(0f, row * rowStride));
+        if (ImGui.RadioButton($"{label}##cut-axis-{label}", _modelCutOrientation == orientation))
+        {
+            _modelCutOrientation = orientation;
+        }
+
+        hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(tooltip);
+        }
+    }
+
+    private void SetTransformViewportToolMode(TransformGizmoMode mode, Action? modeChanged)
+    {
+        if (GizmoMode == mode) return;
+        GizmoMode = mode;
+        modeChanged?.Invoke();
     }
 
     private void SetEditorFrameOverride(PlayerItemFrame? frame)

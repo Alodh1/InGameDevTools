@@ -9,7 +9,8 @@ internal enum TransformGizmoMode
     None,
     Move,
     Scale,
-    Rotate
+    Rotate,
+    Cut
 }
 
 internal enum TransformGizmoContext
@@ -127,7 +128,7 @@ internal sealed class TransformGizmoRenderer : IRenderer
         _api.Render.GLEnableDepthTest();
     }
 
-    private bool ShouldDraw => _debugManager.GizmoMode != TransformGizmoMode.None && _debugManager.TryGetActiveTransformGizmo(out _, out _, out _);
+    private bool ShouldDraw => _debugManager.GizmoMode is not TransformGizmoMode.None and not TransformGizmoMode.Cut && _debugManager.TryGetActiveTransformGizmo(out _, out _, out _);
 
     private void OnMouseDown(MouseEvent args)
     {

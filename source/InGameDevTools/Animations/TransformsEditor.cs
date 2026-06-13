@@ -1019,6 +1019,8 @@ public sealed partial class DebugWindowManager
         NVector2 min = ImGui.GetItemRectMin();
         NVector2 max = ImGui.GetItemRectMax();
         bool hovered = ImGui.IsItemHovered();
+        bool toolOverlayActive = HandleTransformViewportToolOverlayInput(min, max, GetGizmoContextForTransformCode(slot.AttributeCode), modeChanged: ClearTransformViewportGizmoDrag);
+        if (toolOverlayActive) hovered = false;
         bool guiPreview = IsGuiTransform(slot.AttributeCode);
 
         if (hovered)
@@ -1098,6 +1100,7 @@ public sealed partial class DebugWindowManager
         {
             drawList.AddText(min + new NVector2(12f, 30f), text, _transformPreviewPlacementStatus);
         }
+        DrawTransformViewportToolOverlay(min, max, $"transform-{asset.Key}-{slot.Key}", GetGizmoContextForTransformCode(slot.AttributeCode), modeChanged: ClearTransformViewportGizmoDrag);
     }
 
     private void SaveTransformViewportScreenshotIfRequested(int textureId, float viewportWidth, float viewportHeight, TransformAssetEntry asset, TransformSlotSelection slot)
@@ -1188,6 +1191,7 @@ public sealed partial class DebugWindowManager
                 {
                     ApplyTransformDraftEdit(asset, slot, value);
                 },
+                drawPicker: false,
                 registerActive: false);
 
             if (ImGui.Button("Reset default##transform-reset"))
@@ -1300,7 +1304,7 @@ public sealed partial class DebugWindowManager
         Block? reference = resolution.Block;
         if (reference == null) return;
 
-        string[] slotLabels = GetTransformPreviewSlotLabels(reference, slot.AttributeCode);
+        string[] slotLabels = GetTransformPreviewSlotLabels(slot.Asset, reference, slot.AttributeCode);
         if (slotLabels.Length <= 1)
         {
             _transformPreviewSlotIndex = 0;
@@ -1315,7 +1319,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private string[] GetTransformPreviewSlotLabels(Block reference, string attributeCode)
+    private string[] GetTransformPreviewSlotLabels(TransformAssetEntry asset, Block reference, string attributeCode)
     {
         string baseAttribute = GetTransformBaseAttributeCode(attributeCode);
         if (baseAttribute.Equals("onDisplayTransform", StringComparison.OrdinalIgnoreCase) ||
@@ -1333,6 +1337,35 @@ public sealed partial class DebugWindowManager
                     })
                     .ToArray();
             }
+
+            if (baseAttribute.Equals("onshelfTransform", StringComparison.OrdinalIgnoreCase))
+            {
+                return BuildIndexedSlotLabels(8, "shelf slot");
+            }
+
+            return BuildIndexedSlotLabels(4, "display case slot");
+        }
+
+        if (baseAttribute.Equals("toolrackTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            return BuildIndexedSlotLabels(4, "tool rack slot");
+        }
+
+        if (baseAttribute.Equals("onmoldrackTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            return BuildIndexedSlotLabels(5, "mold rack slot");
+        }
+
+        if (baseAttribute.Equals("onscrollrackTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            int slotCount = (reference as BlockScrollRack)?.slotsHitBoxes?.Length ?? 0;
+            if (slotCount > 1) return BuildIndexedSlotLabels(slotCount, "scroll rack slot");
+        }
+
+        if (baseAttribute.Contains("groundstorage", StringComparison.OrdinalIgnoreCase))
+        {
+            Vector3[] offsets = GetGroundStorageLayoutOffsets(asset, out string layoutLabel);
+            if (offsets.Length > 1) return BuildIndexedSlotLabels(offsets.Length, $"{layoutLabel} slot");
         }
 
         if (ReferenceInventoryTransformMatches(reference, attributeCode, out string configuredAttribute))
@@ -1347,6 +1380,11 @@ public sealed partial class DebugWindowManager
         }
 
         return [];
+    }
+
+    private static string[] BuildIndexedSlotLabels(int count, string label)
+    {
+        return Enumerable.Range(0, count).Select(index => $"{index}: {label} {index}").ToArray();
     }
 
     private void DrawTransformScopeControls(TransformAssetEntry asset, TransformSlotSelection slot)
@@ -2208,12 +2246,12 @@ public sealed partial class DebugWindowManager
             return firepitPlacement;
         }
 
-        if (TryBuildTrapTransformPlacement(baseAttribute, transform, mesh, out TransformPreviewPlacement trapPlacement))
+        if (TryBuildTrapTransformPlacement(asset, baseAttribute, reference, transform, mesh, out TransformPreviewPlacement trapPlacement))
         {
             return trapPlacement;
         }
 
-        if (TryBuildGroundStorageTransformPlacement(baseAttribute, transform, mesh, out TransformPreviewPlacement groundStoragePlacement))
+        if (TryBuildGroundStorageTransformPlacement(asset, baseAttribute, transform, mesh, out TransformPreviewPlacement groundStoragePlacement))
         {
             return groundStoragePlacement;
         }
@@ -2221,6 +2259,31 @@ public sealed partial class DebugWindowManager
         if (TryBuildForgeTransformPlacement(baseAttribute, reference, transform, mesh, out TransformPreviewPlacement forgePlacement))
         {
             return forgePlacement;
+        }
+
+        if (TryBuildDroppedItemTransformPlacement(baseAttribute, transform, out TransformPreviewPlacement droppedPlacement))
+        {
+            return droppedPlacement;
+        }
+
+        if (TryBuildToolrackTransformPlacement(asset, baseAttribute, reference, transform, mesh, out TransformPreviewPlacement toolrackPlacement))
+        {
+            return toolrackPlacement;
+        }
+
+        if (TryBuildMoldRackTransformPlacement(asset, baseAttribute, reference, transform, mesh, out TransformPreviewPlacement moldRackPlacement))
+        {
+            return moldRackPlacement;
+        }
+
+        if (TryBuildScrollRackTransformPlacement(asset, baseAttribute, reference, transform, mesh, out TransformPreviewPlacement scrollRackPlacement))
+        {
+            return scrollRackPlacement;
+        }
+
+        if (TryBuildAntlerMountTransformPlacement(asset, baseAttribute, transform, mesh, out TransformPreviewPlacement antlerMountPlacement))
+        {
+            return antlerMountPlacement;
         }
 
         if (reference != null && TryBuildVanillaDisplayPlacement(asset, baseAttribute, transform, reference, mesh, out TransformPreviewPlacement displayPlacement))
@@ -2233,6 +2296,16 @@ public sealed partial class DebugWindowManager
             TryBuildInventoryTransformPlacement(reference, configuredAttribute, transform, mesh, out TransformPreviewPlacement inventoryPlacement))
         {
             return inventoryPlacement;
+        }
+
+        if (TryBuildShelfTransformPlacement(asset, baseAttribute, reference, transform, mesh, out TransformPreviewPlacement shelfPlacement))
+        {
+            return shelfPlacement;
+        }
+
+        if (TryBuildDisplayCaseTransformPlacement(asset, baseAttribute, transform, mesh, out TransformPreviewPlacement displayCasePlacement))
+        {
+            return displayCasePlacement;
         }
 
         mesh.ModelTransform(transform);
@@ -2378,7 +2451,7 @@ public sealed partial class DebugWindowManager
         return true;
     }
 
-    private static bool TryBuildTrapTransformPlacement(string baseAttribute, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    private static bool TryBuildTrapTransformPlacement(TransformAssetEntry asset, string baseAttribute, Block? reference, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
     {
         if (!baseAttribute.Contains("trap", StringComparison.OrdinalIgnoreCase))
         {
@@ -2386,16 +2459,24 @@ public sealed partial class DebugWindowManager
             return false;
         }
 
+        // BlockEntityAnimalTrap.genTransformationMatrices: baitTransform * blockRotation * inTrapTransform.
+        ApplyVanillaDisplayMeshTransforms(mesh, asset, transform: null);
+        ModelTransform baitTransform = reference?.Attributes?["baitTransform"].AsObject<ModelTransform>(null!)?.Clone() ?? ModelTransform.NoTransform;
+        baitTransform.EnsureDefaultValues();
         Matrixf matrix = CreateIdentityMatrix();
+        ApplyModelTransformMatrix(matrix, baitTransform);
         matrix.Translate(0.5f, 0f, 0.5f)
-            .RotateY(-90f * GameMath.DEG2RAD)
+            .RotateYDeg(-90f)
             .Translate(-0.5f, 0f, -0.5f);
         ApplyModelTransformMatrix(matrix, transform);
-        placement = new(matrix, new Vector3(0.5f, 0f, 0.5f), true, FormatPlacementStatus(TransformPreviewAccuracy.MetadataApproximation, "animal trap bait renderer", "bait transform state unavailable; using selected inTrapTransform with default trap rotation"));
+        string baitDetail = reference?.Attributes?["baitTransform"].Exists == true
+            ? $"baitTransform from {reference.Code}"
+            : "no reference baitTransform";
+        placement = new(matrix, TransformPlacementPoint(matrix, new Vector3(0.5f, 0f, 0.5f)), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "animal trap bait renderer", $"{baitDetail}, default placement rotation"));
         return true;
     }
 
-    private static bool TryBuildGroundStorageTransformPlacement(string baseAttribute, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    private bool TryBuildGroundStorageTransformPlacement(TransformAssetEntry asset, string baseAttribute, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
     {
         if (!baseAttribute.Contains("groundstorage", StringComparison.OrdinalIgnoreCase))
         {
@@ -2403,13 +2484,246 @@ public sealed partial class DebugWindowManager
             return false;
         }
 
+        // BlockEntityGroundStorage.genTransformationMatrices with MeshAngle 0; the item transform is
+        // baked into the mesh exactly like BlockEntityDisplay.applyDefaultTranforms does.
+        ApplyVanillaDisplayMeshTransforms(mesh, asset, transform);
+        Vector3[] offsets = GetGroundStorageLayoutOffsets(asset, out string layoutLabel);
+        int slotIndex = Math.Clamp(_transformPreviewSlotIndex, 0, offsets.Length - 1);
+        Vector3 offset = offsets[slotIndex];
         Matrixf matrix = CreateIdentityMatrix();
-        matrix.Translate(0.5f, 0.5f, 0.5f)
+        matrix.Translate(offset.X + 0.5f, offset.Y, offset.Z + 0.5f)
             .RotateY(0f)
-            .Translate(-0.5f, -0.5f, -0.5f);
-        ApplyModelTransformMatrix(matrix, transform);
-        placement = new(matrix, new Vector3(0.5f, 0.5f, 0.5f), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "ground storage renderer", "slot 0 with default mesh angle"));
+            .Translate(-0.5f, 0f, -0.5f);
+        placement = new(matrix, new Vector3(0.5f + offset.X, offset.Y, 0.5f + offset.Z), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "ground storage renderer", $"{layoutLabel} layout slot {slotIndex}, default mesh angle"));
         return true;
+    }
+
+    private static Vector3[] GetGroundStorageLayoutOffsets(TransformAssetEntry asset, out string layoutLabel)
+    {
+        EnumGroundStorageLayout? layout = asset.Collectible.GetCollectibleBehavior<CollectibleBehaviorGroundStorable>(true)?.StorageProps?.Layout;
+        layoutLabel = layout?.ToString() ?? nameof(EnumGroundStorageLayout.SingleCenter);
+        return layout switch
+        {
+            EnumGroundStorageLayout.Halves or EnumGroundStorageLayout.WallHalves =>
+            [
+                new Vector3(-0.25f, 0f, 0f),
+                new Vector3(0.25f, 0f, 0f)
+            ],
+            EnumGroundStorageLayout.Quadrants =>
+            [
+                new Vector3(-0.25f, 0f, -0.25f),
+                new Vector3(-0.25f, 0f, 0.25f),
+                new Vector3(0.25f, 0f, -0.25f),
+                new Vector3(0.25f, 0f, 0.25f)
+            ],
+            _ => [Vector3.Zero]
+        };
+    }
+
+    private static bool TryBuildDroppedItemTransformPlacement(string baseAttribute, ModelTransform transform, out TransformPreviewPlacement placement)
+    {
+        if (!baseAttribute.Equals("groundTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            placement = TransformPreviewPlacement.Empty;
+            return false;
+        }
+
+        // EntityItemRenderer.LoadModelMatrix at rest: dropped items render at 0.2x the transform
+        // scale and rotate Y, then Z, then X around the transform origin anchored at the entity pos.
+        var translation = transform.Translation;
+        var rotation = transform.Rotation;
+        var origin = transform.Origin;
+        var scale = transform.ScaleXYZ;
+        Matrixf matrix = CreateIdentityMatrix();
+        matrix.Translate(0.5f, 0f, 0.5f)
+            .Translate(translation.X, translation.Y, translation.Z)
+            .Scale(0.2f * scale.X, 0.2f * scale.Y, 0.2f * scale.Z)
+            .RotateYDeg(rotation.Y)
+            .RotateZDeg(rotation.Z)
+            .RotateXDeg(rotation.X)
+            .Translate(-origin.X, -origin.Y, -origin.Z);
+        placement = new(matrix, new Vector3(0.5f, 0f, 0.5f), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "dropped item renderer", "EntityItemRenderer at rest, 0.2x base scale"));
+        return true;
+    }
+
+    private bool TryBuildToolrackTransformPlacement(TransformAssetEntry asset, string baseAttribute, Block? reference, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    {
+        if (!baseAttribute.Equals("toolrackTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            placement = TransformPreviewPlacement.Empty;
+            return false;
+        }
+
+        // BlockEntityToolrack.loadToolMeshes bakes everything into the mesh per slot and facing.
+        int slotIndex = Math.Clamp(_transformPreviewSlotIndex, 0, 3);
+        BlockFacing facing = (reference == null ? null : BlockFacing.FromCode(reference.LastCodePart())) ?? BlockFacing.NORTH;
+        BlockFacing counterClockwise = facing.GetCCW() ?? BlockFacing.WEST;
+        float facingRotationRad = counterClockwise.HorizontalAngleIndex * 90f * GameMath.DEG2RAD;
+        float verticalOffset = slotIndex > 1 ? -0.1125f : 0f;
+        mesh.ModelTransform(transform);
+        if (asset.Collectible is Item { Shape.VoxelizeTexture: true })
+        {
+            mesh.Scale(0.33f, 0.33f, 0.33f);
+            mesh.Translate(
+                slotIndex % 2 == 0 ? 0.23f : -0.3f,
+                (slotIndex > 1 ? 0.2f : -0.3f) + verticalOffset,
+                0.433f * (counterClockwise.Axis != EnumAxis.X ? 1f : -1f));
+            mesh.Rotate(0f, facingRotationRad, 0f);
+            mesh.Rotate(GameMath.PI, 0f, 0f);
+        }
+        else
+        {
+            mesh.Scale(0.6f, 0.6f, 0.6f);
+            mesh.Translate(
+                slotIndex > 1 ? -0.2f : 0.3f,
+                0.433f + verticalOffset,
+                (slotIndex % 2 == 0 ? 0.23f : -0.2f) * (counterClockwise.Axis == EnumAxis.X ? 1f : -1f));
+            mesh.Rotate(0f, facingRotationRad, GameMath.PIHALF);
+            mesh.Rotate(0f, GameMath.PIHALF, 0f);
+        }
+
+        placement = new(CreateIdentityMatrix(), new Vector3(0.5f, 0.5f, 0.5f), false, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "tool rack renderer", $"slot {slotIndex}, facing {facing.Code}"));
+        return true;
+    }
+
+    private bool TryBuildMoldRackTransformPlacement(TransformAssetEntry asset, string baseAttribute, Block? reference, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    {
+        if (!baseAttribute.Equals("onmoldrackTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            placement = TransformPreviewPlacement.Empty;
+            return false;
+        }
+
+        ApplyVanillaDisplayMeshTransforms(mesh, asset, transform);
+        int slotIndex = Math.Clamp(_transformPreviewSlotIndex, 0, 4);
+        Matrixf matrix = CreateIdentityMatrix();
+        matrix.Translate(0.5f, 0f, 0.5f)
+            .RotateYDeg(reference?.Shape?.rotateY ?? 0f)
+            .Translate(0.1875f + 0.1875f * slotIndex - 1f, 0f, 0f)
+            .Translate(-0.5f, 0f, -0.5f);
+        placement = new(matrix, TransformPlacementPoint(matrix, new Vector3(0.5f, 0f, 0.5f)), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "mold rack renderer", $"slot {slotIndex}"));
+        return true;
+    }
+
+    private bool TryBuildScrollRackTransformPlacement(TransformAssetEntry asset, string baseAttribute, Block? reference, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    {
+        if (!baseAttribute.Equals("onscrollrackTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            placement = TransformPreviewPlacement.Empty;
+            return false;
+        }
+
+        ApplyVanillaDisplayMeshTransforms(mesh, asset, transform);
+        Cuboidf[]? slotBoxes = (reference as BlockScrollRack)?.slotsHitBoxes;
+        Vector3 slotMid = Vector3.Zero;
+        string slotDetail = "no scroll rack slot boxes; block origin";
+        if (slotBoxes is { Length: > 0 })
+        {
+            int slotIndex = Math.Clamp(_transformPreviewSlotIndex, 0, slotBoxes.Length - 1);
+            Cuboidf slotBox = slotBoxes[slotIndex];
+            slotMid = new Vector3(slotBox.MidX, slotBox.MidY, slotBox.MidZ);
+            slotDetail = $"slot {slotIndex}, default mesh angle";
+        }
+
+        Matrixf matrix = CreateIdentityMatrix();
+        matrix.Translate(slotMid.X, slotMid.Y, slotMid.Z)
+            .Translate(0.5f, 0f, 0.5f)
+            .RotateY(-GameMath.PIHALF)
+            .Translate(-0.5f, 0f, -0.5f);
+        placement = new(matrix, TransformPlacementPoint(matrix, new Vector3(0.5f, 0f, 0.5f)), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "scroll rack renderer", slotDetail));
+        return true;
+    }
+
+    private static bool TryBuildAntlerMountTransformPlacement(TransformAssetEntry asset, string baseAttribute, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    {
+        if (!baseAttribute.Equals("onAntlerMountTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            placement = TransformPreviewPlacement.Empty;
+            return false;
+        }
+
+        ApplyVanillaDisplayMeshTransforms(mesh, asset, transform);
+        Matrixf matrix = CreateIdentityMatrix();
+        matrix.Translate(0.5f, 0f, 0.5f)
+            .RotateY(-GameMath.PIHALF)
+            .Translate(-0.5f, 0f, -0.5f);
+        placement = new(matrix, new Vector3(0.5f, 0f, 0.5f), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "antler mount renderer", "default mesh angle"));
+        return true;
+    }
+
+    private bool TryBuildShelfTransformPlacement(TransformAssetEntry asset, string baseAttribute, Block? reference, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    {
+        if (!baseAttribute.Equals("onshelfTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            placement = TransformPreviewPlacement.Empty;
+            return false;
+        }
+
+        ApplyVanillaDisplayMeshTransforms(mesh, asset, transform);
+        int slotIndex = Math.Clamp(_transformPreviewSlotIndex, 0, 7);
+        EnumShelvableLayout? layout = BlockEntityShelf.GetShelvableLayout(CreatePreviewItemStack(asset));
+        float x = slotIndex % 4 >= 2 ? 0.75f : 0.25f;
+        float y = slotIndex >= 4 ? 0.625f : 0.125f;
+        float z = slotIndex % 2 == 0 ? 0.25f : 0.625f;
+        if ((slotIndex == 0 || slotIndex == 4) && layout == EnumShelvableLayout.SingleCenter) x = 0.5f;
+        if (slotIndex % 2 == 0 && layout is EnumShelvableLayout.Halves or EnumShelvableLayout.SingleCenter) z = 0.4f;
+        Matrixf matrix = CreateIdentityMatrix();
+        matrix.Translate(0.5f, 0f, 0.5f)
+            .RotateYDeg(reference?.Shape?.rotateY ?? 0f)
+            .Translate(x - 0.5f, y, z - 0.5f)
+            .Translate(-0.5f, 0f, -0.5f);
+        placement = new(matrix, TransformPlacementPoint(matrix, new Vector3(0.5f, 0f, 0.5f)), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "shelf renderer", $"slot {slotIndex}{(layout == null ? "" : $", {layout} layout")}"));
+        return true;
+    }
+
+    private bool TryBuildDisplayCaseTransformPlacement(TransformAssetEntry asset, string baseAttribute, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    {
+        if (!baseAttribute.Equals("onDisplayTransform", StringComparison.OrdinalIgnoreCase))
+        {
+            placement = TransformPreviewPlacement.Empty;
+            return false;
+        }
+
+        ApplyVanillaDisplayMeshTransforms(mesh, asset, transform);
+        int slotIndex = Math.Clamp(_transformPreviewSlotIndex, 0, 3);
+        float x = slotIndex % 2 == 0 ? 0.3125f : 0.6875f;
+        float z = slotIndex > 1 ? 0.6875f : 0.3125f;
+        Matrixf matrix = CreateIdentityMatrix();
+        matrix.Translate(0.5f, 0f, 0.5f)
+            .Translate(x - 0.5f, 0.063125f, z - 0.5f)
+            .RotateYDeg(45f)
+            .Scale(0.75f, 0.75f, 0.75f)
+            .Translate(-0.5f, 0f, -0.5f);
+        placement = new(matrix, TransformPlacementPoint(matrix, new Vector3(0.5f, 0f, 0.5f)), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "display case renderer", $"slot {slotIndex}, no randomized rotation"));
+        return true;
+    }
+
+    private static bool IsFlatTextureItem(TransformAssetEntry asset)
+    {
+        return asset.Collectible is Item item && (item.Shape == null || item.Shape.VoxelizeTexture);
+    }
+
+    // Mirrors BlockEntityDisplay.applyDefaultTranforms: bakes the slot transform into the mesh and
+    // lays flat texture items down. BEBehaviorDisplay skips the flat layout when a transform exists.
+    private static void ApplyVanillaDisplayMeshTransforms(MeshData mesh, TransformAssetEntry asset, ModelTransform? transform, bool flatLayoutOnlyWithoutTransform = false)
+    {
+        if (transform != null)
+        {
+            mesh.ModelTransform(transform);
+            if (flatLayoutOnlyWithoutTransform) return;
+        }
+
+        if (!IsFlatTextureItem(asset)) return;
+
+        mesh.Rotate(GameMath.PIHALF, 0f, 0f);
+        mesh.Scale(0.33f, 0.33f, 0.33f);
+        mesh.Translate(0f, -15f / 32f, 0f);
+    }
+
+    private static Vector3 TransformPlacementPoint(Matrixf matrix, Vector3 point)
+    {
+        Vec4f transformed = matrix.TransformVector(new Vec4f(point.X, point.Y, point.Z, 1f));
+        return new Vector3(transformed.X, transformed.Y, transformed.Z);
     }
 
     private bool TryBuildVanillaDisplayPlacement(TransformAssetEntry asset, string baseAttribute, ModelTransform transform, Block reference, MeshData mesh, out TransformPreviewPlacement placement)
@@ -2435,22 +2749,23 @@ public sealed partial class DebugWindowManager
         Size3f itemSize = TryGetDisplayableSize(asset, displayType, out string sizeSource) ?? BlockBehaviorDisplay.DefaultItemSize;
         Vec3f offset = BlockBehaviorDisplay.getOffsetFromPreviewCuboid(itemSize, 0f);
 
-        mesh.ModelTransform(transform);
+        // BEBehaviorDisplay.generateMeshes with MeshAngle 0, no per-slot rotation or random squish,
+        // placed at the surface center like an in-game center click.
+        ApplyVanillaDisplayMeshTransforms(mesh, asset, transform, flatLayoutOnlyWithoutTransform: true);
+        float slotX = surface.Size.Width / 2f;
+        float slotZ = surface.Size.Length / 2f;
         Matrixf matrix = CreateIdentityMatrix();
         float blockRotateY = reference.Shape?.rotateY ?? 0f;
         matrix.Translate(0.5f, 0f, 0.5f)
-            .RotateY(blockRotateY * GameMath.DEG2RAD)
+            .RotateYDeg(blockRotateY)
             .RotateY(0f)
-            .Translate((surface.VoxelPosition.X + offset.X) / 16f, surface.VoxelPosition.Y / 16f, (surface.VoxelPosition.Z + offset.Z) / 16f)
-            .Translate(-0.5f + itemSize.Width / 32f, 0f, -0.5f + itemSize.Length / 32f)
+            .Translate((surface.VoxelPosition.X + slotX + offset.X) / 16f, surface.VoxelPosition.Y / 16f, (surface.VoxelPosition.Z + slotZ + offset.Z) / 16f)
+            .Translate(-0.5f + itemSize.Width / 2f / 16f, 0f, -0.5f + itemSize.Length / 2f / 16f)
             .RotateY(0f)
             .Scale(1f, 1f, 1f)
             .Translate(-0.5f, 0f, -0.5f);
 
-        Vector3 anchor = new(
-            (surface.VoxelPosition.X + itemSize.Width * 0.5f) / 16f,
-            surface.VoxelPosition.Y / 16f,
-            (surface.VoxelPosition.Z + itemSize.Length * 0.5f) / 16f);
+        Vector3 anchor = TransformPlacementPoint(matrix, new Vector3(0.5f, 0f, 0.5f));
         string detail = $"surface {surfaceIndex} ({displayType}), size from {sizeSource}, meshAngle 0";
         placement = new(matrix, anchor, true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "vanilla display/shelf renderer", detail));
         return true;
@@ -2649,6 +2964,14 @@ public sealed partial class DebugWindowManager
 
         if (slot.TypedKey == null)
         {
+            if (IsFirepitTransformAttribute(slot.AttributeCode))
+            {
+                // The firepit renderer reads inFirePitProps.transform; "infirepitTransform" is only
+                // the vanilla transform-editor event name.
+                ModelTransform? firePitTransform = asset.Collectible.Attributes?["inFirePitProps"]["transform"].AsObject<ModelTransform>()?.Clone();
+                if (firePitTransform != null) return firePitTransform;
+            }
+
             return asset.Collectible.Attributes?[slot.AttributeCode].AsObject<ModelTransform>()?.Clone();
         }
 
@@ -2668,8 +2991,23 @@ public sealed partial class DebugWindowManager
             return BehaviorTransformSlotExists(GetTransformSourceJson(asset), behaviorMapDefinition, slot.TypedKey);
         }
 
-        if (slot.TypedKey == null) return asset.Collectible.Attributes?[slot.AttributeCode].Exists == true;
+        if (slot.TypedKey == null)
+        {
+            if (IsFirepitTransformAttribute(slot.AttributeCode) &&
+                asset.Collectible.Attributes?["inFirePitProps"]["transform"].Exists == true)
+            {
+                return true;
+            }
+
+            return asset.Collectible.Attributes?[slot.AttributeCode].Exists == true;
+        }
+
         return asset.Collectible.Attributes?[slot.AttributeCode].Token is JObject map && map[slot.TypedKey] != null;
+    }
+
+    private static bool IsFirepitTransformAttribute(string attributeCode)
+    {
+        return attributeCode.Equals("infirepitTransform", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool TryReadBehaviorTransform(TransformAssetEntry asset, TransformSlotSelection slot, out ModelTransform? transform)
@@ -3074,6 +3412,15 @@ public sealed partial class DebugWindowManager
         JObject attributes = json["attributes"] as JObject ?? new JObject();
         if (typedKey == null)
         {
+            if (IsFirepitTransformAttribute(attributeCode))
+            {
+                JObject firePitProps = attributes["inFirePitProps"] as JObject ?? new JObject();
+                firePitProps["transform"] = TransformToToken(transform);
+                attributes["inFirePitProps"] = firePitProps;
+                json["attributes"] = attributes;
+                return;
+            }
+
             attributes[attributeCode] = TransformToToken(transform);
         }
         else
@@ -3632,8 +3979,10 @@ public sealed partial class DebugWindowManager
         if (baseAttribute.Contains("firepit", StringComparison.OrdinalIgnoreCase)) return "game:firepit";
         if (baseAttribute.Contains("trap", StringComparison.OrdinalIgnoreCase)) return "game:baskettrap";
         if (baseAttribute.Contains("shelf", StringComparison.OrdinalIgnoreCase)) return "game:shelf";
-        if (baseAttribute.Contains("toolrack", StringComparison.OrdinalIgnoreCase) ||
-            baseAttribute.Contains("rack", StringComparison.OrdinalIgnoreCase)) return "game:toolrack";
+        if (baseAttribute.Contains("moldrack", StringComparison.OrdinalIgnoreCase)) return "game:moldrack";
+        if (baseAttribute.Contains("scrollrack", StringComparison.OrdinalIgnoreCase)) return "game:scrollrack";
+        if (baseAttribute.Contains("antlermount", StringComparison.OrdinalIgnoreCase)) return "game:antlermount";
+        if (baseAttribute.Contains("toolrack", StringComparison.OrdinalIgnoreCase)) return "game:toolrack";
         if (baseAttribute.Contains("display", StringComparison.OrdinalIgnoreCase)) return "game:displaycase";
         if (baseAttribute.Contains("groundStorage", StringComparison.OrdinalIgnoreCase)) return "game:groundstorage";
         return "";
@@ -3647,9 +3996,31 @@ public sealed partial class DebugWindowManager
             "guiTransform" => block ? ModelTransform.BlockDefaultGui() : ModelTransform.ItemDefaultGui(),
             "groundTransform" or "groundStorageTransform" => block ? ModelTransform.BlockDefaultGround() : ModelTransform.ItemDefaultGround(),
             "tpHandTransform" or "tpOffHandTransform" => block ? ModelTransform.BlockDefaultTp() : ModelTransform.ItemDefaultTp(),
+            "inTrapTransform" => CreateTrapDefaultTransform(asset),
+            "infirepitTransform" => CreateFirepitDefaultTransform(),
             _ => CreateDefaultTransform()
         };
         transform.EnsureDefaultValues();
+        return transform;
+    }
+
+    // BlockEntityAnimalTrap falls back to the ground transform at 0.2x scale when no inTrapTransform exists.
+    private static ModelTransform CreateTrapDefaultTransform(TransformAssetEntry asset)
+    {
+        ModelTransform transform = asset.Collectible.GroundTransform?.Clone() ?? ModelTransform.ItemDefaultGround();
+        transform.EnsureDefaultValues();
+        transform.ScaleXYZ = transform.ScaleXYZ * 0.2f;
+        return transform;
+    }
+
+    // FirepitContentsRenderer's built-in default used when inFirePitProps declares no transform.
+    private static ModelTransform CreateFirepitDefaultTransform()
+    {
+        ModelTransform transform = new ModelTransform().EnsureDefaultValues();
+        transform.Origin.Set(0.5f, 0.0625f, 0.5f);
+        transform.Rotation.Set(90f, 90f, 0f);
+        transform.Translation.Set(0f, 0.25f, 0f);
+        transform.ScaleXYZ.Set(0.25f, 0.25f, 0.25f);
         return transform;
     }
 

@@ -32,7 +32,6 @@ public sealed partial class DebugWindowManager
 
         private VanillaAnimationDocumentSnapshot(
             string label,
-            string serialized,
             int[] animationIndexes,
             List<VanillaAnimation> animations,
             List<JToken?> animationSourceTokens,
@@ -41,7 +40,6 @@ public sealed partial class DebugWindowManager
             List<JToken?> metadataSourceTokens)
         {
             Label = label;
-            Serialized = serialized;
             _animationIndexes = animationIndexes;
             _animations = animations;
             _animationSourceTokens = animationSourceTokens;
@@ -51,7 +49,6 @@ public sealed partial class DebugWindowManager
         }
 
         public string Label { get; }
-        public string Serialized { get; }
 
         public static VanillaAnimationDocumentSnapshot FromDocument(VanillaAnimationDocument document, string label)
         {
@@ -93,7 +90,6 @@ public sealed partial class DebugWindowManager
         {
             return new(
                 label,
-                Serialize(document, animationIndexes, metadataIndexes),
                 animationIndexes,
                 animationIndexes
                     .Where(index => index >= 0 && index < document.ShapeAnimations.Count)
@@ -116,7 +112,190 @@ public sealed partial class DebugWindowManager
 
         public bool Matches(VanillaAnimationDocument document)
         {
-            return string.Equals(Serialized, Serialize(document, _animationIndexes, _metadataIndexes), StringComparison.Ordinal);
+            int animationCount = Math.Min(_animationIndexes.Length, _animations.Count);
+            for (int index = 0; index < animationCount; index++)
+            {
+                int animationIndex = _animationIndexes[index];
+                if (animationIndex < 0 || animationIndex >= document.ShapeAnimations.Count) continue;
+
+                VanillaShapeAnimationEntry entry = document.ShapeAnimations[animationIndex];
+                if (!VanillaAnimationsStructurallyEqual(_animations[index], entry.Animation)) return false;
+                if (!VanillaTokensEqual(_animationSourceTokens[index], entry.SourceToken)) return false;
+            }
+
+            int metadataCount = Math.Min(_metadataIndexes.Length, _metadata.Count);
+            for (int index = 0; index < metadataCount; index++)
+            {
+                int metadataIndex = _metadataIndexes[index];
+                if (metadataIndex < 0 || metadataIndex >= document.MetadataEntries.Count) continue;
+
+                VanillaAnimationMetaEntry entry = document.MetadataEntries[metadataIndex];
+                if (!VanillaMetadataStructurallyEqual(_metadata[index], entry.Metadata)) return false;
+                if (!VanillaTokensEqual(_metadataSourceTokens[index], entry.SourceToken)) return false;
+            }
+
+            return true;
+        }
+
+        public bool SameContentAs(VanillaAnimationDocumentSnapshot other)
+        {
+            if (!_animationIndexes.SequenceEqual(other._animationIndexes)) return false;
+            if (!_metadataIndexes.SequenceEqual(other._metadataIndexes)) return false;
+            if (_animations.Count != other._animations.Count || _metadata.Count != other._metadata.Count) return false;
+
+            for (int index = 0; index < _animations.Count; index++)
+            {
+                if (!VanillaAnimationsStructurallyEqual(_animations[index], other._animations[index])) return false;
+                if (!VanillaTokensEqual(_animationSourceTokens[index], other._animationSourceTokens[index])) return false;
+            }
+
+            for (int index = 0; index < _metadata.Count; index++)
+            {
+                if (!VanillaMetadataStructurallyEqual(_metadata[index], other._metadata[index])) return false;
+                if (!VanillaTokensEqual(_metadataSourceTokens[index], other._metadataSourceTokens[index])) return false;
+            }
+
+            return true;
+        }
+
+        private static bool VanillaTokensEqual(JToken? left, JToken? right)
+        {
+            if (ReferenceEquals(left, right)) return true;
+            if (left == null || right == null) return left == null && right == null;
+            return JToken.DeepEquals(left, right);
+        }
+
+        private static bool VanillaAnimationsStructurallyEqual(VanillaAnimation left, VanillaAnimation right)
+        {
+            if (!string.Equals(left.Code, right.Code, StringComparison.Ordinal)) return false;
+            if (!string.Equals(left.Name, right.Name, StringComparison.Ordinal)) return false;
+            if (left.QuantityFrames != right.QuantityFrames) return false;
+            if (left.Version != right.Version) return false;
+            if (left.EaseAnimationSpeed != right.EaseAnimationSpeed) return false;
+            if (left.OnActivityStopped != right.OnActivityStopped) return false;
+            if (left.OnAnimationEnd != right.OnAnimationEnd) return false;
+
+            AnimationKeyFrame[] leftFrames = left.KeyFrames ?? [];
+            AnimationKeyFrame[] rightFrames = right.KeyFrames ?? [];
+            if (leftFrames.Length != rightFrames.Length) return false;
+
+            for (int index = 0; index < leftFrames.Length; index++)
+            {
+                if (!VanillaKeyFramesStructurallyEqual(leftFrames[index], rightFrames[index])) return false;
+            }
+
+            return true;
+        }
+
+        private static bool VanillaKeyFramesStructurallyEqual(AnimationKeyFrame left, AnimationKeyFrame right)
+        {
+            if (left.Frame != right.Frame) return false;
+
+            int leftCount = left.Elements?.Count ?? 0;
+            int rightCount = right.Elements?.Count ?? 0;
+            if (leftCount != rightCount) return false;
+            if (leftCount == 0) return true;
+
+            foreach ((string name, AnimationKeyFrameElement leftElement) in left.Elements!)
+            {
+                if (right.Elements == null ||
+                    !right.Elements.TryGetValue(name, out AnimationKeyFrameElement? rightElement) ||
+                    rightElement == null ||
+                    !VanillaElementsStructurallyEqual(leftElement, rightElement))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool VanillaElementsStructurallyEqual(AnimationKeyFrameElement left, AnimationKeyFrameElement right)
+        {
+            return left.OffsetX == right.OffsetX &&
+                left.OffsetY == right.OffsetY &&
+                left.OffsetZ == right.OffsetZ &&
+                left.StretchX == right.StretchX &&
+                left.StretchY == right.StretchY &&
+                left.StretchZ == right.StretchZ &&
+                left.RotationX == right.RotationX &&
+                left.RotationY == right.RotationY &&
+                left.RotationZ == right.RotationZ &&
+                left.OriginX == right.OriginX &&
+                left.OriginY == right.OriginY &&
+                left.OriginZ == right.OriginZ &&
+                left.RotShortestDistanceX == right.RotShortestDistanceX &&
+                left.RotShortestDistanceY == right.RotShortestDistanceY &&
+                left.RotShortestDistanceZ == right.RotShortestDistanceZ;
+        }
+
+        private static bool VanillaMetadataStructurallyEqual(AnimationMetaData left, AnimationMetaData right)
+        {
+            if (!string.Equals(left.Code, right.Code, StringComparison.Ordinal)) return false;
+            if (!string.Equals(left.Animation, right.Animation, StringComparison.Ordinal)) return false;
+            if (left.Weight != right.Weight) return false;
+            if (left.AnimationSpeed != right.AnimationSpeed) return false;
+            if (left.MulWithWalkSpeed != right.MulWithWalkSpeed) return false;
+            if (left.WeightCapFactor != right.WeightCapFactor) return false;
+            if (left.EaseInSpeed != right.EaseInSpeed) return false;
+            if (left.EaseOutSpeed != right.EaseOutSpeed) return false;
+            if (left.BlendMode != right.BlendMode) return false;
+            if (left.SupressDefaultAnimation != right.SupressDefaultAnimation) return false;
+            if (left.HoldEyePosAfterEasein != right.HoldEyePosAfterEasein) return false;
+            if (left.ClientSide != right.ClientSide) return false;
+            if (left.WithFpVariant != right.WithFpVariant) return false;
+            if (left.AdjustCollisionBox != right.AdjustCollisionBox) return false;
+            if (!VanillaFloatDictionariesEqual(left.ElementWeight, right.ElementWeight)) return false;
+            if (!VanillaBlendModeDictionariesEqual(left.ElementBlendMode, right.ElementBlendMode)) return false;
+
+            AnimationSound[] leftSounds = left.AnimationSounds ?? [];
+            AnimationSound[] rightSounds = right.AnimationSounds ?? [];
+            if (leftSounds.Length != rightSounds.Length) return false;
+            for (int index = 0; index < leftSounds.Length; index++)
+            {
+                AnimationSound leftSound = leftSounds[index];
+                AnimationSound rightSound = rightSounds[index];
+                if (leftSound.Frame != rightSound.Frame ||
+                    leftSound.Chance != rightSound.Chance ||
+                    leftSound.Looping != rightSound.Looping ||
+                    leftSound.Attributes.Range != rightSound.Attributes.Range ||
+                    !string.Equals(leftSound.Attributes.Location?.ToString(), rightSound.Attributes.Location?.ToString(), StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool VanillaFloatDictionariesEqual(Dictionary<string, float>? left, Dictionary<string, float>? right)
+        {
+            int leftCount = left?.Count ?? 0;
+            int rightCount = right?.Count ?? 0;
+            if (leftCount != rightCount) return false;
+            if (leftCount == 0) return true;
+
+            foreach ((string key, float value) in left!)
+            {
+                if (right == null || !right.TryGetValue(key, out float other) || value != other) return false;
+            }
+
+            return true;
+        }
+
+        private static bool VanillaBlendModeDictionariesEqual(Dictionary<string, EnumAnimationBlendMode>? left, Dictionary<string, EnumAnimationBlendMode>? right)
+        {
+            int leftCount = left?.Count ?? 0;
+            int rightCount = right?.Count ?? 0;
+            if (leftCount != rightCount) return false;
+            if (leftCount == 0) return true;
+
+            foreach ((string key, EnumAnimationBlendMode value) in left!)
+            {
+                if (right == null || !right.TryGetValue(key, out EnumAnimationBlendMode other) || value != other) return false;
+            }
+
+            return true;
         }
 
         public VanillaAnimationDocumentSnapshot CaptureCurrent(VanillaAnimationDocument document, string label)
@@ -147,49 +326,6 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        private static string Serialize(VanillaAnimationDocument document, int[] animationIndexes, int[] metadataIndexes)
-        {
-            JObject token = new()
-            {
-                ["kind"] = document.Kind.ToString(),
-                ["domain"] = document.Domain,
-                ["assetPath"] = document.AssetPath
-            };
-
-            if (animationIndexes.Length > 0)
-            {
-                JArray animations = [];
-                foreach (int index in animationIndexes)
-                {
-                    if (index < 0 || index >= document.ShapeAnimations.Count) continue;
-                    animations.Add(new JObject
-                    {
-                        ["index"] = index,
-                        ["value"] = VanillaAnimationExportService.ToVanillaAnimationToken(document.ShapeAnimations[index].Animation, document.ShapeAnimations[index].SourceToken)
-                    });
-                }
-
-                token["animations"] = animations;
-            }
-
-            if (metadataIndexes.Length > 0)
-            {
-                JArray metadata = [];
-                foreach (int index in metadataIndexes)
-                {
-                    if (index < 0 || index >= document.MetadataEntries.Count) continue;
-                    metadata.Add(new JObject
-                    {
-                        ["index"] = index,
-                        ["value"] = VanillaAnimationExportService.ToAnimationMetaDataToken(document.MetadataEntries[index].Metadata, document.MetadataEntries[index].SourceToken)
-                    });
-                }
-
-                token["metadata"] = metadata;
-            }
-
-            return JsonConvert.SerializeObject(token, Formatting.None);
-        }
     }
 
     private sealed class VanillaAnimationEditorHistory
@@ -243,7 +379,7 @@ public sealed partial class DebugWindowManager
             if (before.Matches(document)) return false;
 
             List<VanillaAnimationDocumentSnapshot> undo = GetStack(_undo, document.HistoryKey);
-            if (undo.Count > 0 && undo[^1].Serialized == before.Serialized) return false;
+            if (undo.Count > 0 && undo[^1].SameContentAs(before)) return false;
 
             Push(_undo, document.HistoryKey, before);
             GetStack(_redo, document.HistoryKey).Clear();

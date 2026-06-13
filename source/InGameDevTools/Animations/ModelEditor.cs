@@ -2,8 +2,10 @@ using ImGuiNET;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
+using Vintagestory.API.MathTools;
 using NVector2 = System.Numerics.Vector2;
 using NVector3 = System.Numerics.Vector3;
 using NVector4 = System.Numerics.Vector4;
@@ -15,6 +17,7 @@ public sealed partial class DebugWindowManager
     private static readonly string[] ModelFaceNames = ["north", "east", "south", "west", "up", "down"];
     private const int ModelBrowserMaxVisibleEntries = 600;
     private const int ModelHistoryLimit = 120;
+    private const int ModelCutMaxPiecesPerElement = 512;
     private const string ModelNewDocumentTemplateLocation = "game:shapes/block/basic/cube.json";
 
     private enum ModelGizmoTool
@@ -22,7 +25,16 @@ public sealed partial class DebugWindowManager
         None,
         Move,
         Resize,
-        Rotate
+        Rotate,
+        Cut
+    }
+
+    private enum ModelCutOrientation
+    {
+        Auto,
+        X,
+        Y,
+        Z
     }
 
     private sealed class ModelTextureEntry
@@ -75,7 +87,7 @@ public sealed partial class DebugWindowManager
         public double SizeY => To[1] - From[1];
         public double SizeZ => To[2] - From[2];
 
-        public ModelElementData CloneSubtree()
+        public ModelElementData CloneShallow()
         {
             ModelElementData clone = new()
             {
@@ -95,6 +107,12 @@ public sealed partial class DebugWindowManager
             {
                 clone.Faces[face] = Faces[face]?.Clone();
             }
+            return clone;
+        }
+
+        public ModelElementData CloneSubtree()
+        {
+            ModelElementData clone = CloneShallow();
             foreach (ModelElementData child in Children)
             {
                 ModelElementData childClone = child.CloneSubtree();
@@ -188,23 +206,36 @@ public sealed partial class DebugWindowManager
     private int _modelSelectedFace = -1;
     private string _modelSelectedTextureCode = "";
     private string _modelStatus = "";
+    private int _modelCutPartsX = 2;
+    private int _modelCutPartsY = 1;
+    private int _modelCutPartsZ = 1;
     private readonly List<ModelHistoryEntry> _modelUndoStack = [];
     private readonly List<ModelHistoryEntry> _modelRedoStack = [];
     private string? _modelPendingEditSnapshot;
     private bool _modelPreviewDirty;
     private ModelGizmoTool _modelGizmoTool = ModelGizmoTool.Move;
+    private ModelCutOrientation _modelCutOrientation = ModelCutOrientation.Auto;
     private bool _modelSnapEnabled = true;
     private float _modelSnapMoveUnits = 0.5f;
     private float _modelSnapRotateDegrees = 5f;
+    private int _modelArrowNudgePlane;
+    private int _modelWheelNudgeAxis = 2;
     private ModelShapeAssetEntry? _modelPendingOpenEntry;
     private bool _modelPendingNewDocument;
     private bool _modelOpenDiscardPopup;
     private ModelElementData? _modelReparentSource;
+    private ModelElementData? _modelDragDropElement;
+    private ModelShapeAssetEntry? _modelBrowserFileActionEntry;
+    private string _modelBrowserPendingFilePopup = "";
+    private string _modelBrowserRenameName = "";
+    private string _modelBrowserMoveFolder = "";
     private string _modelTreeFilter = "";
     private HashSet<ModelElementData>? _modelTreeFilterMatches;
     private readonly Dictionary<string, string> _modelComboFilters = new(StringComparer.Ordinal);
     private List<string>? _modelTextureAssetIndex;
     private List<string>? _modelStepParentNameIndex;
+    private static readonly string[] ModelNudgePlaneLabels = ["XY", "XZ", "YZ"];
+    private static readonly string[] ModelAxisLabels = ["X", "Y", "Z"];
 
     /// <summary>
     /// Searchable replacement for plain combos: opens with a filter box and caps the
@@ -434,35 +465,6 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SameLine();
-        ImGui.TextDisabled("|");
-        ImGui.SameLine();
-        int tool = (int)_modelGizmoTool;
-        ImGui.RadioButton("Select##model-tool-none", ref tool, (int)ModelGizmoTool.None);
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Select tool: click elements in the viewport without a gizmo (Ctrl+Shift+1).");
-        }
-        ImGui.SameLine();
-        ImGui.RadioButton("Move##model-tool-move", ref tool, (int)ModelGizmoTool.Move);
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Move tool: drag the axis arrows to translate the element (Ctrl+Shift+2).");
-        }
-        ImGui.SameLine();
-        ImGui.RadioButton("Resize##model-tool-resize", ref tool, (int)ModelGizmoTool.Resize);
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Resize tool: drag face handles on cuboids, or drag corner handles on generated primitive groups to deform them. Hold Shift for uniform scale (Ctrl+Shift+3).");
-        }
-        ImGui.SameLine();
-        ImGui.RadioButton("Rotate##model-tool-rotate", ref tool, (int)ModelGizmoTool.Rotate);
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Rotate tool: drag the rings to rotate around the rotation origin (Ctrl+Shift+4).");
-        }
-        _modelGizmoTool = (ModelGizmoTool)tool;
-
-        ImGui.SameLine();
         bool primitiveOpen = _modelPrimitiveWindowOpen;
         if (primitiveOpen) ImGui.PushStyleColor(ImGuiCol.Button, new NVector4(0.55f, 0.42f, 0.2f, 1f));
         if (ImGui.Button("Prism helper##model-primitive-toggle"))
@@ -516,6 +518,32 @@ public sealed partial class DebugWindowManager
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Rotation snap step in degrees.");
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("|");
+        ImGui.SameLine();
+        ImGui.TextDisabled("Nudge");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(70f);
+        if (ImGui.Combo("Arrows##model-arrow-nudge-plane", ref _modelArrowNudgePlane, ModelNudgePlaneLabels, ModelNudgePlaneLabels.Length))
+        {
+            _modelArrowNudgePlane = Math.Clamp(_modelArrowNudgePlane, 0, ModelNudgePlaneLabels.Length - 1);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            (int horizontalAxis, int verticalAxis) = ModelArrowNudgeAxes();
+            ImGui.SetTooltip($"Arrow nudge plane. Left/right move {ModelAxisLabel(horizontalAxis)}; up/down move {ModelAxisLabel(verticalAxis)}.");
+        }
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(58f);
+        if (ImGui.Combo("Wheel##model-wheel-nudge-axis", ref _modelWheelNudgeAxis, ModelAxisLabels, ModelAxisLabels.Length))
+        {
+            _modelWheelNudgeAxis = Math.Clamp(_modelWheelNudgeAxis, 0, ModelAxisLabels.Length - 1);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Ctrl+mouse wheel nudges selected elements on this axis.");
         }
 
         if (_modelDoc != null)
@@ -574,6 +602,15 @@ public sealed partial class DebugWindowManager
         if (ImGui.SmallButton("Duplicate##model-selection-duplicate"))
         {
             ModelDuplicateSelectedElements();
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Cut##model-selection-cut"))
+        {
+            ModelCutSelectedElements(_modelCutPartsX, _modelCutPartsY, _modelCutPartsZ);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Split selected cuboids into separate elements using the inspector X/Y/Z piece counts.");
         }
         ImGui.SameLine();
         if (ImGui.SmallButton("Copy##model-selection-copy"))
@@ -665,14 +702,16 @@ public sealed partial class DebugWindowManager
         try
         {
             ImGui.SeparatorText("Keyboard");
-            ImGui.TextUnformatted("Ctrl+Shift+1..4   Select / Move / Resize / Rotate tool");
+            ImGui.TextUnformatted("Ctrl+Shift+1..5   Select / Move / Resize / Rotate / Cut tool");
             ImGui.TextUnformatted("Ctrl+Z / Ctrl+Y   Undo / Redo");
             ImGui.TextUnformatted("Ctrl+D            Duplicate selected element");
             ImGui.TextUnformatted("Ctrl+C            Copy selected elements as JSON");
             ImGui.TextUnformatted("Ctrl+V            Paste elements from clipboard JSON");
             ImGui.TextUnformatted("Delete            Delete selected element");
+            ImGui.TextUnformatted("Arrow keys        Nudge on selected arrow plane");
+            ImGui.TextUnformatted("Ctrl+Mouse wheel  Nudge on selected wheel axis");
             ImGui.TextUnformatted("Home              Focus camera on selection");
-            ImGui.TextUnformatted("Hold Alt          Bypass snapping while dragging");
+            ImGui.TextUnformatted("Shift / Alt       Coarse / fine nudge or drag");
             ImGui.TextDisabled("Plain letter keys are not used; the game still receives them.");
 
             ImGui.SeparatorText("Viewport mouse");
@@ -739,10 +778,12 @@ public sealed partial class DebugWindowManager
                 .Where(entry => filter.Length == 0 || entry.SearchText.Contains(filter, StringComparison.Ordinal))
                 .ToList();
 
-            ImGui.TextDisabled($"{filtered.Count} of {index.Count} shape file(s)");
+            ImGui.TextDisabled($"{filtered.Count} / {index.Count} shapes");
             ImGui.BeginChild("##model-browser-list", new NVector2(0f, 0f), false);
             try
             {
+                bool showDomain = string.IsNullOrWhiteSpace(_modelBrowserDomain) &&
+                    filtered.Select(entry => entry.Domain).Distinct(StringComparer.OrdinalIgnoreCase).Take(2).Count() > 1;
                 int shown = 0;
                 foreach (ModelShapeAssetEntry entry in filtered)
                 {
@@ -757,16 +798,20 @@ public sealed partial class DebugWindowManager
                         _modelDoc.FromAuthoredFile == entry.Authored &&
                         string.Equals(_modelDoc.Domain, entry.Domain, StringComparison.OrdinalIgnoreCase) &&
                         string.Equals(_modelDoc.AssetPath, entry.AssetPath, StringComparison.OrdinalIgnoreCase);
-                    string label = (_modelBrowserDomain.Length > 0 ? entry.AssetPath : entry.Display) + (entry.Authored ? " [authored]" : "");
+                    string label = ModelBrowserEntryLabel(entry, showDomain);
                     if (ImGui.Selectable($"{label}##model-asset-{shown}", selected) && !selected)
                     {
                         ModelRequestOpenDocument(entry);
                     }
-                    if (entry.Authored && ImGui.IsItemHovered())
+                    if (ImGui.IsItemHovered())
                     {
-                        ImGui.SetTooltip("A file you saved through the devtools authored models folder.");
+                        ImGui.SetTooltip(entry.Authored
+                            ? $"Authored: {entry.Display}"
+                            : entry.Display);
                     }
+                    DrawModelBrowserEntryContextMenu(entry, shown);
                 }
+                DrawModelBrowserFileActionPopups();
             }
             finally
             {
@@ -776,6 +821,410 @@ public sealed partial class DebugWindowManager
         finally
         {
             ImGui.EndChild();
+        }
+    }
+
+    private static string ModelBrowserEntryLabel(ModelShapeAssetEntry entry, bool showDomain)
+    {
+        string path = entry.AssetPath.Replace('\\', '/');
+        if (path.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase))
+        {
+            path = path["shapes/".Length..];
+        }
+
+        string label = showDomain ? $"{entry.Domain}:{path}" : path;
+        return entry.Authored ? $"{label}  A" : label;
+    }
+
+    private void DrawModelBrowserEntryContextMenu(ModelShapeAssetEntry entry, int shown)
+    {
+        if (!ImGui.BeginPopupContextItem($"##model-asset-menu-{shown}")) return;
+
+        try
+        {
+            if (ImGui.MenuItem("Open"))
+            {
+                ModelRequestOpenDocument(entry);
+            }
+            if (ImGui.MenuItem("Create authored copy"))
+            {
+                ModelCreateAuthoredShapeCopy(entry);
+            }
+            ImGui.Separator();
+            if (!entry.Authored) ImGui.BeginDisabled();
+            if (ImGui.MenuItem("Rename file..."))
+            {
+                _modelBrowserFileActionEntry = entry;
+                _modelBrowserRenameName = Path.GetFileName(entry.AssetPath.Replace('\\', '/'));
+                _modelBrowserPendingFilePopup = "rename";
+            }
+            if (ImGui.MenuItem("Change folder..."))
+            {
+                _modelBrowserFileActionEntry = entry;
+                _modelBrowserMoveFolder = ModelBrowserFolderWithoutShapes(entry.AssetPath);
+                _modelBrowserPendingFilePopup = "move";
+            }
+            if (ImGui.MenuItem("Delete file..."))
+            {
+                _modelBrowserFileActionEntry = entry;
+                _modelBrowserPendingFilePopup = "delete";
+            }
+            if (!entry.Authored) ImGui.EndDisabled();
+        }
+        finally
+        {
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawModelBrowserFileActionPopups()
+    {
+        if (_modelBrowserPendingFilePopup.Length > 0)
+        {
+            string pending = _modelBrowserPendingFilePopup;
+            _modelBrowserPendingFilePopup = "";
+            switch (pending)
+            {
+                case "rename":
+                    ImGui.OpenPopup("Rename authored shape##model-browser-rename-popup");
+                    break;
+                case "move":
+                    ImGui.OpenPopup("Move authored shape##model-browser-move-popup");
+                    break;
+                case "delete":
+                    ImGui.OpenPopup("Delete authored shape##model-browser-delete-popup");
+                    break;
+            }
+        }
+
+        DrawModelBrowserRenamePopup();
+        DrawModelBrowserMovePopup();
+        DrawModelBrowserDeletePopup();
+    }
+
+    private void DrawModelBrowserRenamePopup()
+    {
+        bool open = true;
+        if (!ImGui.BeginPopupModal("Rename authored shape##model-browser-rename-popup", ref open, ImGuiWindowFlags.AlwaysAutoResize)) return;
+
+        try
+        {
+            ModelShapeAssetEntry? entry = _modelBrowserFileActionEntry;
+            ImGui.TextUnformatted(entry?.Display ?? "");
+            ImGui.SetNextItemWidth(320f);
+            ImGui.InputText("File name##model-browser-rename-name", ref _modelBrowserRenameName, 180);
+            if (ImGui.Button("Rename##model-browser-rename-apply"))
+            {
+                if (entry != null)
+                {
+                    string folder = ModelAssetDirectory(entry.AssetPath);
+                    string newPath = string.IsNullOrEmpty(folder)
+                        ? ModelNormalizeShapeAssetPath(_modelBrowserRenameName)
+                        : $"{folder}/{EnsureJsonFilePath(_modelBrowserRenameName.Trim().Replace('\\', '/').Trim('/'))}";
+                    ModelMoveAuthoredShapeFile(entry, newPath, "Renamed authored shape");
+                }
+                _modelBrowserFileActionEntry = null;
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##model-browser-rename-cancel"))
+            {
+                _modelBrowserFileActionEntry = null;
+                ImGui.CloseCurrentPopup();
+            }
+        }
+        finally
+        {
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawModelBrowserMovePopup()
+    {
+        bool open = true;
+        if (!ImGui.BeginPopupModal("Move authored shape##model-browser-move-popup", ref open, ImGuiWindowFlags.AlwaysAutoResize)) return;
+
+        try
+        {
+            ModelShapeAssetEntry? entry = _modelBrowserFileActionEntry;
+            ImGui.TextUnformatted(Path.GetFileName(entry?.AssetPath ?? ""));
+            ImGui.SetNextItemWidth(360f);
+            ImGui.InputText("Folder under shapes##model-browser-move-folder", ref _modelBrowserMoveFolder, 220);
+            if (ImGui.Button("Move##model-browser-move-apply"))
+            {
+                if (entry != null)
+                {
+                    string fileName = Path.GetFileName(entry.AssetPath.Replace('\\', '/'));
+                    string folder = ModelNormalizeShapeFolder(_modelBrowserMoveFolder);
+                    string newPath = string.IsNullOrEmpty(folder) ? $"shapes/{fileName}" : $"shapes/{folder}/{fileName}";
+                    ModelMoveAuthoredShapeFile(entry, newPath, "Moved authored shape");
+                }
+                _modelBrowserFileActionEntry = null;
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##model-browser-move-cancel"))
+            {
+                _modelBrowserFileActionEntry = null;
+                ImGui.CloseCurrentPopup();
+            }
+        }
+        finally
+        {
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawModelBrowserDeletePopup()
+    {
+        bool open = true;
+        if (!ImGui.BeginPopupModal("Delete authored shape##model-browser-delete-popup", ref open, ImGuiWindowFlags.AlwaysAutoResize)) return;
+
+        try
+        {
+            ModelShapeAssetEntry? entry = _modelBrowserFileActionEntry;
+            ImGui.TextWrapped($"Delete authored file '{entry?.Display ?? ""}'?");
+            if (ImGui.Button("Delete##model-browser-delete-apply"))
+            {
+                if (entry != null)
+                {
+                    ModelDeleteAuthoredShapeFile(entry);
+                }
+                _modelBrowserFileActionEntry = null;
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##model-browser-delete-cancel"))
+            {
+                _modelBrowserFileActionEntry = null;
+                ImGui.CloseCurrentPopup();
+            }
+        }
+        finally
+        {
+            ImGui.EndPopup();
+        }
+    }
+
+    private static string ModelBrowserFolderWithoutShapes(string assetPath)
+    {
+        string directory = ModelAssetDirectory(assetPath);
+        return directory.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase)
+            ? directory["shapes/".Length..].Trim('/')
+            : directory.Trim('/');
+    }
+
+    private static string ModelAssetDirectory(string assetPath)
+    {
+        string normalized = assetPath.Replace('\\', '/').Trim().Trim('/');
+        int slash = normalized.LastIndexOf('/');
+        return slash > 0 ? normalized[..slash] : "";
+    }
+
+    private static string ModelNormalizeShapeFolder(string folder)
+    {
+        string normalized = folder.Replace('\\', '/').Trim().Trim('/');
+        if (normalized.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized["shapes/".Length..].Trim('/');
+        }
+
+        List<string> parts = [];
+        foreach (string rawPart in normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (rawPart is "." or "..") continue;
+            string part = SanitizePathSegment(rawPart);
+            if (!string.IsNullOrWhiteSpace(part)) parts.Add(part);
+        }
+
+        return string.Join("/", parts);
+    }
+
+    private static string ModelNormalizeShapeAssetPath(string assetPath)
+    {
+        string normalized = assetPath.Replace('\\', '/').Trim().Trim('/');
+        if (normalized.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized["shapes/".Length..].Trim('/');
+        }
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            normalized = "unnamed.json";
+        }
+
+        normalized = EnsureJsonFilePath(normalized);
+        string[] rawParts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        List<string> parts = [];
+        foreach (string rawPart in rawParts)
+        {
+            if (rawPart is "." or "..") continue;
+            string part = SanitizePathSegment(rawPart);
+            if (!string.IsNullOrWhiteSpace(part)) parts.Add(part);
+        }
+
+        if (parts.Count == 0) parts.Add("unnamed.json");
+        string fileName = parts[^1];
+        if (string.Equals(fileName, ".json", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(Path.GetFileNameWithoutExtension(fileName)))
+        {
+            parts[^1] = "unnamed.json";
+        }
+
+        return "shapes/" + string.Join("/", parts);
+    }
+
+    private static string ModelAuthoredShapeFilePath(string domain, string assetPath)
+    {
+        string normalizedPath = ModelNormalizeShapeAssetPath(assetPath);
+        string normalizedDomain = SanitizePathSegment(string.IsNullOrWhiteSpace(domain) ? "game" : domain.Trim().ToLowerInvariant());
+        string relativePath = Path.Combine("assets", normalizedDomain, normalizedPath.Replace('/', Path.DirectorySeparatorChar));
+        return GetToolAuthoredAssetPath("models", relativePath);
+    }
+
+    private static string ModelCopyAssetPath(string assetPath)
+    {
+        string normalized = ModelNormalizeShapeAssetPath(assetPath);
+        string directory = ModelAssetDirectory(normalized);
+        string fileName = Path.GetFileName(normalized.Replace('\\', '/'));
+        string name = Path.GetFileNameWithoutExtension(fileName);
+        string copyName = $"{name}-copy.json";
+        return string.IsNullOrEmpty(directory) ? copyName : $"{directory}/{copyName}";
+    }
+
+    private static string ModelUniqueAuthoredShapeAssetPath(string domain, string desiredAssetPath)
+    {
+        string normalized = ModelNormalizeShapeAssetPath(desiredAssetPath);
+        if (!File.Exists(ModelAuthoredShapeFilePath(domain, normalized))) return normalized;
+
+        string directory = ModelAssetDirectory(normalized);
+        string fileName = Path.GetFileName(normalized.Replace('\\', '/'));
+        string name = Path.GetFileNameWithoutExtension(fileName);
+        for (int copy = 2; copy < 10_000; copy++)
+        {
+            string candidateName = $"{name}-{copy}.json";
+            string candidate = string.IsNullOrEmpty(directory) ? candidateName : $"{directory}/{candidateName}";
+            if (!File.Exists(ModelAuthoredShapeFilePath(domain, candidate))) return candidate;
+        }
+
+        return normalized;
+    }
+
+    private void ModelCreateAuthoredShapeCopy(ModelShapeAssetEntry entry)
+    {
+        try
+        {
+            string text = entry.Asset.ToText();
+            string targetAssetPath = ModelUniqueAuthoredShapeAssetPath(entry.Domain, ModelCopyAssetPath(entry.AssetPath));
+            string targetPath = ModelAuthoredShapeFilePath(entry.Domain, targetAssetPath);
+            WriteAuthoredFile(targetPath, text);
+            _modelShapeIndex = null;
+            _modelStatus = $"Created authored copy {entry.Domain}:{targetAssetPath}.";
+        }
+        catch (Exception exception)
+        {
+            _modelDiagnostics.Exception($"Could not copy {entry.Display}", exception);
+            _modelStatus = $"Could not copy {entry.Display}: {exception.Message}";
+        }
+    }
+
+    private void ModelMoveAuthoredShapeFile(ModelShapeAssetEntry entry, string newAssetPath, string verb)
+    {
+        if (!entry.Authored)
+        {
+            _modelStatus = "Only authored shape files can be renamed or moved.";
+            return;
+        }
+
+        try
+        {
+            string oldAssetPath = ModelNormalizeShapeAssetPath(entry.AssetPath);
+            string targetAssetPath = ModelNormalizeShapeAssetPath(newAssetPath);
+            if (string.Equals(oldAssetPath, targetAssetPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _modelStatus = "Authored shape is already at that location.";
+                return;
+            }
+
+            string oldPath = ModelAuthoredShapeFilePath(entry.Domain, oldAssetPath);
+            string targetPath = ModelAuthoredShapeFilePath(entry.Domain, targetAssetPath);
+            if (!File.Exists(oldPath))
+            {
+                _modelStatus = $"Authored file does not exist: {entry.Display}.";
+                _modelShapeIndex = null;
+                return;
+            }
+            if (File.Exists(targetPath))
+            {
+                _modelStatus = $"Target already exists: {entry.Domain}:{targetAssetPath}.";
+                return;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+            File.Move(oldPath, targetPath);
+            ModelUpdateOpenAuthoredDocumentAfterMove(entry, targetAssetPath, targetPath);
+            _modelShapeIndex = null;
+            _modelStatus = $"{verb} to {entry.Domain}:{targetAssetPath}.";
+        }
+        catch (Exception exception)
+        {
+            _modelDiagnostics.Exception($"{verb} failed for {entry.Display}", exception);
+            _modelStatus = $"{verb} failed for {entry.Display}: {exception.Message}";
+        }
+    }
+
+    private void ModelUpdateOpenAuthoredDocumentAfterMove(ModelShapeAssetEntry entry, string newAssetPath, string newFilePath)
+    {
+        if (_modelDoc == null ||
+            !_modelDoc.FromAuthoredFile ||
+            !string.Equals(_modelDoc.Domain, entry.Domain, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(_modelDoc.AssetPath, entry.AssetPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        bool wasDirty = _modelDoc.Dirty;
+        _modelDoc.AssetPath = newAssetPath;
+        _modelDoc.SourceText = File.Exists(newFilePath) ? File.ReadAllText(newFilePath) : _modelDoc.SourceText;
+        _modelDoc.FromAuthoredFile = true;
+        _modelDoc.Dirty = wasDirty;
+        _modelJsonBufferStale = true;
+    }
+
+    private void ModelDeleteAuthoredShapeFile(ModelShapeAssetEntry entry)
+    {
+        if (!entry.Authored)
+        {
+            _modelStatus = "Only authored shape files can be deleted from this menu.";
+            return;
+        }
+
+        try
+        {
+            string oldAssetPath = ModelNormalizeShapeAssetPath(entry.AssetPath);
+            string oldPath = ModelAuthoredShapeFilePath(entry.Domain, oldAssetPath);
+            if (File.Exists(oldPath))
+            {
+                File.Delete(oldPath);
+            }
+
+            if (_modelDoc != null &&
+                _modelDoc.FromAuthoredFile &&
+                string.Equals(_modelDoc.Domain, entry.Domain, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(_modelDoc.AssetPath, entry.AssetPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _modelDoc.FromAuthoredFile = false;
+                _modelDoc.IsNew = true;
+                _modelDoc.Dirty = true;
+                _modelJsonBufferStale = true;
+            }
+
+            _modelShapeIndex = null;
+            _modelStatus = $"Deleted authored shape {entry.Display}.";
+        }
+        catch (Exception exception)
+        {
+            _modelDiagnostics.Exception($"Could not delete {entry.Display}", exception);
+            _modelStatus = $"Could not delete {entry.Display}: {exception.Message}";
         }
     }
 
@@ -846,11 +1295,13 @@ public sealed partial class DebugWindowManager
                 {
                     DrawModelTreeNode(_modelDoc.Roots[index], index, depth: 0);
                 }
+                DrawModelTreeRootDropTarget();
             }
             finally
             {
                 ImGui.EndChild();
             }
+            ModelClearCompletedTreeDragDrop();
         }
         finally
         {
@@ -923,6 +1374,7 @@ public sealed partial class DebugWindowManager
                 name = "> " + name;
             }
             bool open = ImGui.TreeNodeEx($"{name}###model-node", flags);
+            DrawModelTreeDragDrop(element);
             if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && !ImGui.IsItemToggledOpen())
             {
                 if (_modelReparentSource != null)
@@ -935,7 +1387,7 @@ public sealed partial class DebugWindowManager
                 }
                 else
                 {
-                    ModelSelectElement(element, additive: ImGui.GetIO().KeyCtrl);
+                    ModelSelectElement(element, additive: IsDevToolsCtrlDown());
                 }
             }
 
@@ -952,6 +1404,17 @@ public sealed partial class DebugWindowManager
                 if (ImGui.MenuItem("Duplicate", "Ctrl+D"))
                 {
                     ModelDuplicateSelectedElements();
+                }
+                if (ImGui.MenuItem("Cut with current pieces"))
+                {
+                    ModelCutSelectedElements(_modelCutPartsX, _modelCutPartsY, _modelCutPartsZ);
+                }
+                if (ImGui.BeginMenu("Quick cut"))
+                {
+                    if (ImGui.MenuItem("2 pieces on X")) ModelCutSelectedElements(2, 1, 1);
+                    if (ImGui.MenuItem("2 pieces on Y")) ModelCutSelectedElements(1, 2, 1);
+                    if (ImGui.MenuItem("2 pieces on Z")) ModelCutSelectedElements(1, 1, 2);
+                    ImGui.EndMenu();
                 }
                 if (ImGui.MenuItem("Copy", "Ctrl+C"))
                 {
@@ -1008,6 +1471,66 @@ public sealed partial class DebugWindowManager
         finally
         {
             ImGui.PopID();
+        }
+    }
+
+    private void DrawModelTreeDragDrop(ModelElementData element)
+    {
+        if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left, 6f))
+        {
+            _modelDragDropElement ??= element;
+        }
+
+        ModelElementData? dragged = _modelDragDropElement;
+        if (dragged == null) return;
+
+        bool hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        if (!hovered) return;
+
+        string draggedName = string.IsNullOrWhiteSpace(dragged.Name) ? "(unnamed)" : dragged.Name;
+        if (ReferenceEquals(dragged, element))
+        {
+            ImGui.SetTooltip($"Dragging {draggedName}");
+            return;
+        }
+
+        if (dragged.EnumerateSubtree().Contains(element))
+        {
+            ImGui.SetTooltip("Cannot reparent an element into its own subtree.");
+            if (ImGui.IsMouseReleased(ImGuiMouseButton.Left)) _modelDragDropElement = null;
+            return;
+        }
+
+        string targetName = string.IsNullOrWhiteSpace(element.Name) ? "(unnamed)" : element.Name;
+        ImGui.SetTooltip($"Drop {draggedName} under {targetName}.");
+        if (ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+        {
+            ModelReparentElement(dragged, element);
+            _modelDragDropElement = null;
+        }
+    }
+
+    private void DrawModelTreeRootDropTarget()
+    {
+        ImGui.Dummy(new NVector2(Math.Max(1f, ImGui.GetContentRegionAvail().X), 24f));
+        bool hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        if (hovered)
+        {
+            ImGui.SetTooltip("Drop here to move the element to the root.");
+        }
+
+        if (_modelDragDropElement != null && hovered && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+        {
+            ModelReparentElement(_modelDragDropElement, null);
+            _modelDragDropElement = null;
+        }
+    }
+
+    private void ModelClearCompletedTreeDragDrop()
+    {
+        if (_modelDragDropElement != null && !ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        {
+            _modelDragDropElement = null;
         }
     }
 
@@ -1191,6 +1714,8 @@ public sealed partial class DebugWindowManager
         }
         if (ImGui.IsItemDeactivatedAfterEdit()) ModelEndEdit("Edit size");
 
+        DrawModelElementCutControls(element);
+
         bool hasOrigin = element.RotationOrigin != null;
         if (ImGui.Checkbox("Rotation origin##model-elem-has-origin", ref hasOrigin))
         {
@@ -1300,6 +1825,58 @@ public sealed partial class DebugWindowManager
         ImGui.Spacing();
     }
 
+    private void DrawModelElementCutControls(ModelElementData element)
+    {
+        ImGui.SeparatorText("Cut");
+        int cutX = _modelCutPartsX;
+        int cutY = _modelCutPartsY;
+        int cutZ = _modelCutPartsZ;
+        bool partsChanged = false;
+
+        ImGui.SetNextItemWidth(58f);
+        partsChanged |= ImGui.InputInt("X##model-cut-x", ref cutX, 0);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(58f);
+        partsChanged |= ImGui.InputInt("Y##model-cut-y", ref cutY, 0);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(58f);
+        partsChanged |= ImGui.InputInt("Z##model-cut-z", ref cutZ, 0);
+        if (partsChanged)
+        {
+            _modelCutPartsX = ModelNormalizeCutParts(cutX);
+            _modelCutPartsY = ModelNormalizeCutParts(cutY);
+            _modelCutPartsZ = ModelNormalizeCutParts(cutZ);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip($"Pieces per axis. Max {ModelCutMaxPiecesPerElement} pieces per selected element.");
+        }
+
+        bool canCut = ModelCanCutSelection(_modelCutPartsX, _modelCutPartsY, _modelCutPartsZ, out string cutReason);
+        if (!canCut) ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Cut selected##model-cut-apply"))
+        {
+            ModelCutSelectedElements(_modelCutPartsX, _modelCutPartsY, _modelCutPartsZ);
+        }
+        if (!canCut) ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Replaces selected cuboids with separate cuboid elements that share exact boundaries.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("X2##model-cut-x2")) ModelCutSelectedElements(2, 1, 1);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Y2##model-cut-y2")) ModelCutSelectedElements(1, 2, 1);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Z2##model-cut-z2")) ModelCutSelectedElements(1, 1, 2);
+
+        if (!canCut)
+        {
+            ImGui.TextDisabled(cutReason);
+        }
+    }
+
     private void DrawModelFacesSection(ModelDocumentData doc)
     {
         ImGui.SeparatorText("Faces");
@@ -1311,6 +1888,32 @@ public sealed partial class DebugWindowManager
         }
 
         string[] textureCodes = doc.Textures.Select(texture => texture.Code).ToArray();
+        string commonTexture = ModelCommonFaceTexture(element);
+        string allFacesPreview = commonTexture.Length > 0 ? commonTexture : "(mixed)";
+        ImGui.SetNextItemWidth(-1f);
+        if (ModelFilteredCombo("All faces texture##model-face-all-texture", allFacesPreview, textureCodes, out string pickedAllTexture, allowCustom: true, filterHint: "filter texture codes"))
+        {
+            ModelBeginEdit();
+            for (int faceIndex = 0; faceIndex < 6; faceIndex++)
+            {
+                ModelFaceData? face = element.Faces[faceIndex];
+                if (face == null)
+                {
+                    face = new ModelFaceData();
+                    element.Faces[faceIndex] = face;
+                    ModelAutoUvFace(element, faceIndex);
+                }
+                face.Texture = pickedAllTexture;
+            }
+            ModelMarkChanged();
+            ModelEndEdit("Set all face textures");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Set the texture code for all six faces of this element. Missing faces are created.");
+        }
+        ImGui.Spacing();
+
         for (int faceIndex = 0; faceIndex < 6; faceIndex++)
         {
             ImGui.PushID(faceIndex);
@@ -1455,6 +2058,24 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private static string ModelCommonFaceTexture(ModelElementData element)
+    {
+        string? texture = null;
+        bool any = false;
+        foreach (ModelFaceData? face in element.Faces)
+        {
+            if (face == null) continue;
+            any = true;
+            texture ??= face.Texture;
+            if (!string.Equals(texture, face.Texture, StringComparison.Ordinal))
+            {
+                return "";
+            }
+        }
+
+        return any ? texture ?? "" : "";
+    }
+
     private void DrawModelExtraMetadataEditor(string label, string bufferKey, JObject? extra, Action<JObject?> setExtra)
     {
         if (extra == null)
@@ -1536,23 +2157,26 @@ public sealed partial class DebugWindowManager
         ImGuiIOPtr io = ImGui.GetIO();
         if (io.WantTextInput) return;
 
-        if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.Z))
+        bool ctrl = IsDevToolsCtrlDown();
+        bool shift = IsDevToolsShiftDown();
+
+        if (ctrl && !shift && IsDevToolsShortcutPressed(ImGuiKey.Z, GlKeys.Z))
         {
             ModelUndo();
         }
-        else if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.Y))
+        else if (ctrl && !shift && IsDevToolsShortcutPressed(ImGuiKey.Y, GlKeys.Y))
         {
             ModelRedo();
         }
-        else if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.D) && _modelSelectedElement != null)
+        else if (ctrl && !shift && IsDevToolsShortcutPressed(ImGuiKey.D, GlKeys.D) && _modelSelectedElement != null)
         {
             ModelDuplicateSelectedElements();
         }
-        else if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.C) && _modelSelectedElement != null)
+        else if (ctrl && !shift && IsDevToolsShortcutPressed(ImGuiKey.C, GlKeys.C) && _modelSelectedElement != null)
         {
             ModelCopySelectedElementsToClipboard();
         }
-        else if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.V) && _modelDoc != null)
+        else if (ctrl && !shift && IsDevToolsShortcutPressed(ImGuiKey.V, GlKeys.V) && _modelDoc != null)
         {
             ModelPasteElementsFromClipboard(_modelSelectedElement?.Parent);
         }
@@ -1560,26 +2184,127 @@ public sealed partial class DebugWindowManager
         {
             ModelDeleteSelectedElements();
         }
-        else if (io.KeyCtrl && io.KeyShift && ImGui.IsKeyPressed(ImGuiKey._1))
+        else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._1, GlKeys.Number1))
         {
             _modelGizmoTool = ModelGizmoTool.None;
         }
-        else if (io.KeyCtrl && io.KeyShift && ImGui.IsKeyPressed(ImGuiKey._2))
+        else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._2, GlKeys.Number2))
         {
             _modelGizmoTool = ModelGizmoTool.Move;
         }
-        else if (io.KeyCtrl && io.KeyShift && ImGui.IsKeyPressed(ImGuiKey._3))
+        else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._3, GlKeys.Number3))
         {
             _modelGizmoTool = ModelGizmoTool.Resize;
         }
-        else if (io.KeyCtrl && io.KeyShift && ImGui.IsKeyPressed(ImGuiKey._4))
+        else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._4, GlKeys.Number4))
         {
             _modelGizmoTool = ModelGizmoTool.Rotate;
+        }
+        else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._5, GlKeys.Number5))
+        {
+            _modelGizmoTool = ModelGizmoTool.Cut;
+        }
+        else if (ModelHandleNudgeShortcuts())
+        {
         }
         else if (ImGui.IsKeyPressed(ImGuiKey.Home))
         {
             ModelFocusCameraOnSelection();
         }
+    }
+
+    private bool ModelHandleNudgeShortcuts()
+    {
+        if (_modelDoc == null || ModelSelectedElementsInDocument().Count == 0) return false;
+
+        double step = ModelNudgeStep();
+        double[] delta = [0.0, 0.0, 0.0];
+        (int horizontalAxis, int verticalAxis) = ModelArrowNudgeAxes();
+
+        if (IsDevToolsShortcutPressed(ImGuiKey.LeftArrow, GlKeys.Left, repeat: true)) delta[horizontalAxis] -= step;
+        if (IsDevToolsShortcutPressed(ImGuiKey.RightArrow, GlKeys.Right, repeat: true)) delta[horizontalAxis] += step;
+        if (IsDevToolsShortcutPressed(ImGuiKey.UpArrow, GlKeys.Up, repeat: true)) delta[verticalAxis] += step;
+        if (IsDevToolsShortcutPressed(ImGuiKey.DownArrow, GlKeys.Down, repeat: true)) delta[verticalAxis] -= step;
+
+        return ModelNudgeSelectedElements(delta[0], delta[1], delta[2]);
+    }
+
+    private (int HorizontalAxis, int VerticalAxis) ModelArrowNudgeAxes()
+    {
+        return Math.Clamp(_modelArrowNudgePlane, 0, ModelNudgePlaneLabels.Length - 1) switch
+        {
+            1 => (0, 2),
+            2 => (1, 2),
+            _ => (0, 1)
+        };
+    }
+
+    private bool ModelNudgeSelectedElements(int axis, double amount)
+    {
+        double[] delta = [0.0, 0.0, 0.0];
+        delta[Math.Clamp(axis, 0, 2)] = amount;
+        return ModelNudgeSelectedElements(delta[0], delta[1], delta[2]);
+    }
+
+    private double ModelNudgeStep()
+    {
+        double step = _modelSnapEnabled ? Math.Max(0.0001f, _modelSnapMoveUnits) : 0.25;
+        if (IsDevToolsShiftDown()) step *= 4.0;
+        if (IsDevToolsAltDown()) step *= 0.25;
+        return step;
+    }
+
+    private bool ModelNudgeSelectedElements(double dx, double dy, double dz)
+    {
+        if (_modelDoc == null) return false;
+        if (Math.Abs(dx) < 0.000001 && Math.Abs(dy) < 0.000001 && Math.Abs(dz) < 0.000001) return false;
+
+        List<ModelElementData> targets = ModelEffectiveSelectedRoots();
+        if (targets.Count == 0) return false;
+
+        ModelBeginEdit();
+        foreach (ModelElementData element in targets)
+        {
+            ModelTranslateElement(element, dx, dy, dz);
+        }
+        ModelMarkChanged();
+        ModelEndEdit("Nudge selected elements");
+        _modelStatus = $"Nudged {targets.Count} selected element(s) {ModelFormatNudgeDelta(dx, dy, dz)}.";
+        return true;
+    }
+
+    private static void ModelTranslateElement(ModelElementData element, double dx, double dy, double dz)
+    {
+        double[] delta = [dx, dy, dz];
+        for (int axis = 0; axis < 3; axis++)
+        {
+            if (Math.Abs(delta[axis]) < 0.000001) continue;
+            element.From[axis] += delta[axis];
+            element.To[axis] += delta[axis];
+            if (element.RotationOrigin != null)
+            {
+                element.RotationOrigin[axis] += delta[axis];
+            }
+        }
+    }
+
+    private static string ModelFormatNudgeDelta(double dx, double dy, double dz)
+    {
+        List<string> parts = [];
+        if (Math.Abs(dx) >= 0.000001) parts.Add($"{ModelSigned(dx)} X");
+        if (Math.Abs(dy) >= 0.000001) parts.Add($"{ModelSigned(dy)} Y");
+        if (Math.Abs(dz) >= 0.000001) parts.Add($"{ModelSigned(dz)} Z");
+        return string.Join(", ", parts);
+    }
+
+    private static string ModelSigned(double value)
+    {
+        return value >= 0.0 ? $"+{value:0.###}" : $"{value:0.###}";
+    }
+
+    private static string ModelAxisLabel(int axis)
+    {
+        return ModelAxisLabels[Math.Clamp(axis, 0, ModelAxisLabels.Length - 1)];
     }
 
     private void ResetModelEditorLayout()
@@ -2073,6 +2798,323 @@ public sealed partial class DebugWindowManager
         _modelStatus = $"Duplicated {clones.Count} selected element(s).";
     }
 
+    private void ModelCutSelectedElements(int partsX, int partsY, int partsZ)
+    {
+        if (_modelDoc == null) return;
+
+        partsX = ModelNormalizeCutParts(partsX);
+        partsY = ModelNormalizeCutParts(partsY);
+        partsZ = ModelNormalizeCutParts(partsZ);
+        _modelCutPartsX = partsX;
+        _modelCutPartsY = partsY;
+        _modelCutPartsZ = partsZ;
+
+        if (!ModelCanCutSelection(partsX, partsY, partsZ, out string reason))
+        {
+            _modelStatus = reason;
+            return;
+        }
+
+        List<ModelElementData> targets = ModelEffectiveSelectedRoots();
+        HashSet<ModelElementData> targetSet = new(targets);
+        HashSet<string> reservedNames = new(
+            _modelDoc.EnumerateElements()
+                .Where(element => !targetSet.Contains(element))
+                .Select(element => element.Name),
+            StringComparer.OrdinalIgnoreCase);
+
+        ModelBeginEdit();
+        List<ModelElementData> created = [];
+        foreach (ModelElementData target in targets)
+        {
+            List<ModelElementData> siblings = target.Parent?.Children ?? _modelDoc.Roots;
+            int insertIndex = siblings.IndexOf(target);
+            if (insertIndex < 0) continue;
+
+            List<ModelElementData> pieces = ModelBuildCutPieces(
+                target,
+                partsX,
+                partsY,
+                partsZ,
+                desired => ModelReserveUniqueElementName(reservedNames, desired));
+            foreach (ModelElementData piece in pieces)
+            {
+                piece.Parent = target.Parent;
+            }
+
+            siblings.RemoveAt(insertIndex);
+            siblings.InsertRange(insertIndex, pieces);
+            created.AddRange(pieces);
+            if (ReferenceEquals(_modelReparentSource, target)) _modelReparentSource = null;
+        }
+
+        if (created.Count == 0)
+        {
+            ModelCancelEdit();
+            return;
+        }
+
+        ModelSelectElements(created, created[0]);
+        ModelMarkChanged();
+        ModelEndEdit(created.Count == 1 ? "Cut element" : "Cut selected elements");
+        _modelStatus = $"Cut {targets.Count} element(s) into {created.Count} separate element(s).";
+    }
+
+    private void ModelCutElementAtCoordinate(ModelElementData element, int axis, double coordinate)
+    {
+        if (_modelDoc == null) return;
+        axis = Math.Clamp(axis, 0, 2);
+        coordinate = Math.Round(coordinate, 6);
+
+        if (!ModelCanCutElementAtCoordinate(element, axis, coordinate, out string reason))
+        {
+            _modelStatus = reason;
+            return;
+        }
+
+        List<ModelElementData> siblings = element.Parent?.Children ?? _modelDoc.Roots;
+        int insertIndex = siblings.IndexOf(element);
+        if (insertIndex < 0)
+        {
+            _modelStatus = "Could not cut: element is no longer in the document.";
+            return;
+        }
+
+        HashSet<string> reservedNames = new(
+            _modelDoc.EnumerateElements()
+                .Where(candidate => !ReferenceEquals(candidate, element))
+                .Select(candidate => candidate.Name),
+            StringComparer.OrdinalIgnoreCase);
+        List<ModelElementData> pieces = ModelBuildCutPiecesAtCoordinate(
+            element,
+            axis,
+            coordinate,
+            desired => ModelReserveUniqueElementName(reservedNames, desired));
+        if (pieces.Count != 2)
+        {
+            _modelStatus = "Could not cut: preview coordinate is outside the element.";
+            return;
+        }
+
+        ModelBeginEdit();
+        foreach (ModelElementData piece in pieces)
+        {
+            piece.Parent = element.Parent;
+        }
+        siblings.RemoveAt(insertIndex);
+        siblings.InsertRange(insertIndex, pieces);
+        if (ReferenceEquals(_modelReparentSource, element)) _modelReparentSource = null;
+        ModelSelectElements(pieces, pieces[0]);
+        ModelMarkChanged();
+        ModelEndEdit("Viewport cut element");
+        _modelStatus = $"Cut {element.Name} on {ModelAxisName(axis)} at {coordinate:0.###}.";
+    }
+
+    private bool ModelCanCutSelection(int partsX, int partsY, int partsZ, out string reason)
+    {
+        reason = "";
+        if (_modelDoc == null)
+        {
+            reason = "Open a shape first.";
+            return false;
+        }
+
+        partsX = ModelNormalizeCutParts(partsX);
+        partsY = ModelNormalizeCutParts(partsY);
+        partsZ = ModelNormalizeCutParts(partsZ);
+        long piecesPerElement = (long)partsX * partsY * partsZ;
+        if (piecesPerElement <= 1)
+        {
+            reason = "Use at least 2 pieces.";
+            return false;
+        }
+        if (piecesPerElement > ModelCutMaxPiecesPerElement)
+        {
+            reason = $"Cut is capped at {ModelCutMaxPiecesPerElement} pieces per element.";
+            return false;
+        }
+
+        List<ModelElementData> targets = ModelEffectiveSelectedRoots();
+        if (targets.Count == 0)
+        {
+            reason = "Select an element to cut.";
+            return false;
+        }
+
+        foreach (ModelElementData target in targets)
+        {
+            if (target.Children.Count > 0)
+            {
+                reason = $"'{target.Name}' has children; unparent them before cutting.";
+                return false;
+            }
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                int parts = axis switch
+                {
+                    0 => partsX,
+                    1 => partsY,
+                    _ => partsZ
+                };
+                if (parts <= 1) continue;
+                if (target.To[axis] - target.From[axis] <= 0.000001)
+                {
+                    reason = $"'{target.Name}' has no positive {ModelAxisName(axis)} size to cut.";
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static bool ModelCanCutElementAtCoordinate(ModelElementData element, int axis, double coordinate, out string reason)
+    {
+        reason = "";
+        if (element.Children.Count > 0)
+        {
+            reason = $"'{element.Name}' has children; unparent them before cutting.";
+            return false;
+        }
+
+        if (!ModelIsCutCoordinateInside(element, axis, coordinate))
+        {
+            reason = $"Cut line is too close to the {ModelAxisName(axis)} edge.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool ModelIsCutCoordinateInside(ModelElementData element, int axis, double coordinate)
+    {
+        axis = Math.Clamp(axis, 0, 2);
+        double size = element.To[axis] - element.From[axis];
+        double margin = Math.Max(0.0001, Math.Min(0.01, Math.Abs(size) * 0.001));
+        return coordinate > element.From[axis] + margin &&
+            coordinate < element.To[axis] - margin;
+    }
+
+    private static int ModelNormalizeCutParts(int parts)
+    {
+        return Math.Clamp(parts, 1, 64);
+    }
+
+    private static List<ModelElementData> ModelBuildCutPieces(
+        ModelElementData source,
+        int partsX,
+        int partsY,
+        int partsZ,
+        System.Func<string, string>? reserveName = null)
+    {
+        partsX = ModelNormalizeCutParts(partsX);
+        partsY = ModelNormalizeCutParts(partsY);
+        partsZ = ModelNormalizeCutParts(partsZ);
+
+        double[][] bounds =
+        [
+            ModelBuildCutBounds(source.From[0], source.To[0], partsX),
+            ModelBuildCutBounds(source.From[1], source.To[1], partsY),
+            ModelBuildCutBounds(source.From[2], source.To[2], partsZ)
+        ];
+
+        List<ModelElementData> pieces = [];
+        for (int x = 0; x < partsX; x++)
+        {
+            for (int y = 0; y < partsY; y++)
+            {
+                for (int z = 0; z < partsZ; z++)
+                {
+                    ModelElementData piece = source.CloneShallow();
+                    piece.Name = reserveName?.Invoke(ModelCutPieceName(source.Name, x, y, z, partsX, partsY, partsZ))
+                        ?? ModelCutPieceName(source.Name, x, y, z, partsX, partsY, partsZ);
+                    piece.From = [bounds[0][x], bounds[1][y], bounds[2][z]];
+                    piece.To = [bounds[0][x + 1], bounds[1][y + 1], bounds[2][z + 1]];
+                    piece.Parent = null;
+                    piece.Children.Clear();
+                    pieces.Add(piece);
+                }
+            }
+        }
+
+        return pieces;
+    }
+
+    private static List<ModelElementData> ModelBuildCutPiecesAtCoordinate(
+        ModelElementData source,
+        int axis,
+        double coordinate,
+        System.Func<string, string>? reserveName = null)
+    {
+        axis = Math.Clamp(axis, 0, 2);
+        coordinate = Math.Round(coordinate, 6);
+        if (!ModelIsCutCoordinateInside(source, axis, coordinate)) return [];
+
+        int[] partIndices = [0, 0, 0];
+        int[] partCounts = [1, 1, 1];
+        partCounts[axis] = 2;
+
+        ModelElementData first = source.CloneShallow();
+        partIndices[axis] = 0;
+        first.Name = reserveName?.Invoke(ModelCutPieceName(source.Name, partIndices[0], partIndices[1], partIndices[2], partCounts[0], partCounts[1], partCounts[2]))
+            ?? ModelCutPieceName(source.Name, partIndices[0], partIndices[1], partIndices[2], partCounts[0], partCounts[1], partCounts[2]);
+        first.To[axis] = coordinate;
+        first.Parent = null;
+        first.Children.Clear();
+
+        ModelElementData second = source.CloneShallow();
+        partIndices[axis] = 1;
+        second.Name = reserveName?.Invoke(ModelCutPieceName(source.Name, partIndices[0], partIndices[1], partIndices[2], partCounts[0], partCounts[1], partCounts[2]))
+            ?? ModelCutPieceName(source.Name, partIndices[0], partIndices[1], partIndices[2], partCounts[0], partCounts[1], partCounts[2]);
+        second.From[axis] = coordinate;
+        second.Parent = null;
+        second.Children.Clear();
+
+        return [first, second];
+    }
+
+    private static double[] ModelBuildCutBounds(double from, double to, int parts)
+    {
+        parts = ModelNormalizeCutParts(parts);
+        double[] bounds = new double[parts + 1];
+        bounds[0] = from;
+        bounds[parts] = to;
+        double span = to - from;
+        for (int index = 1; index < parts; index++)
+        {
+            bounds[index] = Math.Round(from + span * index / parts, 6);
+        }
+
+        return bounds;
+    }
+
+    private static string ModelCutPieceName(string baseName, int x, int y, int z, int partsX, int partsY, int partsZ)
+    {
+        string name = string.IsNullOrWhiteSpace(baseName) ? "Element" : baseName.Trim();
+        List<string> suffix = [];
+        if (partsX > 1) suffix.Add($"x{x + 1}");
+        if (partsY > 1) suffix.Add($"y{y + 1}");
+        if (partsZ > 1) suffix.Add($"z{z + 1}");
+        return suffix.Count == 0 ? name : $"{name}_{string.Join("_", suffix)}";
+    }
+
+    private static string ModelReserveUniqueElementName(HashSet<string> reservedNames, string desired)
+    {
+        desired = string.IsNullOrWhiteSpace(desired) ? "Element" : desired.Trim();
+        if (reservedNames.Add(desired)) return desired;
+
+        for (int counter = 2; counter < 10000; counter++)
+        {
+            string candidate = $"{desired}{counter}";
+            if (reservedNames.Add(candidate)) return candidate;
+        }
+
+        string fallback = $"{desired}_{Guid.NewGuid():N}"[..Math.Min(desired.Length + 9, desired.Length + 33)];
+        reservedNames.Add(fallback);
+        return fallback;
+    }
+
     private void ModelMirrorSelectedElements(int axis)
     {
         if (_modelDoc == null) return;
@@ -2159,7 +3201,7 @@ public sealed partial class DebugWindowManager
         if (ReferenceEquals(element.Parent, newParent)) return;
 
         ModelBeginEdit();
-        bool compensated = ModelTryCompensateReparentOffsets(element, newParent);
+        bool compensated = ModelTryPreserveReparentTransform(element, newParent);
         List<ModelElementData> oldSiblings = element.Parent?.Children ?? _modelDoc.Roots;
         oldSiblings.Remove(element);
         element.Parent = newParent;
@@ -2167,49 +3209,83 @@ public sealed partial class DebugWindowManager
         ModelMarkChanged();
         ModelEndEdit("Reparent element");
         _modelStatus = compensated
-            ? $"Reparented {element.Name}; coordinates were adjusted to keep its position."
-            : $"Reparented {element.Name}. Rotated parents prevent coordinate compensation; from/to kept as-is.";
+            ? $"Reparented {element.Name}; transform was adjusted to keep its position."
+            : $"Reparented {element.Name}. Could not compensate transform; local values were kept as-is.";
     }
 
-    private bool ModelTryCompensateReparentOffsets(ModelElementData element, ModelElementData? newParent)
+    private bool ModelTryPreserveReparentTransform(ModelElementData element, ModelElementData? newParent)
     {
-        static bool ChainHasRotation(ModelElementData? node)
+        try
         {
-            for (ModelElementData? current = node; current != null; current = current.Parent)
-            {
-                if (Math.Abs(current.RotationX) > 0.0001 || Math.Abs(current.RotationY) > 0.0001 || Math.Abs(current.RotationZ) > 0.0001)
-                {
-                    return true;
-                }
-            }
+            Matrixd oldWorld = ModelMatrixd(ModelComputeElementMatrix(element));
+            Matrixd newParentWorld = newParent == null
+                ? Matrixd.Create().Identity()
+                : ModelMatrixd(ModelComputeElementMatrix(newParent));
+            Matrixd inverseNewParent = newParentWorld.Clone().Invert();
+            Matrixd newLocal = oldWorld.Clone().ReverseMul(inverseNewParent.Values);
+
+            double[] oldOrigin = ModelEffectiveRotationOrigin(element);
+            Vec3d oldOriginWorld = ModelTransformPoint(ModelComputeParentChainMatrix(element), oldOrigin);
+            Vec3d newOriginLocal = ModelTransformPoint(inverseNewParent, oldOriginWorld);
+
+            Vec3d oldLocalBoxOrigin = ModelTransformPoint(newLocal, new Vec3d(0, 0, 0));
+            RigIkMatrix3 newRotation = RigIkMatrix3.FromMatrixd(newLocal).Orthonormalized();
+            RigIkMatrix3 inverseRotation = newRotation.Inverted().Orthonormalized();
+            Vec3d fromOffset = inverseRotation.TransformDirection(Sub(oldLocalBoxOrigin, newOriginLocal));
+            Vec3d newFrom = Add(newOriginLocal, fromOffset);
+            Vec3d euler = newRotation.ToEulerDegrees();
+
+            double sizeX = element.SizeX;
+            double sizeY = element.SizeY;
+            double sizeZ = element.SizeZ;
+            bool hadOrigin = element.RotationOrigin != null;
+
+            element.From[0] = ModelRoundForReparent(newFrom.X);
+            element.From[1] = ModelRoundForReparent(newFrom.Y);
+            element.From[2] = ModelRoundForReparent(newFrom.Z);
+            element.To[0] = ModelRoundForReparent(newFrom.X + sizeX);
+            element.To[1] = ModelRoundForReparent(newFrom.Y + sizeY);
+            element.To[2] = ModelRoundForReparent(newFrom.Z + sizeZ);
+            element.RotationX = ModelWrapDegrees(euler.X);
+            element.RotationY = ModelWrapDegrees(euler.Y);
+            element.RotationZ = ModelWrapDegrees(euler.Z);
+            bool hasRotation = Math.Abs(element.RotationX) > 0.0001 || Math.Abs(element.RotationY) > 0.0001 || Math.Abs(element.RotationZ) > 0.0001;
+            element.RotationOrigin = hadOrigin || hasRotation
+                ? [ModelRoundForReparent(newOriginLocal.X), ModelRoundForReparent(newOriginLocal.Y), ModelRoundForReparent(newOriginLocal.Z)]
+                : null;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _modelDiagnostics.Exception("Reparent transform compensation failed", exception);
             return false;
         }
+    }
 
-        static double[] ChainOffset(ModelElementData? node)
-        {
-            double[] offset = new double[3];
-            for (ModelElementData? current = node; current != null; current = current.Parent)
-            {
-                offset[0] += current.From[0];
-                offset[1] += current.From[1];
-                offset[2] += current.From[2];
-            }
-            return offset;
-        }
+    private static Matrixd ModelMatrixd(Matrixf matrix)
+    {
+        return Matrixd.Create().Set(matrix.Values);
+    }
 
-        if (ChainHasRotation(element.Parent) || ChainHasRotation(newParent)) return false;
+    private static Vec3d ModelTransformPoint(Matrixd matrix, Vec3d point)
+    {
+        Vec4d transformed = matrix.TransformVector(new Vec4d(point.X / ModelUnitsPerBlock, point.Y / ModelUnitsPerBlock, point.Z / ModelUnitsPerBlock, 1.0));
+        return new Vec3d(transformed.X * ModelUnitsPerBlock, transformed.Y * ModelUnitsPerBlock, transformed.Z * ModelUnitsPerBlock);
+    }
 
-        double[] oldOffset = ChainOffset(element.Parent);
-        double[] newOffset = ChainOffset(newParent);
-        for (int axis = 0; axis < 3; axis++)
-        {
-            double delta = oldOffset[axis] - newOffset[axis];
-            element.From[axis] += delta;
-            element.To[axis] += delta;
-            if (element.RotationOrigin != null) element.RotationOrigin[axis] += delta;
-        }
+    private static Vec3d ModelTransformPoint(Matrixf matrix, double[] pointUnits)
+    {
+        Vec4f transformed = matrix.TransformVector(new Vec4f(
+            (float)(pointUnits[0] / ModelUnitsPerBlock),
+            (float)(pointUnits[1] / ModelUnitsPerBlock),
+            (float)(pointUnits[2] / ModelUnitsPerBlock),
+            1f));
+        return new Vec3d(transformed.X * ModelUnitsPerBlock, transformed.Y * ModelUnitsPerBlock, transformed.Z * ModelUnitsPerBlock);
+    }
 
-        return true;
+    private static double ModelRoundForReparent(double value)
+    {
+        return Math.Abs(value) < 0.000001 ? 0.0 : Math.Round(value, 6);
     }
 
     private void ModelAutoUvFace(ModelElementData element, int faceIndex)

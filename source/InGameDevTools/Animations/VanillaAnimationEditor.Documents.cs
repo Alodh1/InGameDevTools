@@ -29,6 +29,7 @@ public sealed partial class DebugWindowManager
         public string DisplayPath { get; init; } = "";
         public string? EntityCode { get; init; }
         public EntityProperties? EntityType { get; init; }
+        public Block? Block { get; init; }
         public Shape? Shape { get; init; }
         public JObject? SourceJson { get; init; }
         public VanillaPlayerModelSource? PlayerModelSource { get; init; }
@@ -41,22 +42,80 @@ public sealed partial class DebugWindowManager
         public List<VanillaAnimationMetaEntry> MetadataEntries { get; } = [];
         public string HistoryKey => $"{Kind}:{Domain}:{AssetPath}:{EntityCode}";
         public bool Dirty { get; private set; }
-        private string _cleanSerialized = "";
+        public int EditVersion { get; private set; }
+        private string[] _cleanAnimationSerialized = [];
+        private string[] _cleanMetadataSerialized = [];
+        private int _lastDirtyAnimationEntry = -1;
+        private int _lastDirtyMetadataEntry = -1;
 
         public void MarkClean()
         {
-            _cleanSerialized = VanillaAnimationDocumentSerializer.Serialize(this);
+            _cleanAnimationSerialized = ShapeAnimations.Select(SerializeAnimationEntry).ToArray();
+            _cleanMetadataSerialized = MetadataEntries.Select(SerializeMetadataEntry).ToArray();
+            _lastDirtyAnimationEntry = -1;
+            _lastDirtyMetadataEntry = -1;
+            EditVersion++;
             Dirty = false;
         }
 
         public void MarkDirty()
         {
+            EditVersion++;
             Dirty = true;
         }
 
         public void UpdateDirtyState()
         {
-            Dirty = !string.Equals(_cleanSerialized, VanillaAnimationDocumentSerializer.Serialize(this), StringComparison.Ordinal);
+            EditVersion++;
+            Dirty = ComputeDirtyState();
+        }
+
+        private bool ComputeDirtyState()
+        {
+            if (ShapeAnimations.Count != _cleanAnimationSerialized.Length) return true;
+            if (MetadataEntries.Count != _cleanMetadataSerialized.Length) return true;
+
+            if (_lastDirtyAnimationEntry >= 0 && _lastDirtyAnimationEntry < ShapeAnimations.Count &&
+                !string.Equals(_cleanAnimationSerialized[_lastDirtyAnimationEntry], SerializeAnimationEntry(ShapeAnimations[_lastDirtyAnimationEntry]), StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (_lastDirtyMetadataEntry >= 0 && _lastDirtyMetadataEntry < MetadataEntries.Count &&
+                !string.Equals(_cleanMetadataSerialized[_lastDirtyMetadataEntry], SerializeMetadataEntry(MetadataEntries[_lastDirtyMetadataEntry]), StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            for (int index = 0; index < ShapeAnimations.Count; index++)
+            {
+                if (string.Equals(_cleanAnimationSerialized[index], SerializeAnimationEntry(ShapeAnimations[index]), StringComparison.Ordinal)) continue;
+
+                _lastDirtyAnimationEntry = index;
+                return true;
+            }
+            _lastDirtyAnimationEntry = -1;
+
+            for (int index = 0; index < MetadataEntries.Count; index++)
+            {
+                if (string.Equals(_cleanMetadataSerialized[index], SerializeMetadataEntry(MetadataEntries[index]), StringComparison.Ordinal)) continue;
+
+                _lastDirtyMetadataEntry = index;
+                return true;
+            }
+            _lastDirtyMetadataEntry = -1;
+
+            return false;
+        }
+
+        private static string SerializeAnimationEntry(VanillaShapeAnimationEntry entry)
+        {
+            return JsonConvert.SerializeObject(VanillaAnimationExportService.ToVanillaAnimationToken(entry.Animation, entry.SourceToken), Formatting.None);
+        }
+
+        private static string SerializeMetadataEntry(VanillaAnimationMetaEntry entry)
+        {
+            return JsonConvert.SerializeObject(VanillaAnimationExportService.ToAnimationMetaDataToken(entry.Metadata, entry.SourceToken), Formatting.None);
         }
     }
 

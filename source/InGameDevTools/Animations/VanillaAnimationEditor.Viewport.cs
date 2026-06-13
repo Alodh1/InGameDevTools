@@ -21,6 +21,21 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
+    private readonly record struct VanillaCutPreview(
+        string ElementName,
+        int FaceAxis,
+        bool FacePositive,
+        int CutAxis,
+        double CutCoordinate,
+        NVector2[] PlaneCorners,
+        NVector2 LineStart,
+        NVector2 LineEnd);
+
+    private static readonly JsonSerializerSettings VanillaShapeElementJsonSettings = new()
+    {
+        NullValueHandling = NullValueHandling.Ignore
+    };
+
     private void DrawVanillaCenterPanel(VanillaBrowserRow? row, float deltaSeconds)
     {
         if (row == null)
@@ -83,13 +98,29 @@ public sealed partial class DebugWindowManager
 
         if (scene.Playing)
         {
-            scene.Tick(deltaSeconds);
+            scene.Tick(deltaSeconds * Math.Clamp(_vanillaPlaybackSpeed, 0.05f, 4f));
             ApplyVanillaLoop(scene);
         }
 
         if (ImGui.Button("Play##vanilla-playback"))
         {
             scene.Play();
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(110);
+        if (ImGui.SliderFloat("Speed##vanilla-playback-speed", ref _vanillaPlaybackSpeed, 0.1f, 4f, "%.2fx"))
+        {
+            _vanillaPlaybackSpeed = Math.Clamp(_vanillaPlaybackSpeed, 0.05f, 4f);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Preview playback speed multiplier. Does not change the animation data.");
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("1x##vanilla-playback-speed-reset"))
+        {
+            _vanillaPlaybackSpeed = 1f;
         }
 
         ImGui.SameLine();
@@ -105,26 +136,25 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        ImGui.SameLine();
-        if (ImGui.Button("Step keyframe <##vanilla-playback"))
+        if (ImGui.Button("Key <##vanilla-playback"))
         {
             StepVanillaKeyframe(row, -1);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Step keyframe >##vanilla-playback"))
+        if (ImGui.Button("Key >##vanilla-playback"))
         {
             StepVanillaKeyframe(row, 1);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Step frame <##vanilla-playback"))
+        if (ImGui.Button("Frame <##vanilla-playback"))
         {
             ScrubVanillaPreview(scene, Math.Max(0, scene.CurrentFrame - 1));
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Step frame >##vanilla-playback"))
+        if (ImGui.Button("Frame >##vanilla-playback"))
         {
             ScrubVanillaPreview(scene, Math.Min(Math.Max(0, scene.QuantityFrames - 1), scene.CurrentFrame + 1));
         }
@@ -134,14 +164,13 @@ public sealed partial class DebugWindowManager
         int loopEnd = Math.Clamp(_vanillaSelection.LoopEndFrame, 0, maxFrame);
         if (loopEnd < loopStart) loopEnd = loopStart;
 
-        ImGui.SetNextItemWidth(180);
+        ImGui.SetNextItemWidth(Math.Min(180f, Math.Max(120f, ImGui.GetContentRegionAvail().X)));
         if (ImGui.SliderInt("Loop start frame##vanilla-playback", ref loopStart, 0, maxFrame))
         {
             _vanillaSelection.LoopStartFrame = Math.Min(loopStart, _vanillaSelection.LoopEndFrame);
         }
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(180);
+        ImGui.SetNextItemWidth(Math.Min(180f, Math.Max(120f, ImGui.GetContentRegionAvail().X)));
         if (ImGui.SliderInt("Loop end frame##vanilla-playback", ref loopEnd, 0, maxFrame))
         {
             _vanillaSelection.LoopEndFrame = Math.Max(loopEnd, _vanillaSelection.LoopStartFrame);
@@ -190,6 +219,21 @@ public sealed partial class DebugWindowManager
             {
                 _vanillaOnionSkinOpacity = Math.Clamp(_vanillaOnionSkinOpacity, 0.05f, 0.6f);
             }
+        }
+
+        ImGui.SameLine();
+        bool motionTrail = _vanillaMotionTrailEnabled;
+        if (ImGui.Checkbox("Motion trail##vanilla-preview-trail", ref motionTrail))
+        {
+            _vanillaMotionTrailEnabled = motionTrail;
+            _vanillaMotionTrailCacheKey = "";
+            _vanillaStatus = _vanillaMotionTrailEnabled
+                ? "Motion trail enabled for the selected element."
+                : "Motion trail disabled.";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Draws the selected element's pivot path across the whole animation in the Orbit viewport: keyframes are marked yellow, the playhead green.");
         }
 
         ImGui.SameLine();
@@ -554,6 +598,8 @@ public sealed partial class DebugWindowManager
         NVector2 min = ImGui.GetItemRectMin();
         NVector2 max = ImGui.GetItemRectMax();
         bool hovered = ImGui.IsItemHovered();
+        bool toolOverlayActive = HandleTransformViewportToolOverlayInput(min, max, TransformGizmoContext.Free, allowCut: true, modeChanged: ClearVanillaViewportGizmoDrag);
+        if (toolOverlayActive) hovered = false;
 
         if (hovered)
         {
@@ -635,6 +681,8 @@ public sealed partial class DebugWindowManager
             VanillaPreviewCameraState camera = BuildVanillaPreviewCamera(scene, viewportWidth, viewportHeight, _vanillaViewportYaw, _vanillaViewportPitch, _vanillaViewportZoom, _vanillaViewportPanX, _vanillaViewportPanY, effectiveMode);
             drawList.PushClipRect(min, max, true);
             DrawVanillaViewportGrid(drawList, camera, scene, min, viewportWidth, viewportHeight, grid, gridMajor);
+            EnsureVanillaMotionTrail(row, scene);
+            DrawVanillaMotionTrail(row, scene, drawList, camera, min, viewportWidth, viewportHeight);
             drawList.PopClipRect();
         }
 
@@ -650,8 +698,13 @@ public sealed partial class DebugWindowManager
 
         if (effectiveMode == VanillaPreviewMode.Orbit)
         {
-            bool suppressBodyPick = DrawVanillaViewportGizmo(row, scene, drawList, min, max, hovered);
-            DrawVanillaViewportElementPicker(row, scene, drawList, min, max, hovered, suppressBodyPick);
+            bool suppressBodyPick = GizmoMode == TransformGizmoMode.Cut
+                ? DrawVanillaViewportCutTool(row, scene, drawList, min, max, hovered)
+                : DrawVanillaViewportGizmo(row, scene, drawList, min, max, hovered);
+            if (GizmoMode != TransformGizmoMode.Cut)
+            {
+                DrawVanillaViewportElementPicker(row, scene, drawList, min, max, hovered, suppressBodyPick);
+            }
         }
         else
         {
@@ -666,6 +719,8 @@ public sealed partial class DebugWindowManager
                 drawList.AddText(new NVector2(min.X + 12f, min.Y + 50f), hint, "Edit gizmos are available in Orbit mode.");
             }
         }
+
+        DrawTransformViewportToolOverlay(min, max, $"vanilla-{scene.Key}", TransformGizmoContext.Free, allowCut: true, modeChanged: ClearVanillaViewportGizmoDrag);
     }
 
     private void SaveVanillaViewportScreenshotIfRequested(int textureId, float viewportWidth, float viewportHeight, VanillaBrowserRow row)
@@ -900,9 +955,651 @@ public sealed partial class DebugWindowManager
         };
     }
 
+    private bool DrawVanillaViewportCutTool(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, ImDrawListPtr drawList, NVector2 min, NVector2 max, bool hovered)
+    {
+        if (!hovered || row.ShapeAnimation == null && row.MetadataEntry?.ResolveCurrentShape() == null) return false;
+        if (!TryPickVanillaCutPreview(scene, min, max, ImGui.GetMousePos(), out VanillaCutPreview preview)) return false;
+
+        uint plane = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.62f, 0.18f, 0.82f));
+        uint line = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.96f, 0.78f, 1f));
+        for (int index = 0; index < preview.PlaneCorners.Length; index++)
+        {
+            DrawVanillaViewportLine(drawList, preview.PlaneCorners[index], preview.PlaneCorners[(index + 1) & 3], plane, 1.8f);
+        }
+        DrawVanillaViewportLine(drawList, preview.LineStart, preview.LineEnd, line, 3.1f);
+        drawList.AddText((preview.LineStart + preview.LineEnd) * 0.5f + new NVector2(8f, -18f), line, $"Cut {ModelAxisName(preview.CutAxis)} {preview.CutCoordinate:0.###}");
+
+        ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            ApplyVanillaViewportCut(row, preview);
+        }
+
+        return true;
+    }
+
+    private bool TryPickVanillaCutPreview(VanillaAnimationPreviewScene scene, NVector2 min, NVector2 max, NVector2 mouse, out VanillaCutPreview preview)
+    {
+        preview = default;
+        float width = Math.Max(1f, max.X - min.X);
+        float height = Math.Max(1f, max.Y - min.Y);
+        VanillaPreviewCameraState camera = BuildVanillaPreviewCamera(scene, width, height, _vanillaViewportYaw, _vanillaViewportPitch, _vanillaViewportZoom, _vanillaViewportPanX, _vanillaViewportPanY, VanillaPreviewMode.Orbit);
+
+        bool found = false;
+        double bestDistance = double.MaxValue;
+        int bestDepth = -1;
+        VanillaCutPreview bestPreview = default;
+
+        void Visit(ElementPose pose, int depth)
+        {
+            if (pose.ForElement == null || string.IsNullOrWhiteSpace(pose.ForElement.Name)) return;
+
+            Matrixf elementModel = BuildVanillaElementModelMatrix(camera.Model, pose);
+            if (TryGetVanillaLocalCutHit(camera, elementModel, pose.ForElement, min, width, height, mouse, out double[] localUnits, out int faceAxis, out bool facePositive, out double distance) &&
+                TryBuildVanillaCutPreview(camera, elementModel, pose.ForElement, localUnits, faceAxis, facePositive, min, width, height, out VanillaCutPreview candidate))
+            {
+                bool better = distance < bestDistance - 0.001 ||
+                    (Math.Abs(distance - bestDistance) <= 0.001 && depth > bestDepth);
+                if (better)
+                {
+                    bestPreview = candidate;
+                    bestDistance = distance;
+                    bestDepth = depth;
+                    found = true;
+                }
+            }
+
+            foreach (ElementPose child in pose.ChildElementPoses ?? [])
+            {
+                Visit(child, depth + 1);
+            }
+        }
+
+        foreach (ElementPose root in scene.Animator.RootPoses ?? [])
+        {
+            Visit(root, 0);
+        }
+
+        preview = bestPreview;
+        return found;
+    }
+
+    private bool TryBuildVanillaCutPreview(
+        VanillaPreviewCameraState camera,
+        Matrixf elementModel,
+        ShapeElement element,
+        double[] localUnits,
+        int faceAxis,
+        bool facePositive,
+        NVector2 min,
+        float width,
+        float height,
+        out VanillaCutPreview preview)
+    {
+        preview = default;
+        if (element.From == null || element.To == null || element.From.Length < 3 || element.To.Length < 3) return false;
+        if (faceAxis < 0 || faceAxis > 2) return false;
+        string elementName = element.Name ?? "";
+        if (string.IsNullOrWhiteSpace(elementName)) return false;
+
+        double[] sizeUnits =
+        [
+            Math.Max(0.0, element.To[0] - element.From[0]),
+            Math.Max(0.0, element.To[1] - element.From[1]),
+            Math.Max(0.0, element.To[2] - element.From[2])
+        ];
+        double[] sizeBlocks = [sizeUnits[0] / 16.0, sizeUnits[1] / 16.0, sizeUnits[2] / 16.0];
+        int[] candidates = ModelCutCandidateAxes(faceAxis);
+        if (candidates.Length == 0) return false;
+
+        bool alternate = _modelCutOrientation == ModelCutOrientation.Auto && IsDevToolsShiftDown();
+        bool found = false;
+        float bestScore = float.MinValue;
+        VanillaCutPreview best = default;
+
+        foreach (int cutAxis in candidates)
+        {
+            double cutLocalUnits = Math.Clamp(localUnits[cutAxis], 0.0, sizeUnits[cutAxis]);
+            double cutCoordinate = Math.Round(element.From[cutAxis] + cutLocalUnits, 6);
+            if (!VanillaIsCutCoordinateInside(element, cutAxis, cutCoordinate)) continue;
+
+            double cutLocalBlocks = cutLocalUnits / 16.0;
+            int lineAxis = 3 - faceAxis - cutAxis;
+            NVector2[] planeCorners = ProjectVanillaCutPlaneCorners(camera, elementModel, sizeBlocks, cutAxis, cutLocalBlocks, min, width, height);
+            if (planeCorners.Length < 4) continue;
+
+            double[] lineStartUnits = [0, 0, 0];
+            double[] lineEndUnits = [0, 0, 0];
+            lineStartUnits[faceAxis] = facePositive ? sizeBlocks[faceAxis] : 0.0;
+            lineEndUnits[faceAxis] = lineStartUnits[faceAxis];
+            lineStartUnits[cutAxis] = cutLocalBlocks;
+            lineEndUnits[cutAxis] = cutLocalBlocks;
+            lineStartUnits[lineAxis] = 0.0;
+            lineEndUnits[lineAxis] = sizeBlocks[lineAxis];
+            if (!ProjectVanillaPreviewPoint(elementModel, camera, ToNVector3(lineStartUnits), min, width, height, out NVector2 lineStart) ||
+                !ProjectVanillaPreviewPoint(elementModel, camera, ToNVector3(lineEndUnits), min, width, height, out NVector2 lineEnd))
+            {
+                continue;
+            }
+
+            float score = (lineEnd - lineStart).LengthSquared();
+            if (alternate) score = -score;
+            if (!found || score > bestScore)
+            {
+                bestScore = score;
+                best = new VanillaCutPreview(elementName, faceAxis, facePositive, cutAxis, cutCoordinate, planeCorners, lineStart, lineEnd);
+                found = true;
+            }
+        }
+
+        preview = best;
+        return found;
+    }
+
+    private static NVector2[] ProjectVanillaCutPlaneCorners(VanillaPreviewCameraState camera, Matrixf elementModel, double[] sizeBlocks, int cutAxis, double cutLocalBlocks, NVector2 min, float width, float height)
+    {
+        int[] axes = [0, 1, 2];
+        int axisA = axes.First(axis => axis != cutAxis);
+        int axisB = axes.Last(axis => axis != cutAxis);
+        double[][] corners =
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0]
+        ];
+        corners[0][axisA] = 0.0;
+        corners[0][axisB] = 0.0;
+        corners[1][axisA] = sizeBlocks[axisA];
+        corners[1][axisB] = 0.0;
+        corners[2][axisA] = sizeBlocks[axisA];
+        corners[2][axisB] = sizeBlocks[axisB];
+        corners[3][axisA] = 0.0;
+        corners[3][axisB] = sizeBlocks[axisB];
+        for (int index = 0; index < corners.Length; index++)
+        {
+            corners[index][cutAxis] = cutLocalBlocks;
+        }
+
+        NVector2[] projected = new NVector2[4];
+        for (int index = 0; index < corners.Length; index++)
+        {
+            if (!ProjectVanillaPreviewPoint(elementModel, camera, ToNVector3(corners[index]), min, width, height, out projected[index]))
+            {
+                return [];
+            }
+        }
+
+        return projected;
+    }
+
+    private static bool TryGetVanillaLocalCutHit(
+        VanillaPreviewCameraState camera,
+        Matrixf elementModel,
+        ShapeElement element,
+        NVector2 min,
+        float width,
+        float height,
+        NVector2 mouse,
+        out double[] localUnits,
+        out int faceAxis,
+        out bool facePositive,
+        out double distance)
+    {
+        localUnits = [0, 0, 0];
+        faceAxis = -1;
+        facePositive = false;
+        distance = 0;
+        if (element.From == null || element.To == null || element.From.Length < 3 || element.To.Length < 3) return false;
+
+        double[] sizeBlocks =
+        [
+            Math.Max(0.0, element.To[0] - element.From[0]) / 16.0,
+            Math.Max(0.0, element.To[1] - element.From[1]) / 16.0,
+            Math.Max(0.0, element.To[2] - element.From[2]) / 16.0
+        ];
+        if (sizeBlocks.Any(size => size <= 0.000001)) return false;
+
+        Matrixf clipFromLocal = new();
+        clipFromLocal.Set(elementModel.Values);
+        clipFromLocal.ReverseMul(camera.ProjectionView.Values);
+
+        double[] inverseClipFromLocal = Mat4d.Create();
+        if (Mat4d.Invert(inverseClipFromLocal, VanillaToDoubleMatrix(clipFromLocal.Values)) == null) return false;
+        if (!UnprojectVanillaViewportPoint(inverseClipFromLocal, min, width, height, mouse, -1.0, out Vec3d near)) return false;
+        if (!UnprojectVanillaViewportPoint(inverseClipFromLocal, min, width, height, mouse, 1.0, out Vec3d far)) return false;
+
+        Vec3d direction = new(far.X - near.X, far.Y - near.Y, far.Z - near.Z);
+        if (direction.LengthSq() < 0.000001) return false;
+        direction.Normalize();
+
+        if (!TryIntersectVanillaLocalCutBox(near, direction, sizeBlocks, out distance)) return false;
+        Vec3d hit = new(near.X + direction.X * distance, near.Y + direction.Y * distance, near.Z + direction.Z * distance);
+        double[] localBlocks =
+        [
+            Math.Clamp(hit.X, 0.0, sizeBlocks[0]),
+            Math.Clamp(hit.Y, 0.0, sizeBlocks[1]),
+            Math.Clamp(hit.Z, 0.0, sizeBlocks[2])
+        ];
+
+        double bestFaceDistance = double.MaxValue;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            double minDistance = Math.Abs(localBlocks[axis]);
+            if (minDistance < bestFaceDistance)
+            {
+                bestFaceDistance = minDistance;
+                faceAxis = axis;
+                facePositive = false;
+            }
+
+            double maxDistance = Math.Abs(sizeBlocks[axis] - localBlocks[axis]);
+            if (maxDistance < bestFaceDistance)
+            {
+                bestFaceDistance = maxDistance;
+                faceAxis = axis;
+                facePositive = true;
+            }
+        }
+
+        localUnits = [localBlocks[0] * 16.0, localBlocks[1] * 16.0, localBlocks[2] * 16.0];
+        return faceAxis >= 0;
+    }
+
+    private static bool TryIntersectVanillaLocalCutBox(Vec3d origin, Vec3d direction, double[] sizeBlocks, out double distance)
+    {
+        distance = 0;
+        double tMin = 0;
+        double tMax = double.MaxValue;
+        if (!UpdateVanillaRaySlab(origin.X, direction.X, 0.0, sizeBlocks[0], ref tMin, ref tMax)) return false;
+        if (!UpdateVanillaRaySlab(origin.Y, direction.Y, 0.0, sizeBlocks[1], ref tMin, ref tMax)) return false;
+        if (!UpdateVanillaRaySlab(origin.Z, direction.Z, 0.0, sizeBlocks[2], ref tMin, ref tMax)) return false;
+
+        distance = tMin >= 0 ? tMin : tMax;
+        return distance >= 0 && distance < double.MaxValue;
+    }
+
+    private static bool UpdateVanillaRaySlab(double origin, double direction, double min, double max, ref double tMin, ref double tMax)
+    {
+        const double epsilon = 0.000001;
+        if (Math.Abs(direction) < epsilon)
+        {
+            return origin >= min && origin <= max;
+        }
+
+        double t1 = (min - origin) / direction;
+        double t2 = (max - origin) / direction;
+        if (t1 > t2) (t1, t2) = (t2, t1);
+        tMin = Math.Max(tMin, t1);
+        tMax = Math.Min(tMax, t2);
+        return tMin <= tMax;
+    }
+
+    private static bool UnprojectVanillaViewportPoint(double[] inverseClipFromLocal, NVector2 viewportMin, float width, float height, NVector2 mouse, double clipZ, out Vec3d local)
+    {
+        local = new Vec3d();
+        double ndcX = 2.0 * (mouse.X - viewportMin.X) / Math.Max(1f, width) - 1.0;
+        double ndcY = 1.0 - 2.0 * (mouse.Y - viewportMin.Y) / Math.Max(1f, height);
+        double[] result = Mat4d.MulWithVec4(inverseClipFromLocal, [ndcX, ndcY, clipZ, 1.0]);
+        if (Math.Abs(result[3]) < 0.000001) return false;
+
+        local.X = result[0] / result[3];
+        local.Y = result[1] / result[3];
+        local.Z = result[2] / result[3];
+        return IsFinite((float)local.X) && IsFinite((float)local.Y) && IsFinite((float)local.Z);
+    }
+
+    private static double[] VanillaToDoubleMatrix(float[] values)
+    {
+        double[] result = new double[values.Length];
+        for (int index = 0; index < values.Length; index++)
+        {
+            result[index] = values[index];
+        }
+
+        return result;
+    }
+
+    private static NVector3 ToNVector3(double[] values)
+    {
+        return new NVector3(
+            values.Length > 0 ? (float)values[0] : 0f,
+            values.Length > 1 ? (float)values[1] : 0f,
+            values.Length > 2 ? (float)values[2] : 0f);
+    }
+
+    private void ApplyVanillaViewportCut(VanillaBrowserRow row, VanillaCutPreview preview)
+    {
+        VanillaShapeAnimationEntry? entry = row.ShapeAnimation ?? row.MetadataEntry?.ResolveCurrentShape();
+        VanillaAnimationDocument? document = entry?.Document;
+        Shape? shape = document?.Shape;
+        if (document == null || shape?.Elements == null)
+        {
+            _vanillaStatus = "Could not cut: selected animation has no editable shape document.";
+            return;
+        }
+
+        if (!TryFindVanillaShapeElementSlot(shape, preview.ElementName, out ShapeElement? source, out ShapeElement? parent, out int index) ||
+            source?.From == null || source.To == null || source.From.Length < 3 || source.To.Length < 3)
+        {
+            _vanillaStatus = $"Could not cut: shape element '{preview.ElementName}' was not found.";
+            return;
+        }
+
+        if (source.Children is { Length: > 0 })
+        {
+            _vanillaStatus = $"Could not cut {preview.ElementName}: elements with children are not supported in the animator Cut tool.";
+            return;
+        }
+
+        int axis = Math.Clamp(preview.CutAxis, 0, 2);
+        double coordinate = Math.Round(preview.CutCoordinate, 6);
+        if (!VanillaIsCutCoordinateInside(source, axis, coordinate))
+        {
+            _vanillaStatus = $"Could not cut: cut line is too close to the {ModelAxisName(axis)} edge.";
+            return;
+        }
+
+        string originalName = source.Name ?? "";
+        if (string.IsNullOrWhiteSpace(originalName))
+        {
+            _vanillaStatus = "Could not cut: selected shape element has no name.";
+            return;
+        }
+
+        string newName = ReserveVanillaShapeElementName(shape, $"{originalName}_cut2");
+        ShapeElement first = CloneVanillaShapeElement(source);
+        ShapeElement second = CloneVanillaShapeElement(source);
+        first.Name = originalName;
+        second.Name = newName;
+        first.To![axis] = coordinate;
+        second.From![axis] = coordinate;
+        first.Children = [];
+        second.Children = [];
+        ResetVanillaCutElementRuntimeState(first, parent);
+        ResetVanillaCutElementRuntimeState(second, parent);
+
+        ShapeElement[] siblings = parent?.Children ?? shape.Elements;
+        List<ShapeElement> updated = siblings.ToList();
+        updated[index] = first;
+        updated.Insert(index + 1, second);
+        if (parent == null)
+        {
+            shape.Elements = updated.ToArray();
+        }
+        else
+        {
+            parent.Children = updated.ToArray();
+        }
+
+        int copiedChannels = DuplicateVanillaAnimationChannels(document, originalName, newName);
+        if (!SyncVanillaCutToSourceJson(document, originalName, newName, axis, coordinate))
+        {
+            SyncVanillaShapeElementsToSourceJson(document);
+        }
+        InvalidateVanillaShapeElementCaches(shape);
+        _vanillaSelection.ElementName = originalName;
+        MarkVanillaDirty(document);
+        RefreshVanillaPreviewAfterEdit(row, originalName, newName);
+        _vanillaStatus = $"Cut {originalName} on {ModelAxisName(axis)} at {coordinate:0.###}; added {newName} and copied {copiedChannels} animation channel(s).";
+    }
+
+    private static bool VanillaIsCutCoordinateInside(ShapeElement element, int axis, double coordinate)
+    {
+        if (element.From == null || element.To == null || element.From.Length < 3 || element.To.Length < 3) return false;
+        axis = Math.Clamp(axis, 0, 2);
+        double size = element.To[axis] - element.From[axis];
+        double margin = Math.Max(0.0001, Math.Min(0.01, Math.Abs(size) * 0.001));
+        return coordinate > element.From[axis] + margin &&
+            coordinate < element.To[axis] - margin;
+    }
+
+    private static ShapeElement CloneVanillaShapeElement(ShapeElement source)
+    {
+        return source.Clone();
+    }
+
+    private static void ResetVanillaCutElementRuntimeState(ShapeElement element, ShapeElement? parent)
+    {
+        element.ParentElement = parent;
+        element.JointId = 0;
+        element.inverseModelTransform = null;
+    }
+
+    private static int DuplicateVanillaAnimationChannels(VanillaAnimationDocument document, string originalName, string newName)
+    {
+        int copied = 0;
+        foreach (VanillaShapeAnimationEntry animationEntry in document.ShapeAnimations)
+        {
+            foreach (AnimationKeyFrame keyFrame in animationEntry.Animation.KeyFrames ?? [])
+            {
+                keyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
+                if (!keyFrame.Elements.TryGetValue(originalName, out AnimationKeyFrameElement? sourceElement) ||
+                    sourceElement == null ||
+                    keyFrame.Elements.ContainsKey(newName))
+                {
+                    continue;
+                }
+
+                keyFrame.Elements[newName] = CloneElement(sourceElement);
+                copied++;
+            }
+        }
+
+        return copied;
+    }
+
+    private static void SyncVanillaShapeElementsToSourceJson(VanillaAnimationDocument document)
+    {
+        if (document.SourceJson is not JObject json || document.Shape?.Elements == null) return;
+        json["elements"] = JToken.FromObject(document.Shape.Elements, JsonSerializer.Create(VanillaShapeElementJsonSettings));
+    }
+
+    private static bool SyncVanillaCutToSourceJson(VanillaAnimationDocument document, string originalName, string newName, int axis, double coordinate)
+    {
+        if (document.SourceJson is not JObject json) return false;
+        if (!TryFindVanillaShapeElementJsonSlot(json, originalName, out JArray? siblings, out int index) ||
+            siblings == null ||
+            index < 0 ||
+            index >= siblings.Count ||
+            siblings[index] is not JObject sourceToken)
+        {
+            return false;
+        }
+
+        JObject first = (JObject)sourceToken.DeepClone();
+        JObject second = (JObject)sourceToken.DeepClone();
+        SetVanillaElementJsonString(first, "name", originalName);
+        SetVanillaElementJsonString(second, "name", newName);
+        SetVanillaElementJsonAxis(first, "to", axis, coordinate);
+        SetVanillaElementJsonAxis(second, "from", axis, coordinate);
+        RemoveVanillaElementJsonProperty(first, "children");
+        RemoveVanillaElementJsonProperty(second, "children");
+
+        siblings[index] = first;
+        siblings.Insert(index + 1, second);
+        return true;
+    }
+
+    private static bool TryFindVanillaShapeElementJsonSlot(JObject shapeJson, string elementName, out JArray? siblings, out int index)
+    {
+        siblings = null;
+        index = -1;
+        JArray? roots = GetVanillaJsonArray(shapeJson, "elements");
+        return roots != null && TryFindVanillaShapeElementJsonSlotRecursive(roots, elementName, out siblings, out index);
+    }
+
+    private static bool TryFindVanillaShapeElementJsonSlotRecursive(JArray candidates, string elementName, out JArray? siblings, out int index)
+    {
+        siblings = null;
+        index = -1;
+        for (int candidateIndex = 0; candidateIndex < candidates.Count; candidateIndex++)
+        {
+            if (candidates[candidateIndex] is not JObject element) continue;
+
+            string? name = GetVanillaJsonString(element, "name");
+            if (string.Equals(name, elementName, StringComparison.OrdinalIgnoreCase))
+            {
+                siblings = candidates;
+                index = candidateIndex;
+                return true;
+            }
+
+            JArray? children = GetVanillaJsonArray(element, "children");
+            if (children != null && TryFindVanillaShapeElementJsonSlotRecursive(children, elementName, out siblings, out index))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string? GetVanillaJsonString(JObject obj, string propertyName)
+    {
+        return GetVanillaJsonProperty(obj, propertyName)?.Value.Type == JTokenType.String
+            ? GetVanillaJsonProperty(obj, propertyName)?.Value.Value<string>()
+            : GetVanillaJsonProperty(obj, propertyName)?.Value?.ToString();
+    }
+
+    private static JArray? GetVanillaJsonArray(JObject obj, string propertyName)
+    {
+        return GetVanillaJsonProperty(obj, propertyName)?.Value as JArray;
+    }
+
+    private static JProperty? GetVanillaJsonProperty(JObject obj, string propertyName)
+    {
+        return obj.Properties().FirstOrDefault(property => string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void SetVanillaElementJsonString(JObject obj, string propertyName, string value)
+    {
+        JProperty? property = GetVanillaJsonProperty(obj, propertyName);
+        if (property == null)
+        {
+            obj[propertyName] = value;
+        }
+        else
+        {
+            property.Value = value;
+        }
+    }
+
+    private static void SetVanillaElementJsonAxis(JObject obj, string propertyName, int axis, double coordinate)
+    {
+        axis = Math.Clamp(axis, 0, 2);
+        JProperty? property = GetVanillaJsonProperty(obj, propertyName);
+        JArray array;
+        if (property?.Value is JArray existing)
+        {
+            array = existing;
+        }
+        else
+        {
+            array = new JArray(0.0, 0.0, 0.0);
+            if (property == null)
+            {
+                obj[propertyName] = array;
+            }
+            else
+            {
+                property.Value = array;
+            }
+        }
+
+        while (array.Count < 3)
+        {
+            array.Add(0.0);
+        }
+
+        array[axis] = coordinate;
+    }
+
+    private static void RemoveVanillaElementJsonProperty(JObject obj, string propertyName)
+    {
+        foreach (JProperty property in obj.Properties().Where(property => string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase)).ToArray())
+        {
+            property.Remove();
+        }
+    }
+
+    private static void InvalidateVanillaShapeElementCaches(Shape shape)
+    {
+        VanillaShapeElementNamesCache.Remove(shape);
+        VanillaShapeElementNameSetCache.Remove(shape);
+    }
+
+    private static bool TryFindVanillaShapeElementSlot(Shape shape, string elementName, out ShapeElement? element, out ShapeElement? parent, out int index)
+    {
+        element = null;
+        parent = null;
+        index = -1;
+        if (shape.Elements == null || string.IsNullOrWhiteSpace(elementName)) return false;
+
+        for (int rootIndex = 0; rootIndex < shape.Elements.Length; rootIndex++)
+        {
+            ShapeElement root = shape.Elements[rootIndex];
+            if (string.Equals(root.Name, elementName, StringComparison.OrdinalIgnoreCase))
+            {
+                element = root;
+                index = rootIndex;
+                return true;
+            }
+
+            if (TryFindVanillaShapeElementSlotRecursive(root, elementName, out element, out parent, out index))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryFindVanillaShapeElementSlotRecursive(ShapeElement current, string elementName, out ShapeElement? element, out ShapeElement? parent, out int index)
+    {
+        element = null;
+        parent = null;
+        index = -1;
+        ShapeElement[] children = current.Children ?? [];
+        for (int childIndex = 0; childIndex < children.Length; childIndex++)
+        {
+            ShapeElement child = children[childIndex];
+            if (string.Equals(child.Name, elementName, StringComparison.OrdinalIgnoreCase))
+            {
+                element = child;
+                parent = current;
+                index = childIndex;
+                return true;
+            }
+
+            if (TryFindVanillaShapeElementSlotRecursive(child, elementName, out element, out parent, out index))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string ReserveVanillaShapeElementName(Shape shape, string desired)
+    {
+        HashSet<string> names = new((shape.Elements ?? []).SelectMany(GetShapeElementNamesRecursive), StringComparer.OrdinalIgnoreCase);
+        desired = string.IsNullOrWhiteSpace(desired) ? "element_cut" : desired.Trim();
+        if (names.Add(desired)) return desired;
+
+        for (int counter = 2; counter < 10000; counter++)
+        {
+            string candidate = $"{desired}_{counter}";
+            if (names.Add(candidate)) return candidate;
+        }
+
+        return $"{desired}_{Guid.NewGuid():N}";
+    }
+
     private bool DrawVanillaViewportGizmo(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, ImDrawListPtr drawList, NVector2 min, NVector2 max, bool hovered)
     {
         if (GizmoMode == TransformGizmoMode.None) return false;
+        if (GizmoMode == TransformGizmoMode.Cut) return false;
         if (!TryGetVanillaViewportGizmoTarget(row, out VanillaShapeAnimationEntry? entry, out VanillaAnimation? animation, out AnimationKeyFrame? keyFrame, out AnimationKeyFrameElement? element)) return false;
         if (!TryGetVanillaGizmoProjection(scene, element, _vanillaSelection.ElementName, min, max, out VanillaGizmoProjection projection)) return false;
 
@@ -2369,6 +3066,8 @@ public sealed partial class DebugWindowManager
     {
         if (_vanillaPreviewScene?.Key != row.Key) return;
         bool rebuildMesh = ShouldRebuildVanillaPreviewMeshAfterEdit(changedElementNames);
+        if (!rebuildMesh && _vanillaPreviewScene.TryFastSyncAnimation(row)) return;
+
         if (rebuildMesh && IsVanillaViewportDraggingRow(row))
         {
             _vanillaPreviewMeshRebuildPending = true;

@@ -84,6 +84,8 @@ public sealed partial class DebugWindowManager
     private bool _vanillaShowDirtyOnly;
     private bool _vanillaOverwriteExport;
     private string _vanillaEntityFilter = "";
+    private string _vanillaBlockFilter = "";
+    private VanillaAnimationSourceMode _vanillaSourceMode = VanillaAnimationSourceMode.Entities;
     private VanillaEntitySelectorMode _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Grouped;
     private bool _vanillaShowHiddenEntities;
     private bool _vanillaSingleVariantEdit;
@@ -161,6 +163,8 @@ public sealed partial class DebugWindowManager
     private bool _vanillaIkPreserveDraggedPartRotation = true;
     private bool _vanillaIkLockMoveToDragAxis = true;
     private VanillaIkChainMode _vanillaIkMode = VanillaIkChainMode.AutoConservative;
+    private VanillaIkSolverKind _vanillaIkSolver = VanillaIkSolverKind.Ccd;
+    private float _vanillaIkSwivelDegrees;
     private readonly List<string> _vanillaIkChainElementNames = [];
     private bool _vanillaIkHasTarget;
     private float _vanillaIkTargetX;
@@ -174,6 +178,49 @@ public sealed partial class DebugWindowManager
     private int _vanillaIkDragKeyFrameIndex = -1;
     private string _vanillaIkDragElementName = "";
     private VanillaIkCcdCache? _vanillaIkDragCache;
+    private readonly Dictionary<string, VanillaAnimationDocumentSnapshot> _vanillaInspectorSnapshotCache = new(StringComparer.Ordinal);
+    private VanillaAnimationDocument? _vanillaUniverseCacheDocument;
+    private VanillaAnimation? _vanillaUniverseCacheAnimation;
+    private AnimationKeyFrame? _vanillaUniverseCacheKeyFrame;
+    private int _vanillaUniverseCacheEditVersion = -1;
+    private string[] _vanillaUniverseCache = [];
+    private Dictionary<string, string>? _vanillaUniverseLookupCache;
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Shape, string[]> VanillaShapeElementNamesCache = new();
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Shape, HashSet<string>> VanillaShapeElementNameSetCache = new();
+
+    private VanillaAnimationDocumentSnapshot GetVanillaInspectorBeforeSnapshot(VanillaAnimationDocument document, string label, VanillaBrowserRow row)
+    {
+        string cacheKey = $"{document.HistoryKey}{row.ShapeAnimation?.Index ?? -1}{row.MetadataEntry?.Index ?? -1}";
+        if (_vanillaInspectorSnapshotCache.TryGetValue(cacheKey, out VanillaAnimationDocumentSnapshot? cached)) return cached;
+
+        if (_vanillaInspectorSnapshotCache.Count > 24)
+        {
+            _vanillaInspectorSnapshotCache.Clear();
+        }
+
+        VanillaAnimationDocumentSnapshot snapshot = _vanillaHistory.Capture(document, label, row);
+        _vanillaInspectorSnapshotCache[cacheKey] = snapshot;
+        return snapshot;
+    }
+
+    private void InvalidateVanillaInspectorSnapshots(VanillaAnimationDocument document)
+    {
+        string prefix = document.HistoryKey + "";
+        List<string>? stale = null;
+        foreach (string key in _vanillaInspectorSnapshotCache.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                (stale ??= []).Add(key);
+            }
+        }
+
+        if (stale == null) return;
+        foreach (string key in stale)
+        {
+            _vanillaInspectorSnapshotCache.Remove(key);
+        }
+    }
 
     private void DrawVanillaInspector(VanillaBrowserRow? row)
     {
@@ -189,7 +236,7 @@ public sealed partial class DebugWindowManager
             DrawVanillaLiveControls(row.Document, row);
             VanillaAnimationDocumentSnapshot? before = _vanillaHistory.HasPendingEdit(row.Document)
                 ? null
-                : _vanillaHistory.Capture(row.Document, $"Edit {row.ShapeAnimation.Animation.Code ?? row.ShapeAnimation.Animation.Name ?? "animation"}", row);
+                : GetVanillaInspectorBeforeSnapshot(row.Document, $"Edit {row.ShapeAnimation.Animation.Code ?? row.ShapeAnimation.Animation.Name ?? "animation"}", row);
             DrawVanillaShapeAnimationInspector(row, row.ShapeAnimation);
             TrackVanillaDocumentChanges(row.Document, before, row);
         }
@@ -199,7 +246,7 @@ public sealed partial class DebugWindowManager
             DrawVanillaLiveControls(row.Document, row);
             VanillaAnimationDocumentSnapshot? before = _vanillaHistory.HasPendingEdit(row.Document)
                 ? null
-                : _vanillaHistory.Capture(row.Document, $"Edit metadata {row.MetadataEntry.Metadata.Code ?? row.MetadataEntry.Metadata.Animation ?? "animation"}", row);
+                : GetVanillaInspectorBeforeSnapshot(row.Document, $"Edit metadata {row.MetadataEntry.Metadata.Code ?? row.MetadataEntry.Metadata.Animation ?? "animation"}", row);
             DrawVanillaMetadataInspector(row, row.MetadataEntry);
             TrackVanillaDocumentChanges(row.Document, before, row);
 
@@ -216,7 +263,7 @@ public sealed partial class DebugWindowManager
 
                 VanillaAnimationDocumentSnapshot? linkedBefore = _vanillaHistory.HasPendingEdit(linked.Document)
                     ? null
-                    : _vanillaHistory.Capture(linked.Document, $"Edit {linked.Animation.Code ?? linked.Animation.Name ?? "animation"}", linkedRow);
+                    : GetVanillaInspectorBeforeSnapshot(linked.Document, $"Edit {linked.Animation.Code ?? linked.Animation.Name ?? "animation"}", linkedRow);
                 DrawVanillaShapeAnimationInspector(linkedRow, linked);
                 TrackVanillaDocumentChanges(linked.Document, linkedBefore, linkedRow);
             }
@@ -263,15 +310,15 @@ public sealed partial class DebugWindowManager
         if (row == null) return;
 
         ImGuiIOPtr io = ImGui.GetIO();
-        if (io.WantTextInput || !io.KeyCtrl) return;
+        if (io.WantTextInput || !IsDevToolsCtrlDown()) return;
 
         VanillaAnimationDocument document = GetVanillaHistoryShortcutDocument(row);
-        if (ImGui.IsKeyPressed(ImGuiKey.Z))
+        if (IsDevToolsShortcutPressed(ImGuiKey.Z, GlKeys.Z))
         {
             CommitPendingVanillaHistory(document);
             RestoreVanillaHistory(document, row, undo: true);
         }
-        else if (ImGui.IsKeyPressed(ImGuiKey.Y))
+        else if (IsDevToolsShortcutPressed(ImGuiKey.Y, GlKeys.Y))
         {
             CommitPendingVanillaHistory(document);
             RestoreVanillaHistory(document, row, undo: false);
@@ -313,6 +360,7 @@ public sealed partial class DebugWindowManager
 
         if (before == null || before.Matches(document)) return;
 
+        InvalidateVanillaInspectorSnapshots(document);
         if (anyItemActive)
         {
             _vanillaHistory.BeginEdit(document, before);
@@ -345,8 +393,9 @@ public sealed partial class DebugWindowManager
         {
             document.UpdateDirtyState();
             _vanillaLastEditedDocumentKey = document.HistoryKey;
+            InvalidateVanillaInspectorSnapshots(document);
             InvalidateVanillaBrowserFilter();
-            AutoApplyVanillaDocument(document);
+            AutoApplyVanillaDocument(document, flushThrottle: true);
         }
     }
 
@@ -359,6 +408,7 @@ public sealed partial class DebugWindowManager
         _vanillaStatus = status;
         if (!restored) return;
 
+        InvalidateVanillaInspectorSnapshots(document);
         OnVanillaDocumentChanged(document, row);
         ClampVanillaSelection(row);
         ClearVanillaViewportGizmoDrag();
@@ -531,6 +581,7 @@ public sealed partial class DebugWindowManager
             RefreshVanillaPreviewAfterEdit(row);
         }
 
+        DrawVanillaKeyframeProTools(row, entry, selected);
         DrawVanillaKeyFrameExtraEditor(row, entry, selected);
         DrawVanillaElementEditor(row, entry, selected);
     }
@@ -541,15 +592,10 @@ public sealed partial class DebugWindowManager
         keyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
 
         ImGui.SeparatorText("Element");
-        string[] knownElements = GetShapeElementNames(document).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
+        string[] knownElements = GetSortedShapeElementNames(document);
         HashSet<string> keyFrameElementNames = new(keyFrame.Elements.Keys, StringComparer.OrdinalIgnoreCase);
-        HashSet<string> knownElementNames = new(knownElements, StringComparer.OrdinalIgnoreCase);
-        string[] elementNames = knownElements
-            .Concat(keyFrame.Elements.Keys)
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        HashSet<string> knownElementNames = GetShapeElementNameSet(document);
+        string[] elementNames = BuildVanillaSymmetryElementUniverse(document, entry.Animation, keyFrame);
 
         if (elementNames.Length == 0)
         {
@@ -636,7 +682,6 @@ public sealed partial class DebugWindowManager
 
         DrawVanillaSymmetryControls(row, entry, keyFrame, _vanillaSelection.ElementName, element);
         DrawVanillaIkControls(row, entry, keyFrame, _vanillaSelection.ElementName);
-        DrawVanillaElementGizmoControls();
 
         bool changed = false;
         changed |= DrawNullableDouble("Offset X", ref element.OffsetX);
@@ -955,9 +1000,24 @@ public sealed partial class DebugWindowManager
         float listHeight = Math.Clamp(elementNames.Length * lineHeight + 8f, 96f * _devToolsUiScale, 220f * _devToolsUiScale);
         if (!ImGui.BeginListBox("Elements##vanilla-elements", new NVector2(-float.Epsilon, listHeight))) return;
 
-        ImGuiIOPtr io = ImGui.GetIO();
-        for (int index = 0; index < elementNames.Length; index++)
+        int firstVisible = 0;
+        int lastVisible = elementNames.Length;
+        float listStartY = ImGui.GetCursorPosY();
+        bool virtualized = elementNames.Length > 64;
+        if (virtualized)
         {
+            float scrollY = ImGui.GetScrollY();
+            float windowHeight = ImGui.GetWindowSize().Y;
+            firstVisible = Math.Max(0, (int)(scrollY / lineHeight) - 1);
+            lastVisible = Math.Min(elementNames.Length, firstVisible + (int)(windowHeight / lineHeight) + 3);
+        }
+
+        for (int index = firstVisible; index < lastVisible; index++)
+        {
+            if (virtualized)
+            {
+                ImGui.SetCursorPosY(listStartY + index * lineHeight);
+            }
             string elementName = elementNames[index];
             bool selected = string.Equals(elementName, _vanillaSelection.ElementName, StringComparison.OrdinalIgnoreCase);
             bool inIkChain = _vanillaIkMode == VanillaIkChainMode.ManualOverride && ContainsVanillaIkChainElement(elementName);
@@ -969,11 +1029,11 @@ public sealed partial class DebugWindowManager
             if (ImGui.Selectable(label, selected))
             {
                 _vanillaSelection.ElementName = elementName;
-                if (io.KeyCtrl && _vanillaIkMode == VanillaIkChainMode.ManualOverride)
+                if (IsDevToolsCtrlDown() && _vanillaIkMode == VanillaIkChainMode.ManualOverride)
                 {
                     ToggleVanillaIkChainElement(elementName);
                 }
-                else if (io.KeyCtrl)
+                else if (IsDevToolsCtrlDown())
                 {
                     _vanillaStatus = "Manual IK chain editing is available in Manual override mode.";
                 }
@@ -987,6 +1047,12 @@ public sealed partial class DebugWindowManager
             {
                 ImGui.SetTooltip("Virtual channel: this shape element is selectable now and will be added to the keyframe only when edited.");
             }
+        }
+
+        if (virtualized)
+        {
+            ImGui.SetCursorPosY(listStartY + elementNames.Length * lineHeight - ImGui.GetStyle().ItemSpacing.Y);
+            ImGui.Dummy(NVector2.Zero);
         }
 
         ImGui.EndListBox();
@@ -1204,7 +1270,7 @@ public sealed partial class DebugWindowManager
         VanillaAnimationDocument historyDocument = (row.ShapeAnimation ?? row.MetadataEntry?.ResolveCurrentShape())?.Document ?? row.Document;
         VanillaAnimationDocumentSnapshot? before = _vanillaHistory.HasPendingEdit(historyDocument)
             ? null
-            : _vanillaHistory.Capture(historyDocument, "Edit timeline", row);
+            : GetVanillaInspectorBeforeSnapshot(historyDocument, "Edit timeline", row);
 
         ImGui.TextDisabled("Click timeline to scrub. Click markers to select keyframes; drag markers to retime.");
 
@@ -1356,15 +1422,38 @@ public sealed partial class DebugWindowManager
 
     private static IEnumerable<string> GetShapeElementNames(VanillaAnimationDocument document)
     {
+        return GetSortedShapeElementNames(document);
+    }
+
+    private static string[] GetSortedShapeElementNames(VanillaAnimationDocument document)
+    {
         Shape? shape = document.Shape;
-        if (shape?.Elements == null) return [];
-        return shape.Elements.SelectMany(GetShapeElementNamesRecursive);
+        if (shape == null) return [];
+
+        return VanillaShapeElementNamesCache.GetValue(shape, static cachedShape =>
+            (cachedShape.Elements ?? [])
+                .SelectMany(GetShapeElementNamesRecursive)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray());
+    }
+
+    private static HashSet<string> GetShapeElementNameSet(VanillaAnimationDocument document)
+    {
+        Shape? shape = document.Shape;
+        if (shape == null) return [];
+
+        return VanillaShapeElementNameSetCache.GetValue(shape, static cachedShape =>
+            new HashSet<string>(
+                (cachedShape.Elements ?? []).SelectMany(GetShapeElementNamesRecursive).Where(name => !string.IsNullOrWhiteSpace(name)),
+                StringComparer.OrdinalIgnoreCase));
     }
 
     private static bool IsKnownVanillaShapeElement(VanillaAnimationDocument? document, string? elementName)
     {
         if (document?.Shape == null || string.IsNullOrWhiteSpace(elementName)) return false;
-        return FindShapeElement(document.Shape, elementName) != null;
+        return GetShapeElementNameSet(document).Contains(elementName);
     }
 
     private static IEnumerable<string> GetShapeElementNamesRecursive(ShapeElement element)
@@ -1380,9 +1469,28 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private static string[] BuildVanillaSymmetryElementUniverse(VanillaAnimationDocument document, VanillaAnimation animation, AnimationKeyFrame keyFrame)
+    private string[] BuildVanillaSymmetryElementUniverse(VanillaAnimationDocument document, VanillaAnimation animation, AnimationKeyFrame keyFrame)
     {
-        IEnumerable<string> shapeElements = GetShapeElementNames(document);
+        if (ReferenceEquals(document, _vanillaUniverseCacheDocument) &&
+            ReferenceEquals(animation, _vanillaUniverseCacheAnimation) &&
+            ReferenceEquals(keyFrame, _vanillaUniverseCacheKeyFrame) &&
+            document.EditVersion == _vanillaUniverseCacheEditVersion)
+        {
+            return _vanillaUniverseCache;
+        }
+
+        _vanillaUniverseCacheDocument = document;
+        _vanillaUniverseCacheAnimation = animation;
+        _vanillaUniverseCacheKeyFrame = keyFrame;
+        _vanillaUniverseCacheEditVersion = document.EditVersion;
+        _vanillaUniverseLookupCache = null;
+        _vanillaUniverseCache = ComputeVanillaSymmetryElementUniverse(document, animation, keyFrame);
+        return _vanillaUniverseCache;
+    }
+
+    private static string[] ComputeVanillaSymmetryElementUniverse(VanillaAnimationDocument document, VanillaAnimation animation, AnimationKeyFrame keyFrame)
+    {
+        string[] shapeElements = GetSortedShapeElementNames(document);
         IEnumerable<string> animationElements = (animation.KeyFrames ?? [])
             .Where(frame => frame.Elements != null)
             .SelectMany(frame => frame.Elements!.Keys);
@@ -1395,6 +1503,22 @@ public sealed partial class DebugWindowManager
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private Dictionary<string, string> GetVanillaUniverseLookup(string[] allElements)
+    {
+        if (ReferenceEquals(allElements, _vanillaUniverseCache) && _vanillaUniverseLookupCache != null)
+        {
+            return _vanillaUniverseLookupCache;
+        }
+
+        Dictionary<string, string> lookup = BuildVanillaElementLookup(allElements);
+        if (ReferenceEquals(allElements, _vanillaUniverseCache))
+        {
+            _vanillaUniverseLookupCache = lookup;
+        }
+
+        return lookup;
     }
 
     private static string[] BuildVanillaSymmetryPairOptions(string selectedElementName, string[] allElements)
@@ -1452,7 +1576,7 @@ public sealed partial class DebugWindowManager
         sourceSide = InferVanillaSymmetrySide(elementName);
         manualPair = false;
 
-        Dictionary<string, string> elementLookup = BuildVanillaElementLookup(allElements);
+        Dictionary<string, string> elementLookup = GetVanillaUniverseLookup(allElements);
         string overridePair = GetVanillaSymmetryPairOverride(document, elementName);
         if (!string.IsNullOrWhiteSpace(overridePair) &&
             elementLookup.TryGetValue(overridePair, out string? resolvedOverridePair) &&
@@ -1470,7 +1594,166 @@ public sealed partial class DebugWindowManager
             return true;
         }
 
+        if (document.Shape != null)
+        {
+            VanillaShapeSymmetryInfo positional = GetVanillaShapeSymmetryInfo(document.Shape);
+            if (positional.Pairs.TryGetValue(elementName, out string? positionalPair) &&
+                elementLookup.TryGetValue(positionalPair, out string? resolvedPositional) &&
+                !string.Equals(resolvedPositional, elementName, StringComparison.OrdinalIgnoreCase))
+            {
+                pairElementName = resolvedPositional;
+                if (sourceSide == VanillaSymmetrySide.Unknown &&
+                    positional.Sides.TryGetValue(elementName, out VanillaSymmetrySide positionalSide))
+                {
+                    sourceSide = positionalSide;
+                }
+
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    private sealed record VanillaShapeSymmetryInfo(Dictionary<string, string> Pairs, Dictionary<string, VanillaSymmetrySide> Sides)
+    {
+        public static readonly VanillaShapeSymmetryInfo Empty = new(new(StringComparer.OrdinalIgnoreCase), new(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Shape, VanillaShapeSymmetryInfo> VanillaShapeSymmetryCache = new();
+
+    private static VanillaShapeSymmetryInfo GetVanillaShapeSymmetryInfo(Shape shape)
+    {
+        return VanillaShapeSymmetryCache.GetValue(shape, static cachedShape =>
+        {
+            try
+            {
+                return ComputeVanillaShapeSymmetryInfo(cachedShape);
+            }
+            catch
+            {
+                return VanillaShapeSymmetryInfo.Empty;
+            }
+        });
+    }
+
+    private static VanillaShapeSymmetryInfo ComputeVanillaShapeSymmetryInfo(Shape shape)
+    {
+        Dictionary<string, Vec3d> pivots = new(StringComparer.OrdinalIgnoreCase);
+        shape.CacheInvTransforms();
+        CollectVanillaShapePivots(shape.Elements, pivots);
+        if (pivots.Count < 2) return VanillaShapeSymmetryInfo.Empty;
+
+        double minX = double.PositiveInfinity;
+        double maxX = double.NegativeInfinity;
+        foreach (Vec3d pivot in pivots.Values)
+        {
+            minX = Math.Min(minX, pivot.X);
+            maxX = Math.Max(maxX, pivot.X);
+        }
+
+        double spanX = maxX - minX;
+        if (spanX < 0.0001) return VanillaShapeSymmetryInfo.Empty;
+
+        double plane = (minX + maxX) / 2.0;
+        double tolerance = Math.Max(0.015, spanX * 0.05);
+        double centerBand = tolerance * 0.5;
+
+        Dictionary<string, string> nearest = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string name, Vec3d pivot) in pivots)
+        {
+            double offset = pivot.X - plane;
+            if (Math.Abs(offset) <= centerBand) continue;
+
+            Vec3d mirrored = new(2.0 * plane - pivot.X, pivot.Y, pivot.Z);
+            string bestName = "";
+            double bestDistanceSq = tolerance * tolerance;
+            foreach ((string candidateName, Vec3d candidatePivot) in pivots)
+            {
+                if (string.Equals(candidateName, name, StringComparison.OrdinalIgnoreCase)) continue;
+                double candidateOffset = candidatePivot.X - plane;
+                if (Math.Abs(candidateOffset) <= centerBand || Math.Sign(candidateOffset) == Math.Sign(offset)) continue;
+
+                double dx = candidatePivot.X - mirrored.X;
+                double dy = candidatePivot.Y - mirrored.Y;
+                double dz = candidatePivot.Z - mirrored.Z;
+                double distanceSq = dx * dx + dy * dy + dz * dz;
+                if (distanceSq >= bestDistanceSq) continue;
+
+                bestDistanceSq = distanceSq;
+                bestName = candidateName;
+            }
+
+            if (!string.IsNullOrEmpty(bestName))
+            {
+                nearest[name] = bestName;
+            }
+        }
+
+        Dictionary<string, string> pairs = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, VanillaSymmetrySide> sides = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string name, string candidate) in nearest)
+        {
+            if (!nearest.TryGetValue(candidate, out string? reverse) ||
+                !string.Equals(reverse, name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            pairs[name] = candidate;
+            sides[name] = pivots[name].X >= plane ? VanillaSymmetrySide.Left : VanillaSymmetrySide.Right;
+        }
+
+        return pairs.Count == 0 ? VanillaShapeSymmetryInfo.Empty : new(pairs, sides);
+    }
+
+    private static void CollectVanillaShapePivots(ShapeElement[]? elements, Dictionary<string, Vec3d> pivots)
+    {
+        if (elements == null) return;
+
+        foreach (ShapeElement element in elements)
+        {
+            if (!string.IsNullOrWhiteSpace(element.Name) && element.inverseModelTransform != null && element.inverseModelTransform.Length >= 16)
+            {
+                float[]? model = Mat4f.Invert(Mat4f.Create(), element.inverseModelTransform);
+                if (model != null && TryGetVanillaElementLocalPivot(element, out double px, out double py, out double pz))
+                {
+                    pivots[element.Name!] = TransformVanillaPoint(model, px, py, pz);
+                }
+            }
+
+            CollectVanillaShapePivots(element.Children, pivots);
+        }
+    }
+
+    private static bool TryGetVanillaElementLocalPivot(ShapeElement element, out double px, out double py, out double pz)
+    {
+        if (element.RotationOrigin is { Length: >= 3 } origin)
+        {
+            px = origin[0] / 16.0;
+            py = origin[1] / 16.0;
+            pz = origin[2] / 16.0;
+            return true;
+        }
+
+        if (element.From is { Length: >= 3 } from && element.To is { Length: >= 3 } to)
+        {
+            px = (from[0] + to[0]) / 32.0;
+            py = (from[1] + to[1]) / 32.0;
+            pz = (from[2] + to[2]) / 32.0;
+            return true;
+        }
+
+        px = py = pz = 0;
+        return false;
+    }
+
+    private static Vec3d TransformVanillaPoint(float[] matrix, double x, double y, double z)
+    {
+        return new Vec3d(
+            matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+            matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+            matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14]);
     }
 
     private static Dictionary<string, string> BuildVanillaElementLookup(IEnumerable<string> allElements)

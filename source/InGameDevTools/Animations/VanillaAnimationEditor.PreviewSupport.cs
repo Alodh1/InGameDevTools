@@ -195,6 +195,60 @@ public sealed partial class DebugWindowManager
             ForceEvaluatePose(CurrentFrame);
         }
 
+        public bool TryFastSyncAnimation(VanillaBrowserRow row)
+        {
+            if (_disposed || _shape.Elements == null || _shape.Elements.Length == 0) return false;
+
+            VanillaAnimation? documentAnimation = GetVanillaAnimation(row);
+            if (documentAnimation == null) return false;
+
+            string documentCode = documentAnimation.Code ?? documentAnimation.Name ?? "";
+            string activeBaseCode = _animation.Code ?? _animation.Name ?? "";
+            if (string.IsNullOrWhiteSpace(documentCode) ||
+                !string.Equals(documentCode, activeBaseCode, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            AnimationMetaData metadata;
+            try
+            {
+                metadata = BuildPreviewMetadata(row, documentAnimation, _previewMode);
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (!string.Equals(GetAnimationCode(documentAnimation, metadata), _activeAnimationCode, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            try
+            {
+                CopyVanillaAnimation(_animation, documentAnimation);
+                PrepareAnimationFrames(_shape, _animation);
+            }
+            catch
+            {
+                return false;
+            }
+
+            _metadata = metadata;
+            _ghostMetadata = CloneAnimationMetaData(metadata);
+            _metadata.Animation = _activeAnimationCode;
+            _ghostMetadata.Animation = _activeAnimationCode;
+            _activeAnimationsByAnimCode.Clear();
+            _activeAnimationsByAnimCode[_activeAnimationCode] = _metadata;
+            _ghostAnimationsByAnimCode.Clear();
+            _ghostAnimationsByAnimCode[_activeAnimationCode] = _ghostMetadata;
+            QuantityFrames = Math.Max(1, _animation.QuantityFrames);
+            CurrentFrame = Math.Clamp(CurrentFrame, 0, Math.Max(0, QuantityFrames - 1));
+            ForceEvaluatePose(CurrentFrame);
+            return true;
+        }
+
         public void SetPreviewMode(VanillaBrowserRow row, VanillaPreviewMode mode)
         {
             if ((mode == VanillaPreviewMode.FirstPerson && !EnsureFirstPersonMesh(immersive: false)) ||
@@ -496,6 +550,21 @@ public sealed partial class DebugWindowManager
 
         private static VanillaGuiTransform GetGuiTransform(VanillaBrowserRow row)
         {
+            Block? block = row.Document.Block
+                ?? row.ShapeAnimation?.Document.Block
+                ?? row.MetadataEntry?.Document.Block
+                ?? row.MetadataEntry?.LinkedShape?.Document.Block;
+            if (block != null)
+            {
+                CompositeShape? blockShape = block.Shape;
+                return new(
+                    1f,
+                    1f,
+                    blockShape?.rotateX ?? 0f,
+                    blockShape?.rotateY ?? 0f,
+                    blockShape?.rotateZ ?? 0f);
+            }
+
             EntityClientProperties? client = row.Document.EntityType?.Client
                 ?? row.ShapeAnimation?.Document.EntityType?.Client
                 ?? row.MetadataEntry?.Document.EntityType?.Client
@@ -522,8 +591,6 @@ public sealed partial class DebugWindowManager
             }
 
             shape.Textures ??= new();
-            ResolvePreviewShapeAnimationReferences(api, shape, shapeName);
-
             return shape;
         }
 
@@ -940,6 +1007,15 @@ public sealed partial class DebugWindowManager
                 return null;
             }
 
+            Block? block = row.Document.Block
+                ?? row.ShapeAnimation?.Document.Block
+                ?? row.MetadataEntry?.Document.Block
+                ?? row.MetadataEntry?.LinkedShape?.Document.Block;
+            if (block != null)
+            {
+                return block.Shape;
+            }
+
             EntityClientProperties? client = row.Document.EntityType?.Client
                 ?? row.ShapeAnimation?.Document.EntityType?.Client
                 ?? row.MetadataEntry?.Document.EntityType?.Client
@@ -949,6 +1025,15 @@ public sealed partial class DebugWindowManager
 
         private static ITexPositionSource CreateTextureSource(ICoreClientAPI api, VanillaBrowserRow row, Shape shape)
         {
+            Block? block = row.Document.Block
+                ?? row.ShapeAnimation?.Document.Block
+                ?? row.MetadataEntry?.Document.Block
+                ?? row.MetadataEntry?.LinkedShape?.Document.Block;
+            if (block != null)
+            {
+                return api.Tesselator.GetTextureSource(block, 0, false) ?? new ShapeTextureSource(api, shape, row.Key);
+            }
+
             if (GetPlayerModelSource(row) != null && shape.Textures is { Count: > 0 })
             {
                 return new VanillaEntityTextureSource(api, shape, row.Key, new Dictionary<string, CompositeTexture>());

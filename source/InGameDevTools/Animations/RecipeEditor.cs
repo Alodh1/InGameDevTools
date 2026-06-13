@@ -115,10 +115,34 @@ public sealed partial class DebugWindowManager
             "litres",
             "sealHours",
             "temperature",
+            "minTemperature",
+            "maxTemperature",
             "cooksInto",
             "shape",
             "perishableProps",
-            "isFood"
+            "isFood",
+            "requires",
+            "requiresContent",
+            "requiresLitres",
+            "inputLitres",
+            "outputLitres",
+            "outputStack",
+            "returns",
+            "returnedStack",
+            "byproducts",
+            "tool",
+            "toolDurabilityCost",
+            "consume",
+            "consumeLitres",
+            "minratio",
+            "maxratio",
+            "minRatio",
+            "maxRatio",
+            "ratio",
+            "units",
+            "power",
+            "attributes",
+            "recipeAttributes"
         };
 
         private readonly List<RecipeDocument> _documents = [];
@@ -553,6 +577,7 @@ public sealed partial class DebugWindowManager
                     changed |= DrawArrayStackEditor(entry.Recipe, "ingredients", "Ingredients##recipe-common-ingredients");
                     changed |= DrawArrayStackEditor(entry.Recipe, "outputs", "Outputs##recipe-common-outputs");
                 }
+                changed |= DrawRecipeProcessorFields(entry);
                 changed |= DrawRecipeAdvancedFieldsEditor(entry);
                 if (changed) MarkChanged(entry);
 
@@ -842,6 +867,14 @@ public sealed partial class DebugWindowManager
                 changed |= EditOptionalJsonToken(recipe, "shape", "Shape JSON##flow-cooking-shape", defaultToken: new JObject { ["base"] = "block/food/meal/liquid" });
                 changed |= EditOptionalJsonToken(recipe, "perishableProps", "Perishable props JSON##flow-cooking-perishable", defaultToken: new JObject());
             }
+            else if (entry.Kind == RecipeEditorKind.Barrel)
+            {
+                changed |= DrawBarrelRecipeFields(recipe, "flow");
+            }
+            else if (entry.Kind == RecipeEditorKind.Alloy)
+            {
+                changed |= DrawAlloyRecipeFields(recipe, "flow");
+            }
             else
             {
                 changed |= EditStack(recipe, "ingredient", "Ingredient##flow-ingredient");
@@ -856,6 +889,126 @@ public sealed partial class DebugWindowManager
             changed |= EditNumber(recipe, "sealHours", "Seal hours##flow-seal-hours", 0, 100000);
             changed |= EditNumber(recipe, "temperature", "Temperature##flow-temperature", 0, 5000);
             if (changed) MarkChanged(entry);
+        }
+
+        private bool DrawRecipeProcessorFields(RecipeEntry entry)
+        {
+            JObject recipe = entry.Recipe;
+            ImGui.SeparatorText($"{entry.KindLabel} processor");
+
+            return entry.Kind switch
+            {
+                RecipeEditorKind.Grid => DrawGridProcessorFields(recipe, "inspector"),
+                RecipeEditorKind.Smithing or RecipeEditorKind.Clayforming or RecipeEditorKind.Knapping => DrawPatternProcessorFields(recipe, entry.KindLabel, "inspector"),
+                RecipeEditorKind.Cooking => DrawCookingProcessorFields(recipe, "inspector"),
+                RecipeEditorKind.Barrel => DrawBarrelRecipeFields(recipe, "inspector"),
+                RecipeEditorKind.Alloy => DrawAlloyRecipeFields(recipe, "inspector"),
+                _ => DrawCustomRecipeProcessorFields(entry, "inspector")
+            };
+        }
+
+        private bool DrawGridProcessorFields(JObject recipe, string id)
+        {
+            bool changed = false;
+            changed |= EditOptionalBool(recipe, "shapeless", $"Shapeless##recipe-grid-shapeless-{id}", defaultValue: false);
+            changed |= EditOptionalBool(recipe, "averageDurability", $"Average durability##recipe-grid-average-{id}", defaultValue: true);
+            changed |= EditOptionalString(recipe, "copyAttributesFrom", $"Copy attributes from##recipe-grid-copy-attrs-{id}");
+            changed |= EditOptionalJsonToken(recipe, "attributes", $"Recipe attributes JSON##recipe-grid-attrs-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "recipeAttributes", $"Recipe match attributes JSON##recipe-grid-recipe-attrs-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "returns", $"Return stacks JSON##recipe-grid-returns-{id}", defaultToken: new JArray(DefaultStack("item", "game:stick")));
+            changed |= EditStack(recipe, "returnedStack", $"Returned stack##recipe-grid-returned-{id}");
+            changed |= EditStack(recipe, "tool", $"Tool##recipe-grid-tool-{id}");
+            return changed;
+        }
+
+        private bool DrawPatternProcessorFields(JObject recipe, string kindLabel, string id)
+        {
+            bool changed = false;
+            changed |= EditOptionalBool(recipe, "enabled", $"Enabled##recipe-pattern-enabled-{id}", defaultValue: true);
+            changed |= EditOptionalJsonToken(recipe, "attributes", $"{kindLabel} attributes JSON##recipe-pattern-attrs-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "recipeAttributes", $"{kindLabel} match attributes JSON##recipe-pattern-recipe-attrs-{id}", defaultToken: new JObject());
+            changed |= EditStack(recipe, "tool", $"Tool##recipe-pattern-tool-{id}");
+            changed |= EditStack(recipe, "returnedStack", $"Returned stack##recipe-pattern-returned-{id}");
+            return changed;
+        }
+
+        private bool DrawCookingProcessorFields(JObject recipe, string id)
+        {
+            bool changed = false;
+            changed |= EditOptionalFloat(recipe, "duration", $"Cook time##recipe-cooking-duration-{id}", 0f, 100000f);
+            changed |= EditOptionalFloat(recipe, "temperature", $"Temperature##recipe-cooking-temperature-{id}", 0f, 5000f);
+            changed |= EditOptionalJsonToken(recipe, "attributes", $"Cooking attributes JSON##recipe-cooking-attrs-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "recipeAttributes", $"Cooking match attributes JSON##recipe-cooking-recipe-attrs-{id}", defaultToken: new JObject());
+            changed |= DrawArrayStackEditor(recipe, "outputs", $"Extra outputs##recipe-cooking-outputs-{id}");
+            changed |= DrawArrayStackEditor(recipe, "byproducts", $"Byproducts##recipe-cooking-byproducts-{id}");
+            return changed;
+        }
+
+        private bool DrawBarrelRecipeFields(JObject recipe, string id)
+        {
+            bool changed = false;
+            changed |= DrawArrayStackEditor(recipe, "ingredients", $"Ingredients##recipe-barrel-ingredients-{id}");
+            changed |= DrawArrayStackEditor(recipe, "inputs", $"Inputs##recipe-barrel-inputs-{id}");
+            changed |= EditStack(recipe, "ingredient", $"Ingredient##recipe-barrel-ingredient-{id}");
+            changed |= EditStack(recipe, "input", $"Input##recipe-barrel-input-{id}");
+            changed |= DrawArrayStackEditor(recipe, "outputs", $"Outputs##recipe-barrel-outputs-{id}");
+            changed |= EditStack(recipe, "output", $"Output##recipe-barrel-output-{id}");
+            changed |= EditStack(recipe, "outputStack", $"Output stack##recipe-barrel-output-stack-{id}");
+            changed |= EditOptionalFloat(recipe, "litres", $"Litres##recipe-barrel-litres-{id}", 0f, 10000f);
+            changed |= EditOptionalFloat(recipe, "requiresLitres", $"Requires litres##recipe-barrel-requires-litres-{id}", 0f, 10000f);
+            changed |= EditOptionalFloat(recipe, "inputLitres", $"Input litres##recipe-barrel-input-litres-{id}", 0f, 10000f);
+            changed |= EditOptionalFloat(recipe, "outputLitres", $"Output litres##recipe-barrel-output-litres-{id}", 0f, 10000f);
+            changed |= EditOptionalFloat(recipe, "duration", $"Duration##recipe-barrel-duration-{id}", 0f, 100000f);
+            changed |= EditOptionalFloat(recipe, "sealHours", $"Seal hours##recipe-barrel-seal-hours-{id}", 0f, 100000f);
+            changed |= EditOptionalJsonToken(recipe, "requires", $"Requires JSON##recipe-barrel-requires-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "requiresContent", $"Requires content JSON##recipe-barrel-requires-content-{id}", defaultToken: new JObject());
+            changed |= DrawArrayStackEditor(recipe, "byproducts", $"Byproducts##recipe-barrel-byproducts-{id}");
+            return changed;
+        }
+
+        private bool DrawAlloyRecipeFields(JObject recipe, string id)
+        {
+            bool changed = false;
+            changed |= DrawArrayStackEditor(recipe, "ingredients", $"Alloy ingredients##recipe-alloy-ingredients-{id}");
+            changed |= DrawArrayStackEditor(recipe, "inputs", $"Alloy inputs##recipe-alloy-inputs-{id}");
+            changed |= EditStack(recipe, "output", $"Output##recipe-alloy-output-{id}");
+            changed |= DrawArrayStackEditor(recipe, "outputs", $"Outputs##recipe-alloy-outputs-{id}");
+            changed |= EditOptionalFloat(recipe, "temperature", $"Temperature##recipe-alloy-temperature-{id}", 0f, 5000f);
+            changed |= EditOptionalFloat(recipe, "minTemperature", $"Min temperature##recipe-alloy-min-temperature-{id}", 0f, 5000f);
+            changed |= EditOptionalFloat(recipe, "maxTemperature", $"Max temperature##recipe-alloy-max-temperature-{id}", 0f, 5000f);
+            changed |= EditOptionalFloat(recipe, "duration", $"Duration##recipe-alloy-duration-{id}", 0f, 100000f);
+            changed |= DrawArrayStackEditor(recipe, "byproducts", $"Byproducts##recipe-alloy-byproducts-{id}");
+            return changed;
+        }
+
+        private bool DrawCustomRecipeProcessorFields(RecipeEntry entry, string id)
+        {
+            JObject recipe = entry.Recipe;
+            bool changed = false;
+            ImGui.TextDisabled($"Processor: {entry.ProcessorCode}");
+            changed |= EditStack(recipe, "ingredient", $"Ingredient##recipe-custom-ingredient-{id}");
+            changed |= EditStack(recipe, "input", $"Input##recipe-custom-input-{id}");
+            changed |= DrawArrayStackEditor(recipe, "ingredients", $"Ingredients##recipe-custom-ingredients-{id}");
+            changed |= DrawArrayStackEditor(recipe, "inputs", $"Inputs##recipe-custom-inputs-{id}");
+            changed |= EditStack(recipe, "output", $"Output##recipe-custom-output-{id}");
+            changed |= EditStack(recipe, "outputStack", $"Output stack##recipe-custom-output-stack-{id}");
+            changed |= EditStack(recipe, "cooksInto", $"Cooks into##recipe-custom-cooks-into-{id}");
+            changed |= DrawArrayStackEditor(recipe, "outputs", $"Outputs##recipe-custom-outputs-{id}");
+            changed |= DrawArrayStackEditor(recipe, "byproducts", $"Byproducts##recipe-custom-byproducts-{id}");
+            changed |= EditStack(recipe, "tool", $"Tool##recipe-custom-tool-{id}");
+            changed |= EditStack(recipe, "returnedStack", $"Returned stack##recipe-custom-returned-{id}");
+            changed |= EditOptionalFloat(recipe, "litres", $"Litres##recipe-custom-litres-{id}", 0f, 10000f);
+            changed |= EditOptionalFloat(recipe, "requiresLitres", $"Requires litres##recipe-custom-requires-litres-{id}", 0f, 10000f);
+            changed |= EditOptionalFloat(recipe, "duration", $"Duration##recipe-custom-duration-{id}", 0f, 100000f);
+            changed |= EditOptionalFloat(recipe, "sealHours", $"Seal hours##recipe-custom-seal-hours-{id}", 0f, 100000f);
+            changed |= EditOptionalFloat(recipe, "temperature", $"Temperature##recipe-custom-temperature-{id}", 0f, 5000f);
+            changed |= EditOptionalFloat(recipe, "power", $"Power##recipe-custom-power-{id}", 0f, 100000f);
+            changed |= EditOptionalJsonToken(recipe, "requires", $"Requires JSON##recipe-custom-requires-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "requiresContent", $"Requires content JSON##recipe-custom-requires-content-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "attributes", $"Attributes JSON##recipe-custom-attrs-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "recipeAttributes", $"Recipe attributes JSON##recipe-custom-recipe-attrs-{id}", defaultToken: new JObject());
+            changed |= EditOptionalJsonToken(recipe, "returns", $"Returns JSON##recipe-custom-returns-{id}", defaultToken: new JArray(DefaultStack("item", "game:stick")));
+            return changed;
         }
 
         private bool DrawCookingIngredientsEditor(JObject recipe, string label)
@@ -2256,7 +2409,7 @@ public sealed partial class DebugWindowManager
                     ValidateAlloyRatios(recipe, issues);
                     break;
                 case RecipeEditorKind.Other:
-                    issues.Add("Warning: unknown recipe kind; only common fields and raw JSON can be validated.");
+                    ValidateCustomProcessorRecipe(recipe, issues, entry.ProcessorCode);
                     break;
             }
 
@@ -2391,13 +2544,53 @@ public sealed partial class DebugWindowManager
             }
         }
 
+        private static void ValidateCustomProcessorRecipe(JObject recipe, List<string> issues, string processorCode)
+        {
+            ValidateFlowRecipe(recipe, issues, processorCode);
+            if (!HasAnyRecipeValue(recipe, "duration", "sealHours", "temperature", "litres", "power"))
+            {
+                issues.Add($"Warning: {processorCode} recipe has no duration, temperature, litres, or power process field.");
+            }
+            ValidateRecipeStackArray(recipe, "ingredients", issues);
+            ValidateRecipeStackArray(recipe, "inputs", issues);
+            ValidateRecipeStackArray(recipe, "outputs", issues);
+            ValidateRecipeStackArray(recipe, "byproducts", issues);
+        }
+
+        private static void ValidateRecipeStackArray(JObject recipe, string propertyName, List<string> issues)
+        {
+            if (recipe[propertyName] is not JArray array) return;
+            for (int index = 0; index < array.Count; index++)
+            {
+                if (array[index] is JObject stack)
+                {
+                    if (!HasRecipeStack(stack, "self"))
+                    {
+                        issues.Add($"Warning: {propertyName}[{index}] has no code/type/validStacks marker.");
+                    }
+                }
+                else
+                {
+                    issues.Add($"Error: {propertyName}[{index}] is not an object.");
+                }
+            }
+        }
+
         private static bool HasRecipeStack(JObject recipe, string propertyName)
         {
-            return recipe[propertyName] is JObject stack &&
+            JObject? stack = string.Equals(propertyName, "self", StringComparison.Ordinal)
+                ? recipe
+                : recipe[propertyName] as JObject;
+            return stack != null &&
                 (!string.IsNullOrWhiteSpace(stack["code"]?.ToString()) ||
                  !string.IsNullOrWhiteSpace(stack["type"]?.ToString()) ||
                  !string.IsNullOrWhiteSpace(stack["typeName"]?.ToString()) ||
                  stack["validStacks"] is JArray);
+        }
+
+        private static bool HasAnyRecipeValue(JObject recipe, params string[] propertyNames)
+        {
+            return propertyNames.Any(propertyName => recipe[propertyName] != null);
         }
 
         private bool EditRecipeAdvancedJsonToken(RecipeEntry entry, string propertyName)
@@ -2919,13 +3112,15 @@ public sealed partial class DebugWindowManager
                 Recipe = recipe;
                 ArrayIndex = arrayIndex;
                 Kind = DetectKind(document.AssetPath, recipe);
+                ProcessorCode = DetectProcessorCode(document.AssetPath, Kind);
             }
 
             public RecipeDocument Document { get; }
             public JObject Recipe { get; private set; }
             public int ArrayIndex { get; }
             public RecipeEditorKind Kind { get; }
-            public string KindLabel => Kind.ToString();
+            public string ProcessorCode { get; }
+            public string KindLabel => Kind == RecipeEditorKind.Other ? $"Custom:{ProcessorCode}" : Kind.ToString();
             public string Key => $"{Document.DisplayPath}:{ArrayIndex}";
             public string DisplayName => Recipe["name"]?.ToString() ?? Recipe["code"]?.ToString() ?? Path.GetFileNameWithoutExtension(Document.AssetPath);
             public string ShortLabel => $"{KindLabel} | {DisplayName}";
@@ -2957,6 +3152,24 @@ public sealed partial class DebugWindowManager
                 if (recipe["ingredientPattern"] != null) return RecipeEditorKind.Grid;
                 if (recipe["pattern"] != null) return RecipeEditorKind.Knapping;
                 return RecipeEditorKind.Other;
+            }
+
+            private static string DetectProcessorCode(string assetPath, RecipeEditorKind kind)
+            {
+                if (kind != RecipeEditorKind.Other) return KindSegment(kind);
+                string path = assetPath.Replace('\\', '/');
+                const string prefix = "recipes/";
+                int start = path.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+                if (start >= 0)
+                {
+                    string rest = path[(start + prefix.Length)..];
+                    int slash = rest.IndexOf('/');
+                    if (slash > 0) return rest[..slash];
+                }
+
+                string directory = Path.GetDirectoryName(path)?.Replace('\\', '/') ?? "";
+                string segment = directory.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "custom";
+                return string.IsNullOrWhiteSpace(segment) ? "custom" : segment;
             }
         }
     }

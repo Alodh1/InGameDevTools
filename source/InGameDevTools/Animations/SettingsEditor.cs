@@ -55,6 +55,7 @@ public sealed partial class DebugWindowManager
         _liveApplyManager.AutoApply = _devToolsConfig.AutoRuntimeApply;
         _liveApplyManager.WriteBackups = _devToolsConfig.WriteLiveBackups;
         _vanillaIkMode = ParseVanillaIkChainMode(_devToolsConfig.AnimationIkMode);
+        _vanillaIkSolver = ParseVanillaIkSolverKind(_devToolsConfig.AnimationIkSolver);
         _vanillaIkPreserveDraggedPartRotation = _devToolsConfig.AnimationIkPreserveDraggedPartRotation;
         _vanillaIkLockMoveToDragAxis = _devToolsConfig.AnimationIkLockMoveToDragAxis;
         DevToolsViewportBackground.Style = DevToolsViewportBackground.Parse(_devToolsConfig.ViewportBackground);

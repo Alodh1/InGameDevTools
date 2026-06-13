@@ -29,15 +29,22 @@ public sealed partial class DebugWindowManager
         private readonly List<VanillaEntityOption> _groupedVisibleEntityOptions = [];
         private readonly List<VanillaEntityOption> _exactEntityOptions = [];
         private readonly List<VanillaEntityOption> _exactVisibleEntityOptions = [];
+        private readonly List<VanillaBlockOption> _blockOptions = [];
         private readonly List<string> _allEntityDomains = [];
+        private readonly List<string> _allBlockDomains = [];
         private bool _entityListReady;
+        private bool _blockListReady;
 
         public IReadOnlyList<VanillaAnimationDocument> Documents => _documents;
         public IEnumerable<string> AllEntityDomains => _allEntityDomains;
+        public IEnumerable<string> AllBlockDomains => _allBlockDomains;
         public VanillaEntityOption? SelectedEntityOption { get; private set; }
+        public VanillaBlockOption? SelectedBlockOption { get; private set; }
         public int SelectedMemberIndex { get; private set; } = -1;
         public string? SelectedEntityLabel => SelectedEntityOption?.Label;
+        public string? SelectedBlockLabel => SelectedBlockOption?.Label;
         public bool HasSelectedEntity => SelectedEntityOption != null && SelectedMemberIndex >= 0;
+        public bool HasSelectedBlock => SelectedBlockOption != null;
         public string Status { get; private set; } = "Select an entity to index its vanilla animations.";
 
         public IReadOnlyList<VanillaEntityOption> GetEntityOptions(VanillaEntitySelectorMode mode, bool showHidden)
@@ -52,6 +59,16 @@ public sealed partial class DebugWindowManager
         public bool IsSelectedEntityOption(VanillaEntityOption option)
         {
             return ReferenceEquals(option, SelectedEntityOption);
+        }
+
+        public IReadOnlyList<VanillaBlockOption> GetBlockOptions()
+        {
+            return _blockOptions;
+        }
+
+        public bool IsSelectedBlockOption(VanillaBlockOption option)
+        {
+            return ReferenceEquals(option, SelectedBlockOption);
         }
 
         public void EnsureEntityList(ICoreClientAPI api)
@@ -124,6 +141,32 @@ public sealed partial class DebugWindowManager
             Status = $"Loaded {members.Count} entity types into {_groupedEntityOptions.Count} group(s). Select one to index its animations.";
         }
 
+        public void EnsureBlockList(ICoreClientAPI api)
+        {
+            if (_blockListReady) return;
+
+            _blockOptions.Clear();
+            _allBlockDomains.Clear();
+
+            foreach (Block block in api.World.Blocks ?? [])
+            {
+                if (block?.Code == null || block.Id == 0) continue;
+                if (block.Shape?.Base == null) continue;
+
+                string code = block.Code.ToString();
+                string domain = block.Code.Domain ?? "game";
+                VanillaBlockSourceInfo? source = BuildBlockSourceInfo(block);
+                string label = ImGuiLayoutHelper.CompactAssetCode(code);
+                string assetPath = source?.AssetPath ?? $"blocktypes/{EnsureJsonFilePath(block.Code.Path)}";
+                string search = $"{label} {code} {domain} {assetPath} {block.Shape.Base}";
+                _blockOptions.Add(new(block, label, code, domain, search, source));
+            }
+
+            _blockOptions.Sort((left, right) => string.Compare(left.Label, right.Label, StringComparison.OrdinalIgnoreCase));
+            _allBlockDomains.AddRange(_blockOptions.Select(option => option.Domain).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(domain => domain, StringComparer.OrdinalIgnoreCase));
+            _blockListReady = true;
+        }
+
         public void SelectEntity(ICoreClientAPI api, IReadOnlyList<VanillaEntityOption> options, int index, int memberIndex, bool groupEdit)
         {
             EnsureEntityList(api);
@@ -150,19 +193,58 @@ public sealed partial class DebugWindowManager
             IndexSelectedEntity(api, option, SelectedMemberIndex, groupEdit);
         }
 
+        public void SelectBlock(ICoreClientAPI api, IReadOnlyList<VanillaBlockOption> options, int index)
+        {
+            EnsureBlockList(api);
+            if (index < 0 || index >= options.Count)
+            {
+                ClearSelection();
+                return;
+            }
+
+            SelectBlock(api, options[index]);
+        }
+
+        public void SelectBlock(ICoreClientAPI api, VanillaBlockOption option)
+        {
+            EnsureBlockList(api);
+            SelectedBlockOption = option;
+            SelectedEntityOption = null;
+            SelectedMemberIndex = -1;
+            IndexSelectedBlock(api, option);
+        }
+
+        public bool SelectBlockByCode(ICoreClientAPI api, string code)
+        {
+            EnsureBlockList(api);
+            VanillaBlockOption? option = _blockOptions.FirstOrDefault(entry =>
+                string.Equals(entry.Code, code, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(entry.Block.Code?.Path, code, StringComparison.OrdinalIgnoreCase));
+            if (option == null) return false;
+            SelectBlock(api, option);
+            return true;
+        }
+
         public void ReloadSelectedEntity(ICoreClientAPI api, bool groupEdit)
         {
             if (!HasSelectedEntity) return;
             IndexSelectedEntity(api, SelectedEntityOption!, SelectedMemberIndex, groupEdit);
         }
 
+        public void ReloadSelectedBlock(ICoreClientAPI api)
+        {
+            if (!HasSelectedBlock) return;
+            IndexSelectedBlock(api, SelectedBlockOption!);
+        }
+
         public void ClearSelection()
         {
             SelectedEntityOption = null;
+            SelectedBlockOption = null;
             SelectedMemberIndex = -1;
             _documents.Clear();
             _shapeAnimationsByCode.Clear();
-            Status = "Select an entity to index its vanilla animations.";
+            Status = "Select an entity or block to index its vanilla animations.";
         }
 
         private static IEnumerable<VanillaEntityOption> BuildGroupedEntityOptions(IReadOnlyList<VanillaEntityMember> members)
@@ -1246,6 +1328,64 @@ public sealed partial class DebugWindowManager
             }
         }
 
+        private void IndexSelectedBlock(ICoreClientAPI api, VanillaBlockOption option)
+        {
+            Block block = option.Block;
+            try
+            {
+                _documents.Clear();
+                _shapeAnimationsByCode.Clear();
+
+                AssetLocation? shapeAssetLocation = GetBlockShapeAssetLocation(block);
+                Shape? loadedShape = shapeAssetLocation == null ? null : Shape.TryGet(api, shapeAssetLocation);
+                if (loadedShape == null)
+                {
+                    throw new InvalidOperationException($"Could not load block shape {shapeAssetLocation?.ToString() ?? "<none>"}.");
+                }
+
+                Shape editableShape = loadedShape.Clone() ?? loadedShape;
+                editableShape.Animations ??= [];
+                JObject? shapeSourceJson = TryLoadJson(api, shapeAssetLocation);
+                string blockCode = block.Code?.ToString() ?? option.FullLabel;
+
+                VanillaAnimationDocument shapeDocument = new()
+                {
+                    Kind = VanillaDocumentKind.Shape,
+                    Domain = shapeAssetLocation?.Domain ?? block.Code?.Domain ?? "game",
+                    AssetPath = shapeAssetLocation != null ? EnsureJsonPath(shapeAssetLocation.Path) : $"shapes/{block.Code?.Path ?? "unknown"}.json",
+                    DisplayPath = $"{blockCode} block shape",
+                    EntityCode = blockCode,
+                    Block = block,
+                    Shape = editableShape,
+                    SourceJson = shapeSourceJson,
+                    GroupLabel = option.Label,
+                    RuntimeGroupKind = "block"
+                };
+
+                for (int index = 0; index < editableShape.Animations.Length; index++)
+                {
+                    VanillaAnimation animation = CloneVanillaAnimation(editableShape.Animations[index]);
+                    if (string.IsNullOrWhiteSpace(animation.Code)) animation.Code = animation.Name;
+                    VanillaShapeAnimationEntry entry = new(shapeDocument, index, animation, GetSourceArrayElement(shapeSourceJson, "animations", index));
+                    shapeDocument.ShapeAnimations.Add(entry);
+                    RegisterShapeAnimation(entry);
+                }
+
+                _documents.Add(shapeDocument);
+                shapeDocument.MarkClean();
+                RebuildLinks();
+
+                Status = $"Indexed {blockCode}: {shapeDocument.ShapeAnimations.Count} shape animation(s). New animations can be added to blocks without an existing animations array.";
+            }
+            catch (Exception exception)
+            {
+                _documents.Clear();
+                _shapeAnimationsByCode.Clear();
+                Status = $"Could not index block {block.Code}: {exception.Message}";
+                LoggerUtil.Warn(api, this, $"Could not index vanilla block animation '{block.Code}': {exception}");
+            }
+        }
+
         private static VanillaGroupTargets BuildPlayerModelShapeTargets(VanillaPlayerModelSource playerModel)
         {
             return playerModel.UsesOwnAnimations
@@ -1320,6 +1460,21 @@ public sealed partial class DebugWindowManager
         {
             CompositeShape? shape = entityType.Client?.ShapeForEntity ?? entityType.Client?.Shape;
             return shape?.Base?.Clone().WithPathPrefixOnce("shapes/").WithPathAppendixOnce(".json");
+        }
+
+        private static AssetLocation? GetBlockShapeAssetLocation(Block block)
+        {
+            return block.Shape?.Base?.Clone().WithPathPrefixOnce("shapes/").WithPathAppendixOnce(".json");
+        }
+
+        private static VanillaBlockSourceInfo? BuildBlockSourceInfo(Block block)
+        {
+            IAsset? asset = FindCollectibleSourceAsset(block);
+            if (asset?.Location == null) return null;
+            return new(
+                asset.Location,
+                asset.Location.Path.Replace('\\', '/'),
+                TryParseJsonObject(ReadAssetText(asset)));
         }
 
         private static JObject? TryLoadJson(ICoreClientAPI api, AssetLocation? location)

@@ -25,7 +25,9 @@ public sealed partial class DebugWindowManager
     {
         ClearActiveTransformGizmo();
         _vanillaIndex.EnsureEntityList(_api);
+        _vanillaIndex.EnsureBlockList(_api);
         TrackVanillaLiveOriginals();
+        FlushPendingVanillaAutoApply();
 
         NVector2 available = ImGui.GetContentRegionAvail();
         float splitterThickness = Math.Max(5f, 6f * _devToolsUiScale);
@@ -222,13 +224,26 @@ public sealed partial class DebugWindowManager
     private void DrawVanillaBrowser(IReadOnlyList<VanillaBrowserRow> rows)
     {
         ImGui.SeparatorText("Vanilla animations");
+        DrawVanillaSourceModeSelector();
+
         if (ImGuiLayoutHelper.DrawDomainCombo("Domain##vanilla-domain-filter", ref _vanillaDomainFilter, GetVanillaDomains()))
         {
             InvalidateVanillaBrowserFilter();
         }
 
-        DrawVanillaEntitySelector();
-        if (ImGui.InputTextWithHint("##vanilla-filter", "filter animations by code, entity, kind", ref _vanillaFilter, 300))
+        if (_vanillaSourceMode == VanillaAnimationSourceMode.Blocks)
+        {
+            DrawVanillaBlockSelector();
+        }
+        else
+        {
+            DrawVanillaEntitySelector();
+        }
+
+        string filterHint = _vanillaSourceMode == VanillaAnimationSourceMode.Blocks
+            ? "filter animations by code, block, kind"
+            : "filter animations by code, entity, kind";
+        if (ImGui.InputTextWithHint("##vanilla-filter", filterHint, ref _vanillaFilter, 300))
         {
             InvalidateVanillaBrowserFilter();
         }
@@ -244,7 +259,16 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.CollapsingHeader("Actions##vanilla-browser-actions"))
         {
-            if (_vanillaIndex.HasSelectedEntity && ImGui.Button("Reload selected entity##vanilla", new NVector2(-1, 0)))
+            if (_vanillaSourceMode == VanillaAnimationSourceMode.Blocks)
+            {
+                if (_vanillaIndex.HasSelectedBlock && ImGui.Button("Reload selected block##vanilla", new NVector2(-1, 0)))
+                {
+                    CommitPendingVanillaHistory();
+                    _vanillaIndex.ReloadSelectedBlock(_api);
+                    ResetVanillaEntitySelectionState();
+                }
+            }
+            else if (_vanillaIndex.HasSelectedEntity && ImGui.Button("Reload selected entity##vanilla", new NVector2(-1, 0)))
             {
                 CommitPendingVanillaHistory();
                 _vanillaIndex.ReloadSelectedEntity(_api, ShouldVanillaUseGroupEdit(_vanillaIndex.SelectedEntityOption));
@@ -322,7 +346,9 @@ public sealed partial class DebugWindowManager
         if (GetVanillaMetadataDocument() == null)
         {
             _vanillaNewAnimationMetadata = false;
-            ImGui.TextDisabled("No entity metadata document is available for this selection.");
+            ImGui.TextDisabled(_vanillaSourceMode == VanillaAnimationSourceMode.Blocks
+                ? "Block animations are shape animations. Placed playback setup is written separately when possible."
+                : "No entity metadata document is available for this selection.");
         }
         else
         {
@@ -425,10 +451,50 @@ public sealed partial class DebugWindowManager
         selectedRow ??= BuildVanillaBrowserRow(shapeEntry);
         SelectVanillaRow(selectedRow);
         BuildVanillaPreviewScene(selectedRow, rebuildMesh: true);
-        _vanillaStatus = $"Created animation '{code}' in {shapeDocument.DisplayPath}. Export the dirty document to save a copied JSON asset.";
+        string setupStatus = TryApplyBlockAnimationSetup(shapeDocument, code);
+        _vanillaStatus = string.IsNullOrWhiteSpace(setupStatus)
+            ? $"Created animation '{code}' in {shapeDocument.DisplayPath}. Export the dirty document to save a copied JSON asset."
+            : $"Created animation '{code}' in {shapeDocument.DisplayPath}. {setupStatus} Export the dirty shape document to save the animations array.";
 
         _vanillaNewAnimationCode = NextVanillaAnimationDraftCode(code);
         _vanillaNewAnimationName = "";
+    }
+
+    private string TryApplyBlockAnimationSetup(VanillaAnimationDocument shapeDocument, string animationCode)
+    {
+        if (shapeDocument.Block == null) return "";
+
+        try
+        {
+            Block block = shapeDocument.Block;
+            IAsset? sourceAsset = FindCollectibleSourceAsset(block);
+            string domain = sourceAsset?.Location.Domain ?? block.Code?.Domain ?? shapeDocument.Domain;
+            string assetPath = sourceAsset?.Location.Path ?? $"blocktypes/{EnsureJsonFilePath(block.Code?.Path ?? "unknown")}";
+            string outputPath = GetToolAuthoredAssetPath("block-item-json", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
+            string sourceText = ReadAssetText(sourceAsset);
+            string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : sourceText;
+            JObject json = TryParseJsonObject(oldText) ?? TryParseJsonObject(sourceText) ?? CreateCollectibleAuthoringDocument(block);
+
+            DevToolsBlockAnimationSetupResult result = DevToolsBlockAnimationSetup.Apply(json, animationCode);
+            if (!result.Success)
+            {
+                return result.Status;
+            }
+
+            if (!result.Changed)
+            {
+                return "Placed block playback setup already exists.";
+            }
+
+            string newText = JsonConvert.SerializeObject(json, Formatting.Indented);
+            WriteAuthoredFile(outputPath, newText);
+            return $"Saved authored block playback setup to {outputPath}.";
+        }
+        catch (Exception exception)
+        {
+            _animationDiagnostics.Exception("Block animation setup failed", exception);
+            return $"Block playback setup failed: {exception.Message}";
+        }
     }
 
     private static VanillaBrowserRow BuildVanillaBrowserRow(VanillaShapeAnimationEntry entry)
@@ -556,6 +622,81 @@ public sealed partial class DebugWindowManager
         if (last < rows.Count)
         {
             ImGui.Dummy(new NVector2(1f, (rows.Count - last) * rowHeight));
+        }
+    }
+
+    private void DrawVanillaSourceModeSelector()
+    {
+        bool blocks = _vanillaSourceMode == VanillaAnimationSourceMode.Blocks;
+        if (ImGui.RadioButton("Entities##vanilla-source-mode", !blocks))
+        {
+            CommitPendingVanillaHistory();
+            _vanillaSourceMode = VanillaAnimationSourceMode.Entities;
+            _vanillaIndex.ClearSelection();
+            ResetVanillaEntitySelectionState();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Blocks##vanilla-source-mode", blocks))
+        {
+            CommitPendingVanillaHistory();
+            _vanillaSourceMode = VanillaAnimationSourceMode.Blocks;
+            _vanillaIndex.ClearSelection();
+            ResetVanillaEntitySelectionState();
+        }
+    }
+
+    private void DrawVanillaBlockSelector()
+    {
+        ImGui.SeparatorText("Block");
+
+        ImGui.InputTextWithHint("##vanilla-block-filter", "filter blocks", ref _vanillaBlockFilter, 240);
+
+        IReadOnlyList<VanillaBlockOption> options = _vanillaIndex.GetBlockOptions();
+        string blockFilter = _vanillaBlockFilter.Trim();
+        List<int> visible = [];
+        for (int index = 0; index < options.Count; index++)
+        {
+            if (!ImGuiLayoutHelper.MatchesDomain(_vanillaDomainFilter, options[index].Domain)) continue;
+            if (string.IsNullOrWhiteSpace(blockFilter) || options[index].SearchText.Contains(blockFilter, StringComparison.OrdinalIgnoreCase))
+            {
+                visible.Add(index);
+            }
+        }
+
+        string preview = _vanillaIndex.SelectedBlockLabel ?? "Select block";
+        if (ImGui.BeginCombo("Block##vanilla-block", preview))
+        {
+            foreach (int index in visible)
+            {
+                bool selected = _vanillaIndex.IsSelectedBlockOption(options[index]);
+                if (ImGui.Selectable($"{options[index].Label}##vanilla-block-{index}", selected))
+                {
+                    CommitPendingVanillaHistory();
+                    _vanillaIndex.SelectBlock(_api, options, index);
+                    ResetVanillaEntitySelectionState();
+                }
+
+                if (selected)
+                {
+                    ImGui.SetItemDefaultFocus();
+                }
+
+                if (ImGui.IsItemHovered())
+                {
+                    VanillaBlockSourceInfo? source = options[index].Source;
+                    ImGui.SetTooltip(source == null
+                        ? $"{options[index].FullLabel}\nShape: {options[index].Block.Shape?.Base}"
+                        : $"{options[index].FullLabel}\nSource: {source.Key}\nShape: {options[index].Block.Shape?.Base}");
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        if (_vanillaIndex.HasSelectedBlock)
+        {
+            ImGui.TextDisabled("Existing block entity classes are preserved. Plain blocks can be wired for InGameDevTools placed playback when creating an animation.");
         }
     }
 
@@ -697,6 +838,13 @@ public sealed partial class DebugWindowManager
     {
         InvalidateVanillaBrowserRows();
         _vanillaHistory.ClearAll();
+        _vanillaInspectorSnapshotCache.Clear();
+        _vanillaLiveOriginalsTrackedCount = -1;
+        _vanillaUniverseCacheDocument = null;
+        _vanillaUniverseCacheAnimation = null;
+        _vanillaUniverseCacheKeyFrame = null;
+        _vanillaUniverseCache = [];
+        _vanillaUniverseLookupCache = null;
         _vanillaLastEditedDocumentKey = "";
         _vanillaSelection.Clear();
         DisposeVanillaPreviewScene();
@@ -706,6 +854,7 @@ public sealed partial class DebugWindowManager
     private IEnumerable<string> GetVanillaDomains()
     {
         return _vanillaIndex.AllEntityDomains
+            .Concat(_vanillaIndex.AllBlockDomains)
             .Concat(_vanillaIndex.Documents.Select(document => document.Domain));
     }
 

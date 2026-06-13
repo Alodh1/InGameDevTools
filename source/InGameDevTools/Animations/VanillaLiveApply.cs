@@ -15,9 +15,16 @@ namespace InGameDevTools.Animations;
 public sealed partial class DebugWindowManager
 {
     private readonly Dictionary<string, string> _vanillaLiveAppliedHashes = new(StringComparer.Ordinal);
+    private int _vanillaLiveOriginalsTrackedCount = -1;
+    private long _vanillaAutoApplyLastTimestampMs;
+    private string _vanillaAutoApplyPendingHistoryKey = "";
+    private const long VanillaAutoApplyMinIntervalMs = 150;
 
     private void TrackVanillaLiveOriginals()
     {
+        if (_vanillaLiveOriginalsTrackedCount == _vanillaIndex.Documents.Count) return;
+
+        _vanillaLiveOriginalsTrackedCount = _vanillaIndex.Documents.Count;
         foreach (VanillaAnimationDocument document in _vanillaIndex.Documents)
         {
             string key = GetVanillaLiveKey(document);
@@ -95,9 +102,22 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void AutoApplyVanillaDocument(VanillaAnimationDocument document, bool force = false)
+    private void AutoApplyVanillaDocument(VanillaAnimationDocument document, bool force = false, bool flushThrottle = false)
     {
         if (!_liveApplyManager.AutoApply || !IsVanillaLiveTargetAvailable(document)) return;
+
+        long now = Environment.TickCount64;
+        if (!force && !flushThrottle && now - _vanillaAutoApplyLastTimestampMs < VanillaAutoApplyMinIntervalMs)
+        {
+            _vanillaAutoApplyPendingHistoryKey = document.HistoryKey;
+            return;
+        }
+
+        _vanillaAutoApplyLastTimestampMs = now;
+        if (string.Equals(_vanillaAutoApplyPendingHistoryKey, document.HistoryKey, StringComparison.Ordinal))
+        {
+            _vanillaAutoApplyPendingHistoryKey = "";
+        }
 
         string key = GetVanillaLiveKey(document);
         string serialized = VanillaAnimationDocumentSerializer.Serialize(document);
@@ -109,6 +129,19 @@ public sealed partial class DebugWindowManager
         }
 
         _vanillaStatus = ApplyVanillaLive(document, force);
+    }
+
+    private void FlushPendingVanillaAutoApply()
+    {
+        if (string.IsNullOrEmpty(_vanillaAutoApplyPendingHistoryKey)) return;
+        if (Environment.TickCount64 - _vanillaAutoApplyLastTimestampMs < VanillaAutoApplyMinIntervalMs) return;
+
+        VanillaAnimationDocument? document = FindVanillaDocument(_vanillaAutoApplyPendingHistoryKey);
+        _vanillaAutoApplyPendingHistoryKey = "";
+        if (document != null)
+        {
+            AutoApplyVanillaDocument(document);
+        }
     }
 
     private string ApplyVanillaLive(VanillaAnimationDocument document, bool force = false)

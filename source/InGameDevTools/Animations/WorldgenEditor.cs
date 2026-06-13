@@ -60,6 +60,15 @@ public sealed partial class DebugWindowManager
         "3D region",
         "Rock strata"
     ];
+    private static readonly string[] WorldgenAdvancedFieldKindLabels =
+    [
+        "String",
+        "Boolean",
+        "Integer",
+        "Float",
+        "Object",
+        "Array"
+    ];
     private static readonly HashSet<string> WorldgenDepositFirstClassKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "code", "generator", "triesPerChunk", "chance", "chanceMultiplier", "withOreMap", "handbookPageCode", "oreMapCode", "attributes"
@@ -96,6 +105,8 @@ public sealed partial class DebugWindowManager
         EnumWorldGenPass.Done
     ];
 
+    private readonly record struct WorldgenPreviewParityInfo(string State, string Detail, string Action);
+
     private readonly List<WorldgenAssetEntry> _worldgenEntries = [];
     private readonly List<WorldgenAssetEntry> _visibleWorldgenEntries = [];
     private readonly Dictionary<string, WorldgenDraftState> _worldgenDraftStates = new(StringComparer.OrdinalIgnoreCase);
@@ -113,6 +124,8 @@ public sealed partial class DebugWindowManager
     private int _worldgenKindFilter;
     private int _worldgenEntryIndex;
     private int _worldgenRowIndex;
+    private string _worldgenNewAdvancedFieldName = "";
+    private int _worldgenNewAdvancedFieldKindIndex;
     private bool _worldgenDirtyOnly;
     private string _worldgenLoadedKey = "";
     private string _worldgenOriginalText = "";
@@ -635,15 +648,31 @@ public sealed partial class DebugWindowManager
             .OrderBy(property => property.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (advancedProperties.Count == 0) return false;
         if (!ImGui.CollapsingHeader($"Advanced fields ({advancedProperties.Count})##worldgen-advanced-row-fields")) return false;
 
         bool changed = false;
+        if (advancedProperties.Count == 0)
+        {
+            ImGui.TextDisabled("No unhandled fields on this row.");
+        }
+
         foreach (JProperty property in advancedProperties)
         {
             ImGui.PushID($"worldgen-advanced-{property.Name}");
             changed |= DrawWorldgenAdvancedRowField(row, property);
             ImGui.PopID();
+        }
+
+        ImGui.SeparatorText("Add advanced field");
+        ImGui.SetNextItemWidth(180f);
+        ImGui.InputTextWithHint("##worldgen-advanced-new-name", "field name", ref _worldgenNewAdvancedFieldName, 128);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(110f);
+        ImGui.Combo("Type##worldgen-advanced-new-kind", ref _worldgenNewAdvancedFieldKindIndex, WorldgenAdvancedFieldKindLabels, WorldgenAdvancedFieldKindLabels.Length);
+        ImGui.SameLine();
+        if (ImGui.Button("Add##worldgen-advanced-add"))
+        {
+            changed |= TryAddWorldgenAdvancedRowField(row, firstClassKeys);
         }
 
         return changed;
@@ -653,14 +682,39 @@ public sealed partial class DebugWindowManager
     {
         bool changed = false;
         JToken value = property.Value;
-        ImGui.TextUnformatted(property.Name);
 
         if (value is JObject obj && LooksLikeNatFloat(obj))
         {
+            ImGui.TextUnformatted(property.Name);
             changed |= DrawWorldgenNatFloatObject(obj, property.Name);
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{property.Name}"))
+            {
+                row.Remove(property.Name);
+                changed = true;
+            }
+        }
+        else if (value is JObject objectValue)
+        {
+            if (ImGui.Button($"Remove##remove-{property.Name}"))
+            {
+                row.Remove(property.Name);
+                return true;
+            }
+            changed |= DrawWorldgenSemanticObject(property.Name, objectValue);
+        }
+        else if (value is JArray arrayValue)
+        {
+            if (ImGui.Button($"Remove##remove-{property.Name}"))
+            {
+                row.Remove(property.Name);
+                return true;
+            }
+            changed |= DrawWorldgenSemanticArray(property.Name, arrayValue);
         }
         else
         {
+            ImGui.TextUnformatted(property.Name);
             switch (value.Type)
             {
                 case JTokenType.Boolean:
@@ -706,35 +760,241 @@ public sealed partial class DebugWindowManager
                     }
                     break;
                 }
-                default:
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button($"Remove##remove-{property.Name}"))
+            {
+                row.Remove(property.Name);
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    private bool DrawWorldgenSemanticObject(string label, JObject obj)
+    {
+        bool changed = false;
+        if (!ImGui.TreeNodeEx($"{label} object##worldgen-object-{label}", ImGuiTreeNodeFlags.DefaultOpen)) return false;
+
+        foreach (JProperty child in obj.Properties().OrderBy(property => property.Name, StringComparer.OrdinalIgnoreCase).ToList())
+        {
+            ImGui.PushID($"worldgen-object-field-{label}-{child.Name}");
+            changed |= DrawWorldgenSemanticObjectProperty(obj, child);
+            ImGui.PopID();
+        }
+
+        ImGui.TreePop();
+        return changed;
+    }
+
+    private bool DrawWorldgenSemanticObjectProperty(JObject obj, JProperty property)
+    {
+        JToken value = property.Value;
+        bool changed = false;
+        if (value is JObject childObject)
+        {
+            if (ImGui.Button($"Remove##remove-object-{property.Name}"))
+            {
+                obj.Remove(property.Name);
+                return true;
+            }
+            changed |= DrawWorldgenSemanticObject(property.Name, childObject);
+            return changed;
+        }
+
+        if (value is JArray childArray)
+        {
+            if (ImGui.Button($"Remove##remove-array-{property.Name}"))
+            {
+                obj.Remove(property.Name);
+                return true;
+            }
+            changed |= DrawWorldgenSemanticArray(property.Name, childArray);
+            return changed;
+        }
+
+        ImGui.TextUnformatted(property.Name);
+        ImGui.SameLine();
+        changed |= DrawWorldgenSemanticScalar(
+            value,
+            property.Name,
+            replacement => property.Value = replacement,
+            () => obj.Remove(property.Name));
+        return changed;
+    }
+
+    private bool DrawWorldgenSemanticArray(string label, JArray array)
+    {
+        bool changed = false;
+        if (!ImGui.TreeNodeEx($"{label} array ({array.Count})##worldgen-array-{label}", ImGuiTreeNodeFlags.DefaultOpen)) return false;
+
+        int removeIndex = -1;
+        for (int index = 0; index < array.Count; index++)
+        {
+            JToken value = array[index];
+            ImGui.PushID($"worldgen-array-{label}-{index}");
+            if (value is JObject childObject)
+            {
+                changed |= DrawWorldgenSemanticObject($"[{index}]", childObject);
+            }
+            else if (value is JArray childArray)
+            {
+                changed |= DrawWorldgenSemanticArray($"[{index}]", childArray);
+            }
+            else
+            {
+                ImGui.TextUnformatted($"[{index}]");
+                ImGui.SameLine();
+                changed |= DrawWorldgenSemanticScalar(
+                    value,
+                    $"item-{index}",
+                    replacement => array[index] = replacement,
+                    () => removeIndex = index);
+            }
+
+            if (value is JObject or JArray)
+            {
+                ImGui.SameLine();
+                if (ImGui.Button("Remove##remove-complex-array-item"))
                 {
-                    string json = value.ToString(Formatting.Indented);
-                    if (ImGui.InputTextMultiline($"##json-{property.Name}", ref json, 256 * 1024, new NVector2(-float.Epsilon, 110f), ImGuiInputTextFlags.AllowTabInput))
-                    {
-                        if (TryParseJsonToken(json, out JToken? token, out string error) && token != null)
-                        {
-                            property.Value = token;
-                            changed = true;
-                        }
-                        else
-                        {
-                            _worldgenTextValid = false;
-                            _worldgenValidationStatus = $"{property.Name} parse error: {error}";
-                        }
-                    }
-                    break;
+                    removeIndex = index;
                 }
+            }
+            ImGui.PopID();
+        }
+
+        if (removeIndex >= 0)
+        {
+            array.RemoveAt(removeIndex);
+            changed = true;
+        }
+
+        if (ImGui.Button($"Add value##worldgen-array-add-{label}"))
+        {
+            array.Add(CreateWorldgenAdvancedFieldDefault(InferWorldgenArrayDefaultKind(array)));
+            changed = true;
+        }
+        ImGui.SameLine();
+        if (ImGui.Button($"Add object##worldgen-array-add-object-{label}"))
+        {
+            array.Add(new JObject());
+            changed = true;
+        }
+
+        ImGui.TreePop();
+        return changed;
+    }
+
+    private bool DrawWorldgenSemanticScalar(JToken value, string label, Action<JToken> replace, Action remove)
+    {
+        switch (value.Type)
+        {
+            case JTokenType.Boolean:
+            {
+                bool boolValue = value.Value<bool>();
+                if (ImGui.Checkbox($"##worldgen-semantic-bool-{label}", ref boolValue))
+                {
+                    replace(boolValue);
+                    return true;
+                }
+                break;
+            }
+            case JTokenType.Integer:
+            {
+                int intValue = value.Value<int>();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputInt($"##worldgen-semantic-int-{label}", ref intValue))
+                {
+                    replace(intValue);
+                    return true;
+                }
+                break;
+            }
+            case JTokenType.Float:
+            {
+                float floatValue = value.Value<float>();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputFloat($"##worldgen-semantic-float-{label}", ref floatValue, 0, 0, "%.4f"))
+                {
+                    replace(floatValue);
+                    return true;
+                }
+                break;
+            }
+            default:
+            {
+                string stringValue = value.Type == JTokenType.Null ? "" : value.ToString();
+                ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - 90f));
+                if (ImGui.InputText($"##worldgen-semantic-string-{label}", ref stringValue, 4096))
+                {
+                    replace(stringValue);
+                    return true;
+                }
+                break;
             }
         }
 
         ImGui.SameLine();
-        if (ImGui.Button($"Remove##remove-{property.Name}"))
+        if (ImGui.Button($"Remove##worldgen-semantic-remove-{label}"))
         {
-            row.Remove(property.Name);
-            changed = true;
+            remove();
+            return true;
         }
 
-        return changed;
+        return false;
+    }
+
+    private bool TryAddWorldgenAdvancedRowField(JObject row, IReadOnlySet<string> firstClassKeys)
+    {
+        string propertyName = _worldgenNewAdvancedFieldName.Trim();
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            _worldgenValidationStatus = "Advanced worldgen field name is required.";
+            return false;
+        }
+        if (firstClassKeys.Contains(propertyName))
+        {
+            _worldgenValidationStatus = $"{propertyName} is already handled by a structured worldgen control.";
+            return false;
+        }
+        if (row[propertyName] != null)
+        {
+            _worldgenValidationStatus = $"Worldgen row field {propertyName} already exists.";
+            return false;
+        }
+
+        row[propertyName] = CreateWorldgenAdvancedFieldDefault(_worldgenNewAdvancedFieldKindIndex);
+        _worldgenNewAdvancedFieldName = "";
+        return true;
+    }
+
+    private static JToken CreateWorldgenAdvancedFieldDefault(int fieldKindIndex)
+    {
+        return fieldKindIndex switch
+        {
+            1 => false,
+            2 => 0,
+            3 => 0f,
+            4 => new JObject(),
+            5 => new JArray(),
+            _ => ""
+        };
+    }
+
+    private static int InferWorldgenArrayDefaultKind(JArray array)
+    {
+        JToken? first = array.FirstOrDefault(token => token.Type != JTokenType.Null);
+        return first?.Type switch
+        {
+            JTokenType.Boolean => 1,
+            JTokenType.Integer => 2,
+            JTokenType.Float => 3,
+            JTokenType.Object => 4,
+            JTokenType.Array => 5,
+            _ => 0
+        };
     }
 
     private bool DrawWorldgenStringField(JObject row, string propertyName, string label)
@@ -1505,6 +1765,8 @@ public sealed partial class DebugWindowManager
 
     private void DrawWorldgenPreviewModeDetails()
     {
+        DrawWorldgenPreviewParityPanel();
+
         if (_worldgenPreviewMode == WorldgenPreviewModeClimate)
         {
             DrawWorldgenClimatePreviewControls();
@@ -1537,27 +1799,69 @@ public sealed partial class DebugWindowManager
 
     private string BuildWorldgenPreviewDetailsSummary()
     {
+        WorldgenPreviewParityInfo parity = BuildWorldgenPreviewParityInfo(_worldgenPreviewMode);
         return _worldgenPreviewMode switch
         {
-            WorldgenPreviewModeClimate => "Live climate map from the active world config.",
+            WorldgenPreviewModeClimate => $"{parity.State}: live climate map from the active world config.",
             WorldgenPreviewModeOre => TryGetWorldgenPreviewDepositVariant(out _, out string? code, out string source, out string status)
-                ? $"Ore preview: {source} {code ?? "unnamed"}."
+                ? $"{parity.State}: ore preview uses {source} {code ?? "unnamed"}."
                 : status,
             WorldgenPreviewModeBlockPatch => TryGetSelectedWorldgenBlockPatchRow(out JObject? blockPatchRow) && blockPatchRow != null
-                ? $"Block patch: {GetWorldgenRowLabel(WorldgenAssetKind.BlockPatches, blockPatchRow, _worldgenRowIndex)}."
+                ? $"{parity.State}: block patch {GetWorldgenRowLabel(WorldgenAssetKind.BlockPatches, blockPatchRow, _worldgenRowIndex)}."
                 : "Select a block patch row to preview suitability.",
             WorldgenPreviewModeTerrainShape => TryGetSelectedWorldgenLandformRow(out JObject? landformRow) && landformRow != null
-                ? $"Terrain shape: {GetWorldgenRowLabel(WorldgenAssetKind.Landforms, landformRow, _worldgenRowIndex)}."
+                ? $"{parity.State}: terrain shape {GetWorldgenRowLabel(WorldgenAssetKind.Landforms, landformRow, _worldgenRowIndex)}."
                 : "Select a landform row to preview terrain shape.",
             WorldgenPreviewModeRegion3D => _worldgenPreviewPeekProfile == null
-                ? "3D region: draft landform surface."
-                : $"3D region: real peek, pass {_worldgenPreviewPeekProfile.PassLabel}.",
+                ? $"{parity.State}: draft landform surface."
+                : $"{parity.State}: real peek, pass {_worldgenPreviewPeekProfile.PassLabel}.",
             WorldgenPreviewModeRockStrata => TryGetSelectedWorldgenRockStrataRow(out JObject? stratumRow) && stratumRow != null
-                ? $"Rock strata: {GetWorldgenRowLabel(WorldgenAssetKind.RockStrata, stratumRow, _worldgenRowIndex)}."
+                ? $"{parity.State}: rock strata {GetWorldgenRowLabel(WorldgenAssetKind.RockStrata, stratumRow, _worldgenRowIndex)}."
                 : "Select a rock-strata row to preview thickness.",
-            _ when WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode) => "Live GenMaps layer when an integrated server is available.",
+            _ when WorldgenPreviewModeUsesMapLayer(_worldgenPreviewMode) => $"{parity.State}: live GenMaps layer when an integrated server is available.",
             _ => ""
         } ?? "";
+    }
+
+    private void DrawWorldgenPreviewParityPanel()
+    {
+        WorldgenPreviewParityInfo parity = BuildWorldgenPreviewParityInfo(_worldgenPreviewMode);
+        ImGui.SeparatorText("Preview parity");
+        ImGui.TextDisabled($"{parity.State}: {parity.Detail}");
+        if (!string.IsNullOrWhiteSpace(parity.Action))
+        {
+            ImGui.TextWrapped(parity.Action);
+        }
+    }
+
+    private WorldgenPreviewParityInfo BuildWorldgenPreviewParityInfo(int mode)
+    {
+        if (WorldgenPreviewModeUsesMapLayer(mode))
+        {
+            return GetWorldgenPreviewMapLayer(mode) != null
+                ? new("Exact", $"Sampling live GenMaps.{GetWorldgenPreviewMapLayerFieldName(mode)} from the active server world.", "")
+                : new("Approximate", "No live GenMaps layer is available, so the preview uses the deterministic draft color sampler.", "Start or join a singleplayer world for exact engine map-layer parity.");
+        }
+
+        return mode switch
+        {
+            WorldgenPreviewModeOre => GetWorldgenPreviewGenDeposits() != null
+                ? new("Engine-exact ore map", "Sampling the initialized GenDeposits ore map for the selected deposit; propick text becomes exact when a 3D peek covers the cursor.", "Use 3D region peek on the same area for exact block-column propick parity.")
+                : new("Draft-derived", "GenDeposits is unavailable; only draft row data can be sampled.", "Start a singleplayer world to initialize the engine ore sampler."),
+            WorldgenPreviewModeBlockPatch => _worldgenPreviewPeekProfile != null
+                ? new("Peek-exact", $"Comparing against the last real generated region through pass {_worldgenPreviewPeekProfile.PassLabel}.", "")
+                : new("Approximate", "2D suitability uses live climate maps plus draft constraints; terrain/surface/category collision checks need generated terrain.", "Press Peek region for exact generated-world parity around the cursor."),
+            WorldgenPreviewModeTerrainShape => _worldgenPreviewServerApi?.ModLoader.GetModSystem<GenTerra>() != null
+                ? new("Engine-exact terrain noise", "Sampling GenTerra ColumnNoise with the selected draft landform.", "")
+                : new("Draft-derived", "GenTerra is unavailable; the preview falls back to the landform draft arrays.", "Start a singleplayer world to initialize GenTerra for exact terrain shape sampling."),
+            WorldgenPreviewModeRegion3D => _worldgenPreviewPeekProfile != null
+                ? new("Peek-exact", $"Rendering generated terrain returned by PeekChunkColumn through {_worldgenPreviewPeekProfile.PassLabel}.", "")
+                : new("Draft-derived", "Rendering the selected landform height field before generated terrain has been peeked.", "Press Peek region for exact generated terrain parity."),
+            WorldgenPreviewModeRockStrata => _worldgenPreviewPeekProfile != null
+                ? new("Peek-exact", "Using the generated block columns from the last real 3D peek.", "")
+                : new("Draft-exact thickness", "Sampling the selected stratum's thickness map; final province stack placement still needs a generated column.", "Press Peek region for exact block-column placement parity."),
+            _ => new("Diagnostic", "Synthetic gradient/noise preview; no engine generation pass is associated with this mode.", "")
+        };
     }
 
     private void DrawWorldgenPreviewOverlay(
@@ -1574,6 +1878,7 @@ public sealed partial class DebugWindowManager
     {
         List<string> lines = [];
         AddOverlayLine(modeStatus);
+        AddOverlayLine(BuildWorldgenPreviewParityOverlayLine());
         AddOverlayLine($"X {hoverX}, Z {hoverZ}");
         AddOverlayLine(hoverDetails);
         if (!string.IsNullOrWhiteSpace(previewError))
@@ -1625,6 +1930,12 @@ public sealed partial class DebugWindowManager
                 lines.Add(value);
             }
         }
+    }
+
+    private string BuildWorldgenPreviewParityOverlayLine()
+    {
+        WorldgenPreviewParityInfo parity = BuildWorldgenPreviewParityInfo(_worldgenPreviewMode);
+        return $"Parity: {parity.State}";
     }
 
     private static void AddWorldgenPreviewText(ImDrawListPtr drawList, NVector2 position, uint color, string? text)

@@ -2,6 +2,7 @@ using ImGuiNET;
 using InGameDevTools.Utils;
 using NVector2 = System.Numerics.Vector2;
 using NVector4 = System.Numerics.Vector4;
+using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
 
@@ -73,8 +74,8 @@ public sealed partial class DebugWindowManager
     private void HandleCommandPaletteShortcut()
     {
         ImGuiIOPtr io = ImGui.GetIO();
-        if (io.WantTextInput || !io.KeyCtrl) return;
-        if (ImGui.IsKeyPressed(ImGuiKey.P))
+        if (io.WantTextInput || !IsDevToolsCtrlDown()) return;
+        if (IsDevToolsShortcutPressed(ImGuiKey.P, GlKeys.P))
         {
             OpenCommandPalette();
         }

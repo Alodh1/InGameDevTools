@@ -21,6 +21,24 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
+    private int _vanillaIkConfigRevision;
+    private bool _vanillaIkChainCacheResult;
+    private VanillaIkManualChain _vanillaIkChainCacheChain;
+    private string _vanillaIkChainCacheError = "";
+    private string _vanillaIkChainCacheWarning = "";
+    private VanillaAnimationDocument? _vanillaIkChainCacheDocument;
+    private VanillaAnimation? _vanillaIkChainCacheAnimation;
+    private AnimationKeyFrame? _vanillaIkChainCacheKeyFrame;
+    private string _vanillaIkChainCacheElementName = "";
+    private VanillaIkChainMode _vanillaIkChainCacheMode;
+    private int _vanillaIkChainCacheEditVersion = -1;
+    private int _vanillaIkChainCacheConfigRevision = -1;
+
+    private void InvalidateVanillaIkChainCache()
+    {
+        _vanillaIkConfigRevision++;
+    }
+
     private bool ContainsVanillaIkChainElement(string elementName)
     {
         return _vanillaIkChainElementNames.Any(name => string.Equals(name, elementName, StringComparison.OrdinalIgnoreCase));
@@ -42,6 +60,7 @@ public sealed partial class DebugWindowManager
             _vanillaStatus = $"Added {elementName} to the IK chain.";
         }
 
+        InvalidateVanillaIkChainCache();
         _vanillaIkHasTarget = false;
         ClearVanillaViewportGizmoDrag();
     }
@@ -127,6 +146,28 @@ public sealed partial class DebugWindowManager
             ApplyVanillaSymmetryAction(row, document, () => BakeVanillaHalfCycleSymmetryForSide(document, animation, sourceSide));
         }
         if (!canBakeAll) ImGui.EndDisabled();
+
+        bool hasKeyFrameElements = keyFrame.Elements is { Count: > 0 };
+        if (!hasKeyFrameElements) ImGui.BeginDisabled();
+        if (ImGui.Button("Flip pose##vanilla-symmetry-flip-pose"))
+        {
+            ApplyVanillaSymmetryAction(row, document, () => FlipVanillaPoseInKeyFrame(document, animation, keyFrame));
+        }
+        if (!hasKeyFrameElements) ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Mirrors the entire keyframe: swaps left/right pairs and mirrors unpaired center elements in place. Pairs are found by name, manual override, or mirrored pivot position.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Create mirrored animation copy##vanilla-symmetry-mirror-copy"))
+        {
+            CreateMirroredVanillaAnimationCopy(entry);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Duplicates this animation with every keyframe pose flipped left<->right. Useful for creating strafe-left from strafe-right and similar mirrored motions.");
+        }
 
         if (!hasPair)
         {
@@ -295,6 +336,41 @@ public sealed partial class DebugWindowManager
             }
         }
 
+        string[] solverOptions = ["CCD (classic)", "FABRIK (smooth)"];
+        int solverIndex = _vanillaIkSolver == VanillaIkSolverKind.Fabrik ? 1 : 0;
+        ImGui.SetNextItemWidth(180f);
+        if (ImGui.Combo("Solver##vanilla-ik-solver", ref solverIndex, solverOptions, solverOptions.Length))
+        {
+            _vanillaIkSolver = solverIndex == 1 ? VanillaIkSolverKind.Fabrik : VanillaIkSolverKind.Ccd;
+            SaveVanillaIkSettings(_vanillaIkSolver == VanillaIkSolverKind.Fabrik
+                ? "IK solver: FABRIK. Distributes bending smoothly along the chain and supports swivel control."
+                : "IK solver: CCD. Classic per-bone solving that favors rotating bones near the end effector.");
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("CCD rotates bones one at a time from the effector toward the root. FABRIK solves joint positions in both directions, giving smoother, more even bends, plus a swivel (pole) control.");
+        }
+
+        if (_vanillaIkSolver == VanillaIkSolverKind.Fabrik)
+        {
+            ImGui.SetNextItemWidth(180f);
+            float swivel = _vanillaIkSwivelDegrees;
+            if (ImGui.SliderFloat("Swivel##vanilla-ik-swivel", ref swivel, -180f, 180f, "%.0f deg"))
+            {
+                _vanillaIkSwivelDegrees = Math.Clamp(swivel, -180f, 180f);
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Pole control: rotates the solved chain's middle joints around the root-to-effector axis. Use it to aim elbows and knees. Applied on the next solve or IK Move drag.");
+            }
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton("0##vanilla-ik-swivel-reset"))
+            {
+                _vanillaIkSwivelDegrees = 0f;
+            }
+        }
+
         bool hasChain = TryGetActiveVanillaIkChain(document, entry.Animation, keyFrame, selectedElementName, out VanillaIkManualChain chain, out string chainError, out string chainWarning);
 
         if (ImGui.Checkbox("IK on Move##vanilla-ik-follow-move", ref _vanillaIkFollowMove))
@@ -442,6 +518,7 @@ public sealed partial class DebugWindowManager
         if (next == value) return;
 
         value = next;
+        InvalidateVanillaIkChainCache();
         _vanillaIkHasTarget = false;
         ClearVanillaViewportGizmoDrag();
         _vanillaStatus = side == "root"
@@ -482,6 +559,7 @@ public sealed partial class DebugWindowManager
     private void SaveVanillaIkSettings(string status)
     {
         _devToolsConfig.AnimationIkMode = FormatVanillaIkChainMode(_vanillaIkMode);
+        _devToolsConfig.AnimationIkSolver = FormatVanillaIkSolverKind(_vanillaIkSolver);
         _devToolsConfig.AnimationIkPreserveDraggedPartRotation = _vanillaIkPreserveDraggedPartRotation;
         _devToolsConfig.AnimationIkLockMoveToDragAxis = _vanillaIkLockMoveToDragAxis;
         _vanillaStatus = status;
@@ -493,6 +571,16 @@ public sealed partial class DebugWindowManager
         if (string.Equals(value, "AutoExtended", StringComparison.OrdinalIgnoreCase)) return VanillaIkChainMode.AutoExtended;
         if (string.Equals(value, "ManualOverride", StringComparison.OrdinalIgnoreCase)) return VanillaIkChainMode.ManualOverride;
         return VanillaIkChainMode.AutoConservative;
+    }
+
+    private static VanillaIkSolverKind ParseVanillaIkSolverKind(string? value)
+    {
+        return string.Equals(value, "Fabrik", StringComparison.OrdinalIgnoreCase) ? VanillaIkSolverKind.Fabrik : VanillaIkSolverKind.Ccd;
+    }
+
+    private static string FormatVanillaIkSolverKind(VanillaIkSolverKind solver)
+    {
+        return solver == VanillaIkSolverKind.Fabrik ? "Fabrik" : "Ccd";
     }
 
     private static string FormatVanillaIkChainMode(VanillaIkChainMode mode)
@@ -557,6 +645,7 @@ public sealed partial class DebugWindowManager
                 .ToArray();
         }
 
+        InvalidateVanillaIkChainCache();
         _vanillaIkHasTarget = false;
         ClearVanillaViewportGizmoDrag();
         SaveVanillaIkSettings(_vanillaStatus);
@@ -565,6 +654,7 @@ public sealed partial class DebugWindowManager
     private void ClearVanillaIkAnchors(VanillaAnimationDocument document)
     {
         _devToolsConfig.AnimationIkAnchors.Remove(GetVanillaIkAnchorKey(document));
+        InvalidateVanillaIkChainCache();
         _vanillaIkHasTarget = false;
         ClearVanillaViewportGizmoDrag();
         SaveVanillaIkSettings("IK anchors cleared.");
@@ -584,6 +674,7 @@ public sealed partial class DebugWindowManager
 
         if (pruned.Length == 0) _devToolsConfig.AnimationIkAnchors.Remove(key);
         else _devToolsConfig.AnimationIkAnchors[key] = pruned;
+        InvalidateVanillaIkChainCache();
         QueueDevToolsConfigSave("IK anchors pruned.");
     }
 
@@ -594,6 +685,7 @@ public sealed partial class DebugWindowManager
             if (ContainsElementName(allElements, _vanillaIkChainElementNames[index])) continue;
 
             _vanillaIkChainElementNames.RemoveAt(index);
+            InvalidateVanillaIkChainCache();
             _vanillaIkHasTarget = false;
             ClearVanillaViewportGizmoDrag();
         }
@@ -608,9 +700,36 @@ public sealed partial class DebugWindowManager
         out string error,
         out string warning)
     {
-        return _vanillaIkMode == VanillaIkChainMode.ManualOverride
+        if (ReferenceEquals(document, _vanillaIkChainCacheDocument) &&
+            ReferenceEquals(animation, _vanillaIkChainCacheAnimation) &&
+            ReferenceEquals(keyFrame, _vanillaIkChainCacheKeyFrame) &&
+            string.Equals(selectedElementName, _vanillaIkChainCacheElementName, StringComparison.OrdinalIgnoreCase) &&
+            _vanillaIkMode == _vanillaIkChainCacheMode &&
+            document.EditVersion == _vanillaIkChainCacheEditVersion &&
+            _vanillaIkConfigRevision == _vanillaIkChainCacheConfigRevision)
+        {
+            chain = _vanillaIkChainCacheChain;
+            error = _vanillaIkChainCacheError;
+            warning = _vanillaIkChainCacheWarning;
+            return _vanillaIkChainCacheResult;
+        }
+
+        bool result = _vanillaIkMode == VanillaIkChainMode.ManualOverride
             ? TryGetManualVanillaIkChain(document.Shape, out chain, out error, out warning)
             : TryGetAutoVanillaIkChain(document, animation, keyFrame, selectedElementName, out chain, out error, out warning);
+
+        _vanillaIkChainCacheDocument = document;
+        _vanillaIkChainCacheAnimation = animation;
+        _vanillaIkChainCacheKeyFrame = keyFrame;
+        _vanillaIkChainCacheElementName = selectedElementName ?? "";
+        _vanillaIkChainCacheMode = _vanillaIkMode;
+        _vanillaIkChainCacheEditVersion = document.EditVersion;
+        _vanillaIkChainCacheConfigRevision = _vanillaIkConfigRevision;
+        _vanillaIkChainCacheResult = result;
+        _vanillaIkChainCacheChain = chain;
+        _vanillaIkChainCacheError = error;
+        _vanillaIkChainCacheWarning = warning;
+        return result;
     }
 
     private bool TryGetAutoVanillaIkChain(
@@ -1095,7 +1214,7 @@ public sealed partial class DebugWindowManager
         }
 
         Vec3d target = new(_vanillaIkTargetX, _vanillaIkTargetY, _vanillaIkTargetZ);
-        if (!TrySolveVanillaIkCcdToTarget(cache, target, _vanillaIkPreserveDraggedPartRotation, keepHandleLocalTransform: false, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
+        if (!TrySolveVanillaIkToTarget(cache, target, _vanillaIkPreserveDraggedPartRotation, keepHandleLocalTransform: false, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
             return;
@@ -1148,7 +1267,10 @@ public sealed partial class DebugWindowManager
         VanillaSymmetryResult symmetry = PropagateVanillaLiveSymmetry(entry.Document, entry.Animation, sourceKeyFrame, changedElementNames);
         PreserveVanillaSelectedKeyFrame(entry.Animation, sourceKeyFrame);
         MarkVanillaDirty(entry.Document);
-        RefreshVanillaPreviewAfterEdit(row, changedElementNames);
+        string[] refreshElementNames = symmetry.WrittenElements is { Count: > 0 }
+            ? changedElementNames.Concat(symmetry.WrittenElements).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+            : changedElementNames;
+        RefreshVanillaPreviewAfterEdit(row, refreshElementNames);
 
         if (symmetry.Applied)
         {
@@ -1218,6 +1340,7 @@ public sealed partial class DebugWindowManager
         int created = 0;
         int overwritten = 0;
         int skipped = 0;
+        List<string> writtenNames = [];
 
         _vanillaLiveSymmetryPropagating = true;
         try
@@ -1237,6 +1360,7 @@ public sealed partial class DebugWindowManager
                 targetKeyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
                 if (targetKeyFrame.Elements.ContainsKey(pairName)) overwritten++;
                 targetKeyFrame.Elements[pairName] = MirrorVanillaElement(sourceElement);
+                writtenNames.Add(pairName);
                 written++;
             }
         }
@@ -1252,7 +1376,7 @@ public sealed partial class DebugWindowManager
 
         return written == 0
             ? new(false, 0, 0, 0, skipped > 0 ? "Live symmetry skipped all changed elements." : "")
-            : new(true, written, created, overwritten, $"Live symmetry wrote {written} mirrored pair(s) at frame {targetFrame}; created {created} keyframe(s), overwrote {overwritten} element(s).");
+            : new(true, written, created, overwritten, $"Live symmetry wrote {written} mirrored pair(s) at frame {targetFrame}; created {created} keyframe(s), overwrote {overwritten} element(s).", writtenNames);
     }
 
     private bool ShouldVanillaLiveSymmetryPropagateFrom(VanillaSymmetrySide sourceSide)
@@ -1310,6 +1434,80 @@ public sealed partial class DebugWindowManager
         return written == 0
             ? new(false, 0, 0, 0, $"No {sourceSide.ToString().ToLowerInvariant()}-side elements with pairs were found in frame {keyFrame.Frame}.")
             : new(true, written, 0, overwritten, $"Mirrored {written} {sourceSide.ToString().ToLowerInvariant()}-side pair(s) in frame {keyFrame.Frame}; overwrote {overwritten}.");
+    }
+
+    private VanillaSymmetryResult FlipVanillaPoseInKeyFrame(VanillaAnimationDocument document, VanillaAnimation animation, AnimationKeyFrame keyFrame)
+    {
+        if (keyFrame.Elements == null || keyFrame.Elements.Count == 0)
+        {
+            return new(false, 0, 0, 0, $"Frame {keyFrame.Frame} has no element channels to flip.");
+        }
+
+        string[] allElements = BuildVanillaSymmetryElementUniverse(document, animation, keyFrame);
+        Dictionary<string, AnimationKeyFrameElement> snapshot = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string name, AnimationKeyFrameElement element) in keyFrame.Elements)
+        {
+            snapshot[name] = CloneElement(element);
+        }
+
+        HashSet<string> handled = new(StringComparer.OrdinalIgnoreCase);
+        int swapped = 0;
+        int mirroredInPlace = 0;
+        foreach ((string name, AnimationKeyFrameElement element) in snapshot)
+        {
+            if (handled.Contains(name)) continue;
+
+            if (TryResolveVanillaSymmetryPair(document, name, allElements, out string pairName, out _, out _) &&
+                !string.Equals(pairName, name, StringComparison.OrdinalIgnoreCase))
+            {
+                keyFrame.Elements[pairName] = MirrorVanillaElement(element);
+                if (snapshot.TryGetValue(pairName, out AnimationKeyFrameElement? pairElement))
+                {
+                    keyFrame.Elements[name] = MirrorVanillaElement(pairElement);
+                }
+                else
+                {
+                    keyFrame.Elements.Remove(name);
+                }
+
+                handled.Add(name);
+                handled.Add(pairName);
+                swapped++;
+            }
+            else
+            {
+                keyFrame.Elements[name] = MirrorVanillaElement(element);
+                handled.Add(name);
+                mirroredInPlace++;
+            }
+        }
+
+        return new(true, swapped + mirroredInPlace, 0, 0,
+            $"Flipped pose in frame {keyFrame.Frame}: swapped {swapped} pair(s), mirrored {mirroredInPlace} center element(s) in place.");
+    }
+
+    private void CreateMirroredVanillaAnimationCopy(VanillaShapeAnimationEntry entry)
+    {
+        VanillaAnimationDocument document = entry.Document;
+        VanillaAnimation source = entry.Animation;
+        VanillaAnimation clone = CloneVanillaAnimation(source);
+        string baseCode = source.Code ?? source.Name ?? "animation";
+        clone.Code = BuildUniqueVanillaAnimationCode(document, baseCode + "-mirrored");
+        clone.Name = string.IsNullOrWhiteSpace(source.Name) ? clone.Code : source.Name + " mirrored";
+
+        int flippedFrames = 0;
+        foreach (AnimationKeyFrame keyFrame in clone.KeyFrames ?? [])
+        {
+            if (FlipVanillaPoseInKeyFrame(document, source, keyFrame).Applied) flippedFrames++;
+        }
+
+        VanillaShapeAnimationEntry newEntry = new(document, document.ShapeAnimations.Count, clone, null);
+        document.ShapeAnimations.Add(newEntry);
+        MarkVanillaDirty(document);
+        _vanillaIndex.RebuildLinks();
+        InvalidateVanillaBrowserRows();
+        EnsureVanillaBrowserVisibleRows();
+        _vanillaStatus = $"Created mirrored animation '{clone.Code}' ({flippedFrames} keyframe(s) flipped). Find it in the browser.";
     }
 
     private VanillaSymmetryResult BakeVanillaHalfCycleSymmetry(VanillaAnimationDocument document, VanillaAnimation animation, string sourceElementName, string targetElementName)
@@ -1433,7 +1631,7 @@ public sealed partial class DebugWindowManager
         Vec3d target = _vanillaIkLockMoveToDragAxis && dragModelDelta.LengthSquared() > 0.000001f
             ? Add(_vanillaIkDragCache.EndOrigin, new Vec3d(dragModelDelta.X, dragModelDelta.Y, dragModelDelta.Z))
             : GetVanillaIkDesiredEndTarget(_vanillaIkDragCache, desiredElement);
-        if (!TrySolveVanillaIkCcdToTarget(_vanillaIkDragCache, target, _vanillaIkPreserveDraggedPartRotation, keepHandleLocalTransform: true, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
+        if (!TrySolveVanillaIkToTarget(_vanillaIkDragCache, target, _vanillaIkPreserveDraggedPartRotation, keepHandleLocalTransform: true, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string solveError))
         {
             _vanillaStatus = solveError;
             return false;
@@ -1628,6 +1826,175 @@ public sealed partial class DebugWindowManager
                 ? cache.BoneInfos[index].WorldRotation
                 : rotations[index];
             RigIkMatrix3 local = parentWorld.Inverted().Mul(world).Orthonormalized();
+            Vec3d euler = Sub(local.ToEulerDegrees(), cache.BoneInfos[index].BaseRotationDegrees);
+            solvedElements[index] = WithVanillaIkRotation(cache.StartElements[index], euler);
+        }
+
+        return true;
+    }
+
+    private bool TrySolveVanillaIkToTarget(VanillaIkCcdCache cache, Vec3d requestedTarget, bool preserveHandleRotation, bool keepHandleLocalTransform, out AnimationKeyFrameElement[] solvedElements, out double finalDistance, out string error)
+    {
+        return _vanillaIkSolver == VanillaIkSolverKind.Fabrik
+            ? TrySolveVanillaIkFabrikToTarget(cache, requestedTarget, preserveHandleRotation, keepHandleLocalTransform, _vanillaIkSwivelDegrees, out solvedElements, out finalDistance, out error)
+            : TrySolveVanillaIkCcdToTarget(cache, requestedTarget, preserveHandleRotation, keepHandleLocalTransform, out solvedElements, out finalDistance, out error);
+    }
+
+    private static bool TrySolveVanillaIkFabrikToTarget(
+        VanillaIkCcdCache cache,
+        Vec3d requestedTarget,
+        bool preserveHandleRotation,
+        bool keepHandleLocalTransform,
+        double swivelDegrees,
+        out AnimationKeyFrameElement[] solvedElements,
+        out double finalDistance,
+        out string error)
+    {
+        solvedElements = cache.StartElements.Select(CloneElement).ToArray();
+        finalDistance = Distance(cache.EndOrigin, requestedTarget);
+        error = "";
+
+        int count = cache.BoneInfos.Count;
+        if (count == 0)
+        {
+            error = "IK needs at least one chain element.";
+            return false;
+        }
+
+        bool solveWithUpstreamDriversOnly = preserveHandleRotation || keepHandleLocalTransform;
+        int driverCount = solveWithUpstreamDriversOnly ? count - 1 : count;
+        if (driverCount == 0)
+        {
+            error = keepHandleLocalTransform || preserveHandleRotation
+                ? "Locked IK handle needs a parent chain; disable handle rotation lock or add driver bones."
+                : "IK needs at least one driver bone.";
+            return false;
+        }
+
+        Vec3d[] original = cache.JointPositions;
+        int jointCount = original.Length;
+        double initialDistance = Distance(original[^1], requestedTarget);
+
+        // With a world-locked handle the effector offset from the handle joint stays fixed,
+        // so the position chain only solves up to the handle joint.
+        bool lockEndSegment = preserveHandleRotation && !keepHandleLocalTransform;
+        int solveJointCount = lockEndSegment ? jointCount - 1 : jointCount;
+        Vec3d lockedEndOffset = lockEndSegment ? Sub(cache.EndOrigin, original[jointCount - 2]) : new Vec3d();
+        Vec3d effectiveTarget = lockEndSegment ? Sub(requestedTarget, lockedEndOffset) : requestedTarget;
+
+        if (solveJointCount < 2)
+        {
+            error = "FABRIK needs at least one usable chain segment.";
+            return false;
+        }
+
+        Vec3d[] joints = new Vec3d[solveJointCount];
+        double[] lengths = new double[solveJointCount - 1];
+        double totalLength = 0;
+        for (int index = 0; index < solveJointCount; index++)
+        {
+            joints[index] = new Vec3d(original[index].X, original[index].Y, original[index].Z);
+        }
+        for (int index = 0; index < solveJointCount - 1; index++)
+        {
+            lengths[index] = Math.Max(0.000001, Distance(original[index], original[index + 1]));
+            totalLength += lengths[index];
+        }
+
+        Vec3d root = new(joints[0].X, joints[0].Y, joints[0].Z);
+        if (Distance(root, effectiveTarget) >= totalLength)
+        {
+            Vec3d direction = SafeNormalize(Sub(effectiveTarget, root), new Vec3d(0, 1, 0));
+            for (int index = 1; index < solveJointCount; index++)
+            {
+                joints[index] = Add(joints[index - 1], Scale(direction, lengths[index - 1]));
+            }
+        }
+        else
+        {
+            const int maxIterations = 32;
+            for (int iteration = 0; iteration < maxIterations; iteration++)
+            {
+                joints[^1] = new Vec3d(effectiveTarget.X, effectiveTarget.Y, effectiveTarget.Z);
+                for (int index = solveJointCount - 2; index >= 0; index--)
+                {
+                    Vec3d direction = SafeNormalize(Sub(joints[index], joints[index + 1]), new Vec3d(0, 1, 0));
+                    joints[index] = Add(joints[index + 1], Scale(direction, lengths[index]));
+                }
+
+                joints[0] = new Vec3d(root.X, root.Y, root.Z);
+                for (int index = 1; index < solveJointCount; index++)
+                {
+                    Vec3d direction = SafeNormalize(Sub(joints[index], joints[index - 1]), new Vec3d(0, 1, 0));
+                    joints[index] = Add(joints[index - 1], Scale(direction, lengths[index - 1]));
+                }
+
+                if (Distance(joints[^1], effectiveTarget) <= VanillaIkSolveTolerance) break;
+            }
+        }
+
+        if (Math.Abs(swivelDegrees) > 0.01 && solveJointCount >= 3)
+        {
+            Vec3d swivelAxis = Sub(joints[^1], joints[0]);
+            if (swivelAxis.LengthSq() > 0.000001)
+            {
+                RigIkMatrix3 swivel = RigIkMatrix3.FromAxisAngle(swivelAxis, swivelDegrees * GameMath.DEG2RAD);
+                for (int index = 1; index < solveJointCount - 1; index++)
+                {
+                    joints[index] = Add(joints[0], swivel.TransformDirection(Sub(joints[index], joints[0])));
+                }
+            }
+        }
+
+        Vec3d[] fullJoints = new Vec3d[jointCount];
+        for (int index = 0; index < solveJointCount; index++)
+        {
+            fullJoints[index] = joints[index];
+        }
+        if (lockEndSegment)
+        {
+            fullJoints[jointCount - 1] = Add(joints[^1], lockedEndOffset);
+        }
+
+        finalDistance = Distance(fullJoints[^1], requestedTarget);
+        if (finalDistance > VanillaIkSolveTolerance && finalDistance >= initialDistance - VanillaIkSolveImprovementEpsilon && Math.Abs(swivelDegrees) <= 0.01)
+        {
+            error = $"IK target did not improve. Remaining distance {finalDistance:0.###}.";
+            return false;
+        }
+
+        RigIkMatrix3[] worldRotations = new RigIkMatrix3[count];
+        for (int index = 0; index < count; index++)
+        {
+            if (preserveHandleRotation && index == count - 1)
+            {
+                worldRotations[index] = cache.BoneInfos[index].WorldRotation;
+                continue;
+            }
+
+            Vec3d originalDirection = Sub(original[index + 1], original[index]);
+            Vec3d solvedDirection = Sub(fullJoints[index + 1], fullJoints[index]);
+            if (originalDirection.LengthSq() < 0.000001 || solvedDirection.LengthSq() < 0.000001)
+            {
+                worldRotations[index] = index > 0
+                    ? worldRotations[index - 1].Mul(cache.BoneInfos[index - 1].WorldRotation.Inverted().Mul(cache.BoneInfos[index].WorldRotation)).Orthonormalized()
+                    : cache.BoneInfos[index].WorldRotation;
+                continue;
+            }
+
+            worldRotations[index] = RigIkMatrix3.FromTo(originalDirection, solvedDirection).Orthonormalized().Mul(cache.BoneInfos[index].WorldRotation).Orthonormalized();
+        }
+
+        for (int index = 0; index < count; index++)
+        {
+            if (keepHandleLocalTransform && index == count - 1)
+            {
+                solvedElements[index] = CloneElement(cache.StartElements[index]);
+                continue;
+            }
+
+            RigIkMatrix3 parentWorld = index > 0 ? worldRotations[index - 1] : cache.BoneInfos[index].ParentWorldRotation;
+            RigIkMatrix3 local = parentWorld.Inverted().Mul(worldRotations[index]).Orthonormalized();
             Vec3d euler = Sub(local.ToEulerDegrees(), cache.BoneInfos[index].BaseRotationDegrees);
             solvedElements[index] = WithVanillaIkRotation(cache.StartElements[index], euler);
         }
