@@ -1403,6 +1403,7 @@ public sealed partial class DebugWindowManager
         upper.From![axis] = coordinate;
         lower.Children = [];
         upper.Children = [];
+        PreserveVanillaCutUvs(source, lower, upper, axis, coordinate);
 
         bool lowerIsRootSide = VanillaCutLowerSegmentIsRootSide(source, axis, coordinate);
         ShapeElement rootSide = lowerIsRootSide ? lower : upper;
@@ -1582,6 +1583,108 @@ public sealed partial class DebugWindowManager
     private static ShapeElement CloneVanillaShapeElement(ShapeElement source)
     {
         return source.Clone();
+    }
+
+    private static void PreserveVanillaCutUvs(ShapeElement source, ShapeElement lower, ShapeElement upper, int axis, double coordinate)
+    {
+        DeepCloneVanillaFaces(lower);
+        DeepCloneVanillaFaces(upper);
+        if (source.From == null || source.To == null || source.From.Length < 3 || source.To.Length < 3) return;
+
+        axis = Math.Clamp(axis, 0, 2);
+        double span = source.To[axis] - source.From[axis];
+        if (Math.Abs(span) < 0.000001) return;
+
+        float ratio = (float)Math.Clamp((coordinate - source.From[axis]) / span, 0.0, 1.0);
+        for (int faceIndex = 0; faceIndex < 6; faceIndex++)
+        {
+            int uvAxis = VanillaFaceUvAxisForModelAxis(faceIndex, axis);
+            if (uvAxis < 0) continue;
+
+            SplitVanillaFaceUv(lower.FacesResolved?[faceIndex], source, faceIndex, uvAxis, 0f, ratio);
+            SplitVanillaFaceUv(upper.FacesResolved?[faceIndex], source, faceIndex, uvAxis, ratio, 1f);
+        }
+    }
+
+    private static void DeepCloneVanillaFaces(ShapeElement element)
+    {
+        if (element.FacesResolved == null) return;
+
+        ShapeElementFace[] faces = new ShapeElementFace[element.FacesResolved.Length];
+        for (int index = 0; index < element.FacesResolved.Length; index++)
+        {
+            faces[index] = CloneVanillaShapeElementFace(element.FacesResolved[index])!;
+        }
+
+        element.FacesResolved = faces;
+    }
+
+    private static ShapeElementFace? CloneVanillaShapeElementFace(ShapeElementFace? source)
+    {
+        if (source == null) return null;
+
+        return new ShapeElementFace
+        {
+            Texture = source.Texture,
+            Uv = source.Uv == null ? null! : (float[])source.Uv.Clone(),
+            ReflectiveMode = source.ReflectiveMode,
+            WindMode = source.WindMode == null ? null! : (sbyte[])source.WindMode.Clone(),
+            WindData = source.WindData == null ? null! : (sbyte[])source.WindData.Clone(),
+            Rotation = source.Rotation,
+            Glow = source.Glow,
+            Enabled = source.Enabled
+        };
+    }
+
+    private static void SplitVanillaFaceUv(ShapeElementFace? face, ShapeElement source, int faceIndex, int uvAxis, float startRatio, float endRatio)
+    {
+        if (face == null) return;
+        EnsureVanillaFaceUv(face, source, faceIndex);
+        if (face.Uv == null || face.Uv.Length < 4) return;
+
+        int first = uvAxis == 0 ? 0 : 1;
+        int second = uvAxis == 0 ? 2 : 3;
+        float from = face.Uv[first];
+        float to = face.Uv[second];
+        face.Uv[first] = LerpVanillaUv(from, to, startRatio);
+        face.Uv[second] = LerpVanillaUv(from, to, endRatio);
+    }
+
+    private static void EnsureVanillaFaceUv(ShapeElementFace face, ShapeElement source, int faceIndex)
+    {
+        if (face.Uv is { Length: >= 4 }) return;
+
+        (double width, double height) = VanillaDefaultFaceUvSize(source, faceIndex);
+        face.Uv = [0f, 0f, (float)Math.Max(0.0, width), (float)Math.Max(0.0, height)];
+    }
+
+    private static (double Width, double Height) VanillaDefaultFaceUvSize(ShapeElement source, int faceIndex)
+    {
+        double sizeX = source.To != null && source.From != null && source.To.Length > 0 && source.From.Length > 0 ? source.To[0] - source.From[0] : 0.0;
+        double sizeY = source.To != null && source.From != null && source.To.Length > 1 && source.From.Length > 1 ? source.To[1] - source.From[1] : 0.0;
+        double sizeZ = source.To != null && source.From != null && source.To.Length > 2 && source.From.Length > 2 ? source.To[2] - source.From[2] : 0.0;
+        return faceIndex switch
+        {
+            0 or 2 => (sizeX, sizeY),
+            1 or 3 => (sizeZ, sizeY),
+            _ => (sizeX, sizeZ)
+        };
+    }
+
+    private static int VanillaFaceUvAxisForModelAxis(int faceIndex, int modelAxis)
+    {
+        return modelAxis switch
+        {
+            0 => faceIndex is 0 or 2 or 4 or 5 ? 0 : -1,
+            1 => faceIndex is 0 or 1 or 2 or 3 ? 1 : -1,
+            2 => faceIndex is 1 or 3 ? 0 : faceIndex is 4 or 5 ? 1 : -1,
+            _ => -1
+        };
+    }
+
+    private static float LerpVanillaUv(float from, float to, float amount)
+    {
+        return from + (to - from) * Math.Clamp(amount, 0f, 1f);
     }
 
     private static void ResetVanillaCutElementRuntimeState(ShapeElement element, ShapeElement? parent)
@@ -1789,6 +1892,7 @@ public sealed partial class DebugWindowManager
         SetVanillaElementJsonOptionalNumber(obj, "scaleX", element.ScaleX, 1.0);
         SetVanillaElementJsonOptionalNumber(obj, "scaleY", element.ScaleY, 1.0);
         SetVanillaElementJsonOptionalNumber(obj, "scaleZ", element.ScaleZ, 1.0);
+        SetVanillaElementJsonFacesFromShape(obj, element);
         if (string.IsNullOrWhiteSpace(element.StepParentName))
         {
             RemoveVanillaElementJsonProperty(obj, "stepParentName");
@@ -1798,6 +1902,124 @@ public sealed partial class DebugWindowManager
         {
             SetVanillaElementJsonString(obj, "stepParentName", element.StepParentName!);
         }
+    }
+
+    private static void SetVanillaElementJsonFacesFromShape(JObject obj, ShapeElement element)
+    {
+        if (element.FacesResolved == null || element.FacesResolved.Length == 0) return;
+        if (!element.FacesResolved.Take(6).Any(face => face?.Enabled == true)) return;
+
+        JProperty? facesProperty = GetVanillaJsonProperty(obj, "faces");
+        JObject facesObject;
+        if (facesProperty?.Value is JObject existing)
+        {
+            facesObject = existing;
+        }
+        else
+        {
+            facesObject = new JObject();
+            if (facesProperty == null)
+            {
+                obj["faces"] = facesObject;
+            }
+            else
+            {
+                facesProperty.Value = facesObject;
+            }
+        }
+
+        for (int faceIndex = 0; faceIndex < Math.Min(6, element.FacesResolved.Length); faceIndex++)
+        {
+            ShapeElementFace? face = element.FacesResolved[faceIndex];
+            if (face == null || !face.Enabled) continue;
+
+            JObject faceObject = GetOrCreateVanillaElementFaceJson(facesObject, faceIndex);
+            if (!string.IsNullOrWhiteSpace(face.Texture))
+            {
+                SetVanillaElementJsonString(faceObject, "texture", FormatVanillaFaceTexture(face.Texture));
+            }
+
+            if (face.Uv is { Length: >= 4 } uv)
+            {
+                JArray array =
+                [
+                    RoundVanillaJsonNumber(uv[0]),
+                    RoundVanillaJsonNumber(uv[1]),
+                    RoundVanillaJsonNumber(uv[2]),
+                    RoundVanillaJsonNumber(uv[3])
+                ];
+                JProperty? uvProperty = GetVanillaJsonProperty(faceObject, "uv");
+                if (uvProperty == null)
+                {
+                    faceObject["uv"] = array;
+                }
+                else
+                {
+                    uvProperty.Value = array;
+                }
+            }
+        }
+    }
+
+    private static JObject GetOrCreateVanillaElementFaceJson(JObject facesObject, int faceIndex)
+    {
+        JProperty? property = GetVanillaElementFaceJsonProperty(facesObject, faceIndex);
+        if (property?.Value is JObject existing) return existing;
+
+        JObject created = new();
+        if (property == null)
+        {
+            facesObject[VanillaFaceJsonName(faceIndex)] = created;
+        }
+        else
+        {
+            property.Value = created;
+        }
+
+        return created;
+    }
+
+    private static JProperty? GetVanillaElementFaceJsonProperty(JObject facesObject, int faceIndex)
+    {
+        string fullName = VanillaFaceJsonName(faceIndex);
+        string shortName = VanillaFaceJsonShortName(faceIndex);
+        return facesObject.Properties().FirstOrDefault(property =>
+            string.Equals(property.Name, fullName, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(property.Name, shortName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string VanillaFaceJsonName(int faceIndex)
+    {
+        return faceIndex switch
+        {
+            0 => "north",
+            1 => "east",
+            2 => "south",
+            3 => "west",
+            4 => "up",
+            5 => "down",
+            _ => "north"
+        };
+    }
+
+    private static string VanillaFaceJsonShortName(int faceIndex)
+    {
+        return faceIndex switch
+        {
+            0 => "n",
+            1 => "e",
+            2 => "s",
+            3 => "w",
+            4 => "u",
+            5 => "d",
+            _ => "n"
+        };
+    }
+
+    private static string FormatVanillaFaceTexture(string texture)
+    {
+        texture = texture.Trim();
+        return texture.StartsWith('#') ? texture : $"#{texture}";
     }
 
     private static void SetVanillaElementJsonVector(JObject obj, string propertyName, double[]? values)
