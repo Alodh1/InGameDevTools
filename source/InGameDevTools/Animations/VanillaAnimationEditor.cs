@@ -118,6 +118,7 @@ public sealed partial class DebugWindowManager
     private string _vanillaFirstPersonRightHandItemCode = "";
     private string _vanillaFirstPersonLeftHandItemCode = "";
     private bool _vanillaFirstPersonRenderLeftHandItem;
+    private bool _vanillaCutSymmetryEnabled;
     private TransformGizmoAxis _vanillaViewportGizmoDragAxis = TransformGizmoAxis.None;
     private TransformGizmoMode _vanillaViewportGizmoDragMode = TransformGizmoMode.None;
     private NVector2 _vanillaViewportGizmoDragMouseStart;

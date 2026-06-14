@@ -3949,11 +3949,11 @@ public sealed partial class DebugWindowManager : IDisposable
         return true;
     }
 
-    private bool DrawTransformViewportToolOverlay(NVector2 viewportMin, NVector2 viewportMax, string id, TransformGizmoContext context, bool allowMove = true, bool allowScale = true, bool allowRotate = true, bool allowCut = false, Action? modeChanged = null)
+    private bool DrawTransformViewportToolOverlay(NVector2 viewportMin, NVector2 viewportMax, string id, TransformGizmoContext context, bool allowMove = true, bool allowScale = true, bool allowRotate = true, bool allowCut = false, Action? modeChanged = null, bool allowVanillaCutOptions = false)
     {
         NormalizeTransformGizmoOptions(context, allowMove, allowScale, allowRotate, allowCut);
-        NVector2 position = TransformViewportToolOverlayPosition(viewportMin, viewportMax, context, allowCut);
-        NVector2 size = TransformViewportToolOverlaySize(context, allowCut);
+        NVector2 position = TransformViewportToolOverlayPosition(viewportMin, viewportMax, context, allowCut, allowVanillaCutOptions);
+        NVector2 size = TransformViewportToolOverlaySize(context, allowCut, allowVanillaCutOptions);
         NVector2 restoreCursor = ImGui.GetCursorScreenPos();
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         uint fill = ImGui.ColorConvertFloat4ToU32(new NVector4(0.06f, 0.055f, 0.05f, 0.84f));
@@ -3986,6 +3986,10 @@ public sealed partial class DebugWindowManager : IDisposable
                 DrawTransformViewportCutOrientationRadio(position, rowStride, row++, "X", ModelCutOrientation.X, "Cut along the element's local X axis.", ref hoveredOrActive);
                 DrawTransformViewportCutOrientationRadio(position, rowStride, row++, "Y", ModelCutOrientation.Y, "Cut along the element's local Y axis.", ref hoveredOrActive);
                 DrawTransformViewportCutOrientationRadio(position, rowStride, row++, "Z", ModelCutOrientation.Z, "Cut along the element's local Z axis.", ref hoveredOrActive);
+                if (allowVanillaCutOptions)
+                {
+                    DrawTransformViewportCutSymmetryCheckbox(position, rowStride, row++, ref hoveredOrActive);
+                }
             }
             else
             {
@@ -4030,17 +4034,19 @@ public sealed partial class DebugWindowManager : IDisposable
         return hoveredOrActive;
     }
 
-    private NVector2 TransformViewportToolOverlayPosition(NVector2 viewportMin, NVector2 viewportMax, TransformGizmoContext context, bool allowCut)
+    private NVector2 TransformViewportToolOverlayPosition(NVector2 viewportMin, NVector2 viewportMax, TransformGizmoContext context, bool allowCut, bool allowVanillaCutOptions = false)
     {
-        return new NVector2(viewportMax.X - TransformViewportToolOverlaySize(context, allowCut).X - 12f, viewportMin.Y + 12f);
+        return new NVector2(viewportMax.X - TransformViewportToolOverlaySize(context, allowCut, allowVanillaCutOptions).X - 12f, viewportMin.Y + 12f);
     }
 
-    private NVector2 TransformViewportToolOverlaySize(TransformGizmoContext context, bool allowCut)
+    private NVector2 TransformViewportToolOverlaySize(TransformGizmoContext context, bool allowCut, bool allowVanillaCutOptions = false)
     {
         float rowHeight = Math.Max(20f, ImGui.GetFrameHeight());
         float spacingY = ImGui.GetStyle().ItemSpacing.Y;
         int modeRows = allowCut ? 5 : 4;
-        int detailRows = allowCut && GizmoMode == TransformGizmoMode.Cut ? 5 : 6;
+        int detailRows = allowCut && GizmoMode == TransformGizmoMode.Cut
+            ? 5 + (allowVanillaCutOptions ? 1 : 0)
+            : 6;
         int rows = modeRows + detailRows;
         return new NVector2(138f, rowHeight * rows + spacingY * (rows - 1) + 10f);
     }
@@ -4096,6 +4102,25 @@ public sealed partial class DebugWindowManager : IDisposable
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(tooltip);
+        }
+    }
+
+    private void DrawTransformViewportCutSymmetryCheckbox(NVector2 position, float rowStride, int row, ref bool hoveredOrActive)
+    {
+        ImGui.SetCursorScreenPos(position + new NVector2(0f, row * rowStride));
+        bool symmetry = _vanillaCutSymmetryEnabled;
+        if (ImGui.Checkbox("Symmetry##vanilla-cut-symmetry", ref symmetry))
+        {
+            _vanillaCutSymmetryEnabled = symmetry;
+            _vanillaStatus = symmetry
+                ? "Cut symmetry enabled. Cuts also try to split the mirrored element."
+                : "Cut symmetry disabled.";
+        }
+
+        hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Also cut the selected element's symmetry pair at the same local ratio when one can be resolved.");
         }
     }
 

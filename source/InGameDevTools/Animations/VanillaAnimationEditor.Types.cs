@@ -125,6 +125,7 @@ public sealed partial class DebugWindowManager
 
     private readonly record struct VanillaSymmetryPairCandidate(string ElementName, VanillaSymmetrySide SourceSide);
     private readonly record struct VanillaSymmetryResult(bool Applied, int Written, int CreatedKeyFrames, int OverwrittenElements, string Message, IReadOnlyList<string>? WrittenElements = null);
+    private readonly record struct VanillaCutApplyResult(string OriginalName, string NewName, int Axis, double Coordinate, double CutRatio, int RegisteredChannels, bool InsertedManualIk);
     private readonly record struct VanillaIkManualChain(IReadOnlyList<string> ElementNames, string EndElementName, string DisplayName);
     private readonly record struct VanillaIkChainNode(string ElementName, string ParentElementName, int Depth);
     private readonly record struct VanillaIkPoseInfo(ElementPose Pose, Vec3d Origin, RigIkMatrix3 WorldRotation, RigIkMatrix3 ParentWorldRotation, Vec3d BaseRotationDegrees);

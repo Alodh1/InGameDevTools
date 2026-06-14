@@ -720,7 +720,7 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        DrawTransformViewportToolOverlay(min, max, $"vanilla-{scene.Key}", TransformGizmoContext.Free, allowCut: true, modeChanged: ClearVanillaViewportGizmoDrag);
+        DrawTransformViewportToolOverlay(min, max, $"vanilla-{scene.Key}", TransformGizmoContext.Free, allowCut: true, modeChanged: ClearVanillaViewportGizmoDrag, allowVanillaCutOptions: true);
     }
 
     private void SaveVanillaViewportScreenshotIfRequested(int textureId, float viewportWidth, float viewportHeight, VanillaBrowserRow row)
@@ -1273,40 +1273,126 @@ public sealed partial class DebugWindowManager
         VanillaShapeAnimationEntry? entry = row.ShapeAnimation ?? row.MetadataEntry?.ResolveCurrentShape();
         VanillaAnimationDocument? document = entry?.Document;
         Shape? shape = document?.Shape;
-        if (document == null || shape?.Elements == null)
+        if (entry == null || document == null || shape?.Elements == null)
         {
             _vanillaStatus = "Could not cut: selected animation has no editable shape document.";
             return;
         }
 
-        if (!TryFindVanillaShapeElementSlot(shape, preview.ElementName, out ShapeElement? source, out ShapeElement? parent, out int index) ||
+        int keyFrameIndex = entry.Animation.KeyFrames is { Length: > 0 }
+            ? Math.Clamp(_vanillaSelection.KeyFrameIndex, 0, entry.Animation.KeyFrames.Length - 1)
+            : 0;
+        string[] symmetryUniverse = [];
+        string symmetryPairName = "";
+        if (_vanillaCutSymmetryEnabled && entry.Animation.KeyFrames is { Length: > 0 } keyFrames)
+        {
+            AnimationKeyFrame symmetryKeyFrame = keyFrames[keyFrameIndex];
+            symmetryUniverse = BuildVanillaSymmetryElementUniverse(document, entry.Animation, symmetryKeyFrame);
+            if (TryResolveVanillaSymmetryPair(document, preview.ElementName, symmetryUniverse, out string resolvedPair, out _, out _) &&
+                !string.Equals(resolvedPair, preview.ElementName, StringComparison.OrdinalIgnoreCase))
+            {
+                symmetryPairName = resolvedPair;
+            }
+        }
+
+        if (!TryApplyVanillaViewportCutSingle(document, entry, keyFrameIndex, preview.ElementName, preview.CutAxis, preview.CutCoordinate, out VanillaCutApplyResult primary, out string error))
+        {
+            _vanillaStatus = error;
+            return;
+        }
+
+        List<string> changedElementNames = [primary.OriginalName, primary.NewName];
+        VanillaCutApplyResult? symmetryResult = null;
+        string symmetryStatus = "";
+        if (_vanillaCutSymmetryEnabled)
+        {
+            if (!string.IsNullOrWhiteSpace(symmetryPairName) &&
+                TryFindVanillaShapeElementSlot(shape, symmetryPairName, out ShapeElement? pairSource, out _, out _) &&
+                pairSource?.From is { Length: >= 3 } pairFrom &&
+                pairSource.To is { Length: >= 3 } pairTo)
+            {
+                int pairAxis = primary.Axis;
+                double pairCoordinate = Math.Round(pairFrom[pairAxis] + (pairTo[pairAxis] - pairFrom[pairAxis]) * primary.CutRatio, 6);
+                if (TryApplyVanillaViewportCutSingle(document, entry, keyFrameIndex, symmetryPairName, pairAxis, pairCoordinate, out VanillaCutApplyResult pairCut, out string pairError))
+                {
+                    symmetryResult = pairCut;
+                    changedElementNames.Add(pairCut.OriginalName);
+                    changedElementNames.Add(pairCut.NewName);
+                    SetVanillaSymmetryPairOverride(document, primary.NewName, pairCut.NewName);
+                }
+                else
+                {
+                    symmetryStatus = $" Symmetry cut skipped: {pairError}";
+                }
+            }
+            else
+            {
+                symmetryStatus = " Symmetry cut skipped: no mirrored element was found.";
+            }
+        }
+
+        InvalidateVanillaShapeElementCaches(shape);
+        InvalidateVanillaIkChainCache();
+        _vanillaSelection.ElementName = primary.NewName;
+        MarkVanillaDirty(document);
+        RefreshVanillaPreviewAfterEdit(row, changedElementNames.ToArray());
+
+        string hierarchyStatus = primary.InsertedManualIk ? " Added the new segment to the manual IK chain." : "";
+        string symmetryText = symmetryResult is { } mirrored
+            ? $" Symmetry also cut {mirrored.OriginalName} -> {mirrored.NewName}."
+            : symmetryStatus;
+        _vanillaStatus = $"Cut {primary.OriginalName} on {ModelAxisName(primary.Axis)} at {primary.Coordinate:0.###}; added child segment {primary.NewName} with {primary.RegisteredChannels} animation channel(s).{symmetryText}{hierarchyStatus}";
+    }
+
+    private bool TryApplyVanillaViewportCutSingle(
+        VanillaAnimationDocument document,
+        VanillaShapeAnimationEntry activeEntry,
+        int keyFrameIndex,
+        string elementName,
+        int cutAxis,
+        double cutCoordinate,
+        out VanillaCutApplyResult result,
+        out string error)
+    {
+        result = default;
+        error = "";
+        Shape? shape = document.Shape;
+        if (shape?.Elements == null)
+        {
+            error = "Could not cut: selected animation has no editable shape document.";
+            return false;
+        }
+
+        if (!TryFindVanillaShapeElementSlot(shape, elementName, out ShapeElement? source, out ShapeElement? parent, out int index) ||
             source?.From == null || source.To == null || source.From.Length < 3 || source.To.Length < 3)
         {
-            _vanillaStatus = $"Could not cut: shape element '{preview.ElementName}' was not found.";
-            return;
+            error = $"Could not cut: shape element '{elementName}' was not found.";
+            return false;
         }
 
         if (source.Children is { Length: > 0 })
         {
-            _vanillaStatus = $"Could not cut {preview.ElementName}: elements with children are not supported in the animator Cut tool.";
-            return;
+            error = $"Could not cut {elementName}: elements with children are not supported in the animator Cut tool.";
+            return false;
         }
 
-        int axis = Math.Clamp(preview.CutAxis, 0, 2);
-        double coordinate = Math.Round(preview.CutCoordinate, 6);
+        int axis = Math.Clamp(cutAxis, 0, 2);
+        double coordinate = Math.Round(cutCoordinate, 6);
         if (!VanillaIsCutCoordinateInside(source, axis, coordinate))
         {
-            _vanillaStatus = $"Could not cut: cut line is too close to the {ModelAxisName(axis)} edge.";
-            return;
+            error = $"Could not cut {elementName}: cut line is too close to the {ModelAxisName(axis)} edge.";
+            return false;
         }
 
         string originalName = source.Name ?? "";
         if (string.IsNullOrWhiteSpace(originalName))
         {
-            _vanillaStatus = "Could not cut: selected shape element has no name.";
-            return;
+            error = "Could not cut: selected shape element has no name.";
+            return false;
         }
 
+        double size = source.To[axis] - source.From[axis];
+        double cutRatio = Math.Clamp((coordinate - source.From[axis]) / size, 0.0, 1.0);
         string newName = ReserveVanillaShapeElementName(shape, $"{originalName}_cut2");
         ShapeElement first = CloneVanillaShapeElement(source);
         ShapeElement second = CloneVanillaShapeElement(source);
@@ -1316,13 +1402,21 @@ public sealed partial class DebugWindowManager
         second.From![axis] = coordinate;
         first.Children = [];
         second.Children = [];
+        second.StepParentName = null;
         ResetVanillaCutElementRuntimeState(first, parent);
         ResetVanillaCutElementRuntimeState(second, parent);
+        if (!TryPreserveVanillaCutChildTransform(second, parent, first, axis))
+        {
+            error = $"Could not cut {originalName}: failed to preserve the new segment position under its parent.";
+            return false;
+        }
+
+        first.Children = [second];
+        ResetVanillaCutElementRuntimeState(first, parent);
 
         ShapeElement[] siblings = parent?.Children ?? shape.Elements;
         List<ShapeElement> updated = siblings.ToList();
         updated[index] = first;
-        updated.Insert(index + 1, second);
         if (parent == null)
         {
             shape.Elements = updated.ToArray();
@@ -1332,16 +1426,123 @@ public sealed partial class DebugWindowManager
             parent.Children = updated.ToArray();
         }
 
-        int copiedChannels = DuplicateVanillaAnimationChannels(document, originalName, newName);
-        if (!SyncVanillaCutToSourceJson(document, originalName, newName, axis, coordinate))
+        int registeredChannels = RegisterVanillaCutAnimationChannels(document, activeEntry, keyFrameIndex, originalName, newName);
+        if (!SyncVanillaCutToSourceJson(document, originalName, first, second))
         {
             SyncVanillaShapeElementsToSourceJson(document);
         }
-        InvalidateVanillaShapeElementCaches(shape);
-        _vanillaSelection.ElementName = originalName;
-        MarkVanillaDirty(document);
-        RefreshVanillaPreviewAfterEdit(row, originalName, newName);
-        _vanillaStatus = $"Cut {originalName} on {ModelAxisName(axis)} at {coordinate:0.###}; added {newName} and copied {copiedChannels} animation channel(s).";
+
+        bool insertedManualIk = InsertVanillaCutChildIntoManualIkChain(originalName, newName);
+        result = new VanillaCutApplyResult(originalName, newName, axis, coordinate, cutRatio, registeredChannels, insertedManualIk);
+        return true;
+    }
+
+    private static bool TryPreserveVanillaCutChildTransform(ShapeElement element, ShapeElement? oldParent, ShapeElement newParent, int cutAxis)
+    {
+        try
+        {
+            if (element.From == null || element.To == null || element.From.Length < 3 || element.To.Length < 3) return false;
+
+            Matrixf oldParentMatrix = VanillaComputeShapeParentMatrix(oldParent);
+            Matrixf oldWorldMatrix = new();
+            oldWorldMatrix.Identity();
+            oldWorldMatrix.Mul(oldParentMatrix.Values);
+            oldWorldMatrix.Mul(VanillaLocalShapeElementMatrix(element).Values);
+
+            Matrixd oldWorld = ModelMatrixd(oldWorldMatrix);
+            Matrixd newParentWorld = ModelMatrixd(VanillaComputeShapeElementMatrix(newParent));
+            Matrixd inverseNewParent = newParentWorld.Clone().Invert();
+            Matrixd newLocal = oldWorld.Clone().ReverseMul(inverseNewParent.Values);
+
+            Vec3d localBoxOrigin = ModelTransformPoint(newLocal, new Vec3d(0, 0, 0));
+            RigIkMatrix3 newRotation = RigIkMatrix3.FromMatrixd(newLocal).Orthonormalized();
+            Vec3d euler = newRotation.ToEulerDegrees();
+
+            double sizeX = element.To[0] - element.From[0];
+            double sizeY = element.To[1] - element.From[1];
+            double sizeZ = element.To[2] - element.From[2];
+            cutAxis = Math.Clamp(cutAxis, 0, 2);
+            Vec3d hingeOffset = new(
+                cutAxis == 0 ? 0.0 : sizeX * 0.5,
+                cutAxis == 1 ? 0.0 : sizeY * 0.5,
+                cutAxis == 2 ? 0.0 : sizeZ * 0.5);
+            Vec3d newFrom = Add(Sub(localBoxOrigin, hingeOffset), newRotation.TransformDirection(hingeOffset));
+            Vec3d newOriginLocal = Add(newFrom, hingeOffset);
+
+            element.From[0] = ModelRoundForReparent(newFrom.X);
+            element.From[1] = ModelRoundForReparent(newFrom.Y);
+            element.From[2] = ModelRoundForReparent(newFrom.Z);
+            element.To[0] = ModelRoundForReparent(newFrom.X + sizeX);
+            element.To[1] = ModelRoundForReparent(newFrom.Y + sizeY);
+            element.To[2] = ModelRoundForReparent(newFrom.Z + sizeZ);
+            element.RotationX = ModelWrapDegrees(euler.X);
+            element.RotationY = ModelWrapDegrees(euler.Y);
+            element.RotationZ = ModelWrapDegrees(euler.Z);
+            element.RotationOrigin =
+            [
+                ModelRoundForReparent(newOriginLocal.X),
+                ModelRoundForReparent(newOriginLocal.Y),
+                ModelRoundForReparent(newOriginLocal.Z)
+            ];
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static Matrixf VanillaComputeShapeParentMatrix(ShapeElement? parent)
+    {
+        if (parent == null)
+        {
+            Matrixf identity = new();
+            identity.Identity();
+            return identity;
+        }
+
+        return VanillaComputeShapeElementMatrix(parent);
+    }
+
+    private static Matrixf VanillaComputeShapeElementMatrix(ShapeElement element)
+    {
+        List<ShapeElement> chain = [];
+        for (ShapeElement? current = element; current != null; current = current.ParentElement)
+        {
+            chain.Add(current);
+        }
+        chain.Reverse();
+
+        Matrixf matrix = new();
+        matrix.Identity();
+        foreach (ShapeElement node in chain)
+        {
+            matrix.Mul(VanillaLocalShapeElementMatrix(node).Values);
+        }
+
+        return matrix;
+    }
+
+    private static Matrixf VanillaLocalShapeElementMatrix(ShapeElement element)
+    {
+        Matrixf matrix = new();
+        matrix.Identity();
+        double[] from = element.From is { Length: >= 3 } values ? values : [0.0, 0.0, 0.0];
+        double[] origin = element.RotationOrigin is { Length: >= 3 } rotationOrigin ? rotationOrigin : [0.0, 0.0, 0.0];
+        float originX = (float)(origin[0] / ModelUnitsPerBlock);
+        float originY = (float)(origin[1] / ModelUnitsPerBlock);
+        float originZ = (float)(origin[2] / ModelUnitsPerBlock);
+        matrix.Translate(originX, originY, originZ);
+        matrix.Rotate(
+            (float)(element.RotationX * GameMath.DEG2RAD),
+            (float)(element.RotationY * GameMath.DEG2RAD),
+            (float)(element.RotationZ * GameMath.DEG2RAD));
+        matrix.Scale((float)element.ScaleX, (float)element.ScaleY, (float)element.ScaleZ);
+        matrix.Translate(
+            (float)(from[0] / ModelUnitsPerBlock) - originX,
+            (float)(from[1] / ModelUnitsPerBlock) - originY,
+            (float)(from[2] / ModelUnitsPerBlock) - originZ);
+        return matrix;
     }
 
     private static bool VanillaIsCutCoordinateInside(ShapeElement element, int axis, double coordinate)
@@ -1364,29 +1565,70 @@ public sealed partial class DebugWindowManager
         element.ParentElement = parent;
         element.JointId = 0;
         element.inverseModelTransform = null;
+        if (element.AttachmentPoints != null)
+        {
+            foreach (AttachmentPoint attachmentPoint in element.AttachmentPoints)
+            {
+                attachmentPoint.ParentElement = element;
+            }
+        }
+
+        if (element.Children == null) return;
+        foreach (ShapeElement child in element.Children)
+        {
+            ResetVanillaCutElementRuntimeState(child, element);
+        }
     }
 
-    private static int DuplicateVanillaAnimationChannels(VanillaAnimationDocument document, string originalName, string newName)
+    private static int RegisterVanillaCutAnimationChannels(VanillaAnimationDocument document, VanillaShapeAnimationEntry activeEntry, int keyFrameIndex, string originalName, string newName)
     {
-        int copied = 0;
+        int registered = 0;
         foreach (VanillaShapeAnimationEntry animationEntry in document.ShapeAnimations)
         {
             foreach (AnimationKeyFrame keyFrame in animationEntry.Animation.KeyFrames ?? [])
             {
                 keyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
-                if (!keyFrame.Elements.TryGetValue(originalName, out AnimationKeyFrameElement? sourceElement) ||
-                    sourceElement == null ||
-                    keyFrame.Elements.ContainsKey(newName))
+                if (!keyFrame.Elements.ContainsKey(originalName) || keyFrame.Elements.ContainsKey(newName))
                 {
                     continue;
                 }
 
-                keyFrame.Elements[newName] = CloneElement(sourceElement);
-                copied++;
+                keyFrame.Elements[newName] = new AnimationKeyFrameElement();
+                registered++;
             }
         }
 
-        return copied;
+        AnimationKeyFrame[] activeKeyFrames = activeEntry.Animation.KeyFrames ?? [];
+        if (activeKeyFrames.Length > 0)
+        {
+            AnimationKeyFrame keyFrame = activeKeyFrames[Math.Clamp(keyFrameIndex, 0, activeKeyFrames.Length - 1)];
+            keyFrame.Elements ??= new(StringComparer.OrdinalIgnoreCase);
+            if (!keyFrame.Elements.ContainsKey(originalName))
+            {
+                keyFrame.Elements[originalName] = new AnimationKeyFrameElement();
+                registered++;
+            }
+
+            if (!keyFrame.Elements.ContainsKey(newName))
+            {
+                keyFrame.Elements[newName] = new AnimationKeyFrameElement();
+                registered++;
+            }
+        }
+
+        return registered;
+    }
+
+    private bool InsertVanillaCutChildIntoManualIkChain(string originalName, string newName)
+    {
+        if (_vanillaIkMode != VanillaIkChainMode.ManualOverride) return false;
+        int originalIndex = _vanillaIkChainElementNames.FindIndex(name => string.Equals(name, originalName, StringComparison.OrdinalIgnoreCase));
+        if (originalIndex < 0 || ContainsVanillaIkChainElement(newName)) return false;
+
+        _vanillaIkChainElementNames.Insert(originalIndex + 1, newName);
+        _vanillaIkHasTarget = false;
+        InvalidateVanillaIkChainCache();
+        return true;
     }
 
     private static void SyncVanillaShapeElementsToSourceJson(VanillaAnimationDocument document)
@@ -1395,7 +1637,7 @@ public sealed partial class DebugWindowManager
         json["elements"] = JToken.FromObject(document.Shape.Elements, JsonSerializer.Create(VanillaShapeElementJsonSettings));
     }
 
-    private static bool SyncVanillaCutToSourceJson(VanillaAnimationDocument document, string originalName, string newName, int axis, double coordinate)
+    private static bool SyncVanillaCutToSourceJson(VanillaAnimationDocument document, string originalName, ShapeElement firstElement, ShapeElement secondElement)
     {
         if (document.SourceJson is not JObject json) return false;
         if (!TryFindVanillaShapeElementJsonSlot(json, originalName, out JArray? siblings, out int index) ||
@@ -1409,15 +1651,24 @@ public sealed partial class DebugWindowManager
 
         JObject first = (JObject)sourceToken.DeepClone();
         JObject second = (JObject)sourceToken.DeepClone();
-        SetVanillaElementJsonString(first, "name", originalName);
-        SetVanillaElementJsonString(second, "name", newName);
-        SetVanillaElementJsonAxis(first, "to", axis, coordinate);
-        SetVanillaElementJsonAxis(second, "from", axis, coordinate);
-        RemoveVanillaElementJsonProperty(first, "children");
+        SetVanillaElementJsonFromShape(first, firstElement);
+        SetVanillaElementJsonFromShape(second, secondElement);
         RemoveVanillaElementJsonProperty(second, "children");
+        RemoveVanillaElementJsonProperty(second, "stepParentName");
+        RemoveVanillaElementJsonProperty(second, "stepparentname");
+
+        JArray children = new() { second };
+        JProperty? childrenProperty = GetVanillaJsonProperty(first, "children");
+        if (childrenProperty == null)
+        {
+            first["children"] = children;
+        }
+        else
+        {
+            childrenProperty.Value = children;
+        }
 
         siblings[index] = first;
-        siblings.Insert(index + 1, second);
         return true;
     }
 
@@ -1485,34 +1736,83 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private static void SetVanillaElementJsonAxis(JObject obj, string propertyName, int axis, double coordinate)
+    private static void SetVanillaElementJsonFromShape(JObject obj, ShapeElement element)
     {
-        axis = Math.Clamp(axis, 0, 2);
-        JProperty? property = GetVanillaJsonProperty(obj, propertyName);
-        JArray array;
-        if (property?.Value is JArray existing)
+        SetVanillaElementJsonString(obj, "name", element.Name ?? "");
+        SetVanillaElementJsonVector(obj, "from", element.From);
+        SetVanillaElementJsonVector(obj, "to", element.To);
+        SetVanillaElementJsonOptionalVector(obj, "rotationOrigin", element.RotationOrigin);
+        SetVanillaElementJsonOptionalNumber(obj, "rotationX", element.RotationX, 0.0);
+        SetVanillaElementJsonOptionalNumber(obj, "rotationY", element.RotationY, 0.0);
+        SetVanillaElementJsonOptionalNumber(obj, "rotationZ", element.RotationZ, 0.0);
+        SetVanillaElementJsonOptionalNumber(obj, "scaleX", element.ScaleX, 1.0);
+        SetVanillaElementJsonOptionalNumber(obj, "scaleY", element.ScaleY, 1.0);
+        SetVanillaElementJsonOptionalNumber(obj, "scaleZ", element.ScaleZ, 1.0);
+        if (string.IsNullOrWhiteSpace(element.StepParentName))
         {
-            array = existing;
+            RemoveVanillaElementJsonProperty(obj, "stepParentName");
+            RemoveVanillaElementJsonProperty(obj, "stepparentname");
         }
         else
         {
-            array = new JArray(0.0, 0.0, 0.0);
-            if (property == null)
-            {
-                obj[propertyName] = array;
-            }
-            else
-            {
-                property.Value = array;
-            }
+            SetVanillaElementJsonString(obj, "stepParentName", element.StepParentName!);
         }
+    }
 
-        while (array.Count < 3)
+    private static void SetVanillaElementJsonVector(JObject obj, string propertyName, double[]? values)
+    {
+        if (values == null || values.Length < 3) return;
+
+        JArray array =
+        [
+            RoundVanillaJsonNumber(values[0]),
+            RoundVanillaJsonNumber(values[1]),
+            RoundVanillaJsonNumber(values[2])
+        ];
+        JProperty? property = GetVanillaJsonProperty(obj, propertyName);
+        if (property == null)
         {
-            array.Add(0.0);
+            obj[propertyName] = array;
+        }
+        else
+        {
+            property.Value = array;
+        }
+    }
+
+    private static void SetVanillaElementJsonOptionalVector(JObject obj, string propertyName, double[]? values)
+    {
+        if (values == null || values.Length < 3)
+        {
+            RemoveVanillaElementJsonProperty(obj, propertyName);
+            return;
         }
 
-        array[axis] = coordinate;
+        SetVanillaElementJsonVector(obj, propertyName, values);
+    }
+
+    private static void SetVanillaElementJsonOptionalNumber(JObject obj, string propertyName, double value, double defaultValue)
+    {
+        if (Math.Abs(value - defaultValue) < 0.000001)
+        {
+            RemoveVanillaElementJsonProperty(obj, propertyName);
+            return;
+        }
+
+        JProperty? property = GetVanillaJsonProperty(obj, propertyName);
+        if (property == null)
+        {
+            obj[propertyName] = RoundVanillaJsonNumber(value);
+        }
+        else
+        {
+            property.Value = RoundVanillaJsonNumber(value);
+        }
+    }
+
+    private static double RoundVanillaJsonNumber(double value)
+    {
+        return Math.Abs(value) < 0.000001 ? 0.0 : Math.Round(value, 6);
     }
 
     private static void RemoveVanillaElementJsonProperty(JObject obj, string propertyName)
