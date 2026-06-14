@@ -86,6 +86,8 @@ public sealed partial class DebugWindowManager
     private string _vanillaEntityFilter = "";
     private string _vanillaBlockFilter = "";
     private VanillaAnimationSourceMode _vanillaSourceMode = VanillaAnimationSourceMode.Entities;
+    private VanillaAnimationSourceMode _vanillaSourceModeTabRequest = VanillaAnimationSourceMode.Entities;
+    private bool _vanillaSourceModeTabRequestPending;
     private VanillaEntitySelectorMode _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Grouped;
     private bool _vanillaShowHiddenEntities;
     private bool _vanillaSingleVariantEdit;

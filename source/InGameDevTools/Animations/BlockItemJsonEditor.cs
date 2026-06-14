@@ -1765,7 +1765,7 @@ public sealed partial class DebugWindowManager
         }
 
         CommitPendingVanillaHistory();
-        _vanillaSourceMode = VanillaAnimationSourceMode.Blocks;
+        RequestVanillaAnimationSourceTab(VanillaAnimationSourceMode.Blocks);
         _vanillaDomainFilter = "";
         _vanillaBlockFilter = code;
         ResetVanillaEntitySelectionState();

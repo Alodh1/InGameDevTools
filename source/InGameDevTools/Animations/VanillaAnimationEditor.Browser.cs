@@ -37,11 +37,18 @@ public sealed partial class DebugWindowManager
 
     private void DrawAnimationSourceTab(string label, VanillaAnimationSourceMode mode, float deltaSeconds)
     {
-        ImGuiTabItemFlags flags = _vanillaSourceMode == mode ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+        ImGuiTabItemFlags flags = _vanillaSourceModeTabRequestPending && _vanillaSourceModeTabRequest == mode
+            ? ImGuiTabItemFlags.SetSelected
+            : ImGuiTabItemFlags.None;
         bool open = true;
         if (!ImGui.BeginTabItem($"{label}##animation-source-{mode}", ref open, flags))
         {
             return;
+        }
+
+        if (_vanillaSourceModeTabRequestPending && _vanillaSourceModeTabRequest == mode)
+        {
+            _vanillaSourceModeTabRequestPending = false;
         }
 
         SelectAnimationSourceMode(mode);
@@ -57,10 +64,28 @@ public sealed partial class DebugWindowManager
         ImGui.EndTabItem();
     }
 
+    private void RequestVanillaAnimationSourceTab(VanillaAnimationSourceMode mode)
+    {
+        if (_vanillaSourceMode != mode)
+        {
+            CommitPendingVanillaHistory();
+            if (_vanillaSourceMode == VanillaAnimationSourceMode.OverhaulLib)
+            {
+                CommitPendingSelectedCoAnimationEdit();
+                SetEditorFrameOverride(null);
+            }
+        }
+
+        _vanillaSourceMode = mode;
+        _vanillaSourceModeTabRequest = mode;
+        _vanillaSourceModeTabRequestPending = true;
+    }
+
     private void SelectAnimationSourceMode(VanillaAnimationSourceMode mode)
     {
         if (_vanillaSourceMode == mode) return;
 
+        _vanillaSourceModeTabRequestPending = false;
         CommitPendingVanillaHistory();
         if (_vanillaSourceMode == VanillaAnimationSourceMode.OverhaulLib)
         {
