@@ -3881,12 +3881,12 @@ public sealed partial class DebugWindowManager : IDisposable
         }
     }
 
-    private bool HandleTransformViewportToolOverlayInput(NVector2 viewportMin, NVector2 viewportMax, TransformGizmoContext context, bool allowMove = true, bool allowScale = true, bool allowRotate = true, bool allowCut = false, Action? modeChanged = null)
+    private bool HandleTransformViewportToolOverlayInput(NVector2 viewportMin, NVector2 viewportMax, TransformGizmoContext context, bool allowMove = true, bool allowScale = true, bool allowRotate = true, bool allowCut = false, Action? modeChanged = null, bool allowVanillaCutOptions = false)
     {
         NormalizeTransformGizmoOptions(context, allowMove, allowScale, allowRotate, allowCut);
         NVector2 point = ImGui.GetMousePos();
-        NVector2 position = TransformViewportToolOverlayPosition(viewportMin, viewportMax, context, allowCut);
-        NVector2 size = TransformViewportToolOverlaySize(context, allowCut);
+        NVector2 position = TransformViewportToolOverlayPosition(viewportMin, viewportMax, context, allowCut, allowVanillaCutOptions);
+        NVector2 size = TransformViewportToolOverlaySize(context, allowCut, allowVanillaCutOptions);
         bool inside = point.X >= position.X && point.X <= position.X + size.X &&
             point.Y >= position.Y && point.Y <= position.Y + size.Y;
         if (!inside) return false;

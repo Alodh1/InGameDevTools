@@ -598,7 +598,7 @@ public sealed partial class DebugWindowManager
         NVector2 min = ImGui.GetItemRectMin();
         NVector2 max = ImGui.GetItemRectMax();
         bool hovered = ImGui.IsItemHovered();
-        bool toolOverlayActive = HandleTransformViewportToolOverlayInput(min, max, TransformGizmoContext.Free, allowCut: true, modeChanged: ClearVanillaViewportGizmoDrag);
+        bool toolOverlayActive = HandleTransformViewportToolOverlayInput(min, max, TransformGizmoContext.Free, allowCut: true, modeChanged: ClearVanillaViewportGizmoDrag, allowVanillaCutOptions: true);
         if (toolOverlayActive) hovered = false;
 
         if (hovered)
