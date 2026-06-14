@@ -3893,7 +3893,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
         if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
         {
-            float localY = point.Y - position.Y - 5f;
+            float localY = point.Y - position.Y;
             float rowStride = TransformViewportToolRowStride();
             int row = (int)MathF.Floor(localY / Math.Max(1f, rowStride));
             int modeRows = allowCut ? 5 : 4;
@@ -3925,6 +3925,13 @@ public sealed partial class DebugWindowManager : IDisposable
                         3 => ModelCutOrientation.Z,
                         _ => ModelCutOrientation.Auto
                     };
+                }
+                else if (allowVanillaCutOptions && orientationRow == 4)
+                {
+                    _vanillaCutSymmetryEnabled = !_vanillaCutSymmetryEnabled;
+                    _vanillaStatus = _vanillaCutSymmetryEnabled
+                        ? "Cut symmetry enabled. Cuts also try to split the mirrored element."
+                        : "Cut symmetry disabled.";
                 }
             }
             else
@@ -4109,13 +4116,7 @@ public sealed partial class DebugWindowManager : IDisposable
     {
         ImGui.SetCursorScreenPos(position + new NVector2(0f, row * rowStride));
         bool symmetry = _vanillaCutSymmetryEnabled;
-        if (ImGui.Checkbox("Symmetry##vanilla-cut-symmetry", ref symmetry))
-        {
-            _vanillaCutSymmetryEnabled = symmetry;
-            _vanillaStatus = symmetry
-                ? "Cut symmetry enabled. Cuts also try to split the mirrored element."
-                : "Cut symmetry disabled.";
-        }
+        ImGui.Checkbox("Symmetry##vanilla-cut-symmetry", ref symmetry);
 
         hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
         if (ImGui.IsItemHovered())
