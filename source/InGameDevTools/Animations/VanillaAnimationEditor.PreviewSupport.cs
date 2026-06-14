@@ -927,14 +927,13 @@ public sealed partial class DebugWindowManager
             MeshData filtered = mesh.EmptyClone() ?? throw new InvalidOperationException("Could not create first-person preview mesh clone.");
             filtered.AddMeshData(mesh, vertexIndex =>
             {
-                if (vertexIndex < 0 || vertexIndex >= mesh.VerticesCount) return false;
-                int jointValueIndex = vertexIndex * 4;
-                if (jointValueIndex < 0 || jointValueIndex >= mesh.CustomInts.Values.Length) return false;
-                bool inSet = jointIds.Contains(mesh.CustomInts.Values[jointValueIndex]);
+                int jointId = GetVanillaPreviewJointIdForVertex(mesh.CustomInts.Values, mesh.VerticesCount, vertexIndex);
+                if (jointId <= 0) return false;
+                bool inSet = jointIds.Contains(jointId);
                 return immersive ? !inSet : inSet;
             });
 
-            return filtered.VerticesCount > 0 ? api.Render.UploadMultiTextureMesh(filtered) : null;
+            return filtered.VerticesCount > 0 && filtered.IndicesCount > 0 ? api.Render.UploadMultiTextureMesh(filtered) : null;
         }
 
         private static void LoadJointIdsRecursive(ElementPose? pose, HashSet<int> jointIds)
@@ -1267,6 +1266,16 @@ public sealed partial class DebugWindowManager
             float lengthSquared = basis.LengthSquared();
             return lengthSquared < 0.000001f ? 0f : NVector3.Dot(modelDelta, basis) / lengthSquared;
         }
+    }
+
+    internal static int GetVanillaPreviewJointIdForVertex(int[]? jointIds, int verticesCount, int vertexIndex)
+    {
+        if (jointIds == null || vertexIndex < 0 || vertexIndex >= verticesCount || vertexIndex >= jointIds.Length)
+        {
+            return 0;
+        }
+
+        return jointIds[vertexIndex];
     }
 
     private readonly record struct VanillaViewportElementHit(
