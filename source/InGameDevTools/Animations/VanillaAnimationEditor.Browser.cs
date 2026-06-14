@@ -23,9 +23,74 @@ public sealed partial class DebugWindowManager
 {
     private void VanillaAnimationsTab(float deltaSeconds)
     {
+        if (!ImGui.BeginTabBar("##animation-source-tabs"))
+        {
+            return;
+        }
+
+        DrawAnimationSourceTab("Entities", VanillaAnimationSourceMode.Entities, deltaSeconds);
+        DrawAnimationSourceTab("Blocks", VanillaAnimationSourceMode.Blocks, deltaSeconds);
+        DrawAnimationSourceTab("CO", VanillaAnimationSourceMode.OverhaulLib, deltaSeconds);
+
+        ImGui.EndTabBar();
+    }
+
+    private void DrawAnimationSourceTab(string label, VanillaAnimationSourceMode mode, float deltaSeconds)
+    {
+        ImGuiTabItemFlags flags = _vanillaSourceMode == mode ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+        bool open = true;
+        if (!ImGui.BeginTabItem($"{label}##animation-source-{mode}", ref open, flags))
+        {
+            return;
+        }
+
+        SelectAnimationSourceMode(mode);
+        if (mode == VanillaAnimationSourceMode.OverhaulLib)
+        {
+            CoAnimationsTab(deltaSeconds);
+        }
+        else
+        {
+            VanillaShapeAnimationsTab(deltaSeconds);
+        }
+
+        ImGui.EndTabItem();
+    }
+
+    private void SelectAnimationSourceMode(VanillaAnimationSourceMode mode)
+    {
+        if (_vanillaSourceMode == mode) return;
+
+        CommitPendingVanillaHistory();
+        if (_vanillaSourceMode == VanillaAnimationSourceMode.OverhaulLib)
+        {
+            CommitPendingSelectedCoAnimationEdit();
+            SetEditorFrameOverride(null);
+        }
+
+        _vanillaSourceMode = mode;
+        if (mode == VanillaAnimationSourceMode.OverhaulLib)
+        {
+            ResetVanillaEntitySelectionState();
+            return;
+        }
+
+        _vanillaIndex.ClearSelection();
+        ResetVanillaEntitySelectionState();
+    }
+
+    private void VanillaShapeAnimationsTab(float deltaSeconds)
+    {
         ClearActiveTransformGizmo();
-        _vanillaIndex.EnsureEntityList(_api);
-        _vanillaIndex.EnsureBlockList(_api);
+        if (_vanillaSourceMode == VanillaAnimationSourceMode.Blocks)
+        {
+            _vanillaIndex.EnsureBlockList(_api);
+        }
+        else
+        {
+            _vanillaIndex.EnsureEntityList(_api);
+        }
+
         TrackVanillaLiveOriginals();
         FlushPendingVanillaAutoApply();
 
@@ -223,8 +288,7 @@ public sealed partial class DebugWindowManager
 
     private void DrawVanillaBrowser(IReadOnlyList<VanillaBrowserRow> rows)
     {
-        ImGui.SeparatorText("Vanilla animations");
-        DrawVanillaSourceModeSelector();
+        ImGui.SeparatorText(_vanillaSourceMode == VanillaAnimationSourceMode.Blocks ? "Block animations" : "Entity animations");
 
         if (ImGuiLayoutHelper.DrawDomainCombo("Domain##vanilla-domain-filter", ref _vanillaDomainFilter, GetVanillaDomains()))
         {
@@ -625,27 +689,6 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void DrawVanillaSourceModeSelector()
-    {
-        bool blocks = _vanillaSourceMode == VanillaAnimationSourceMode.Blocks;
-        if (ImGui.RadioButton("Entities##vanilla-source-mode", !blocks))
-        {
-            CommitPendingVanillaHistory();
-            _vanillaSourceMode = VanillaAnimationSourceMode.Entities;
-            _vanillaIndex.ClearSelection();
-            ResetVanillaEntitySelectionState();
-        }
-
-        ImGui.SameLine();
-        if (ImGui.RadioButton("Blocks##vanilla-source-mode", blocks))
-        {
-            CommitPendingVanillaHistory();
-            _vanillaSourceMode = VanillaAnimationSourceMode.Blocks;
-            _vanillaIndex.ClearSelection();
-            ResetVanillaEntitySelectionState();
-        }
-    }
-
     private void DrawVanillaBlockSelector()
     {
         ImGui.SeparatorText("Block");
@@ -853,8 +896,11 @@ public sealed partial class DebugWindowManager
 
     private IEnumerable<string> GetVanillaDomains()
     {
-        return _vanillaIndex.AllEntityDomains
-            .Concat(_vanillaIndex.AllBlockDomains)
+        IEnumerable<string> sourceDomains = _vanillaSourceMode == VanillaAnimationSourceMode.Blocks
+            ? _vanillaIndex.AllBlockDomains
+            : _vanillaIndex.AllEntityDomains;
+
+        return sourceDomains
             .Concat(_vanillaIndex.Documents.Select(document => document.Domain));
     }
 

@@ -437,6 +437,7 @@ public sealed partial class DebugWindowManager
     private void JumpToVanillaEntity(string code)
     {
         RequestDevToolsTab(DevToolsTab.Animations);
+        _vanillaSourceMode = VanillaAnimationSourceMode.Entities;
         _vanillaIndex.EnsureEntityList(_api);
         _vanillaEntitySelectorMode = VanillaEntitySelectorMode.Exact;
         _vanillaShowHiddenEntities = true;

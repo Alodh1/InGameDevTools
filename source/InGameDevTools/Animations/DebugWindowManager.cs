@@ -1648,11 +1648,12 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGui.Text($"FOV: {ClientSettings.FieldOfView * fovMultiplier}");
     }
 
-    private void AnimationsTab(float deltaSeconds)
+    private void CoAnimationsTab(float deltaSeconds)
     {
         string[] codes = AnimationsManager._instance.Animations.Keys.ToArray();
         if (codes.Length == 0)
         {
+            SetEditorFrameOverride(null);
             ImGui.TextDisabled("No animations loaded.");
             if (ImGui.CollapsingHeader("Add animation", ImGuiTreeNodeFlags.DefaultOpen))
             {
@@ -1847,6 +1848,14 @@ public sealed partial class DebugWindowManager : IDisposable
         {
             SetEditorFrameOverride(null);
         }
+    }
+
+    private void CommitPendingSelectedCoAnimationEdit()
+    {
+        string[] codes = AnimationsManager._instance.Animations.Keys.ToArray();
+        if (_selectedAnimationIndex < 0 || _selectedAnimationIndex >= codes.Length) return;
+
+        CommitPendingAnimationEdit(codes[_selectedAnimationIndex]);
     }
 
     private void DrawAnimationTimeline(string animationCode, Animation animation)

@@ -148,7 +148,8 @@ public sealed partial class DebugWindowManager
     private enum VanillaAnimationSourceMode
     {
         Entities,
-        Blocks
+        Blocks,
+        OverhaulLib
     }
 
     private sealed record VanillaEntityOption(
