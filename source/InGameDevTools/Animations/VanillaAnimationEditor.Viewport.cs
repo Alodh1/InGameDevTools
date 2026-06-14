@@ -958,7 +958,15 @@ public sealed partial class DebugWindowManager
     private bool DrawVanillaViewportCutTool(VanillaBrowserRow row, VanillaAnimationPreviewScene scene, ImDrawListPtr drawList, NVector2 min, NVector2 max, bool hovered)
     {
         if (!hovered || row.ShapeAnimation == null && row.MetadataEntry?.ResolveCurrentShape() == null) return false;
-        if (!TryPickVanillaCutPreview(scene, min, max, ImGui.GetMousePos(), out VanillaCutPreview preview)) return false;
+        if (!TryPickVanillaCutPreview(scene, min, max, ImGui.GetMousePos(), out VanillaCutPreview preview))
+        {
+            if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+            {
+                _vanillaStatus = "Cut did not hit a usable cuboid face. Hover a visible face away from its edge, or pick a different Cut axis.";
+            }
+
+            return false;
+        }
 
         uint plane = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.62f, 0.18f, 0.82f));
         uint line = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.96f, 0.78f, 1f));
@@ -1370,12 +1378,6 @@ public sealed partial class DebugWindowManager
             return false;
         }
 
-        if (source.Children is { Length: > 0 })
-        {
-            error = $"Could not cut {elementName}: elements with children are not supported in the animator Cut tool.";
-            return false;
-        }
-
         int axis = Math.Clamp(cutAxis, 0, 2);
         double coordinate = Math.Round(cutCoordinate, 6);
         if (!VanillaIsCutCoordinateInside(source, axis, coordinate))
@@ -1394,29 +1396,38 @@ public sealed partial class DebugWindowManager
         double size = source.To[axis] - source.From[axis];
         double cutRatio = Math.Clamp((coordinate - source.From[axis]) / size, 0.0, 1.0);
         string newName = ReserveVanillaShapeElementName(shape, $"{originalName}_cut2");
-        ShapeElement first = CloneVanillaShapeElement(source);
-        ShapeElement second = CloneVanillaShapeElement(source);
-        first.Name = originalName;
-        second.Name = newName;
-        first.To![axis] = coordinate;
-        second.From![axis] = coordinate;
-        first.Children = [];
-        second.Children = [];
-        second.StepParentName = null;
-        ResetVanillaCutElementRuntimeState(first, parent);
-        ResetVanillaCutElementRuntimeState(second, parent);
-        if (!TryPreserveVanillaCutChildTransform(second, parent, first, axis))
+        ShapeElement lower = CloneVanillaShapeElement(source);
+        ShapeElement upper = CloneVanillaShapeElement(source);
+        ShapeElement[] existingChildren = (source.Children ?? []).Select(CloneVanillaShapeElement).ToArray();
+        lower.To![axis] = coordinate;
+        upper.From![axis] = coordinate;
+        lower.Children = [];
+        upper.Children = [];
+
+        bool lowerIsRootSide = VanillaCutLowerSegmentIsRootSide(source, axis, coordinate);
+        ShapeElement rootSide = lowerIsRootSide ? lower : upper;
+        ShapeElement distalSide = lowerIsRootSide ? upper : lower;
+        rootSide.Name = originalName;
+        distalSide.Name = newName;
+        rootSide.Children = [];
+        distalSide.Children = existingChildren;
+        distalSide.StepParentName = null;
+
+        ResetVanillaCutElementRuntimeState(rootSide, parent);
+        ResetVanillaCutElementRuntimeState(distalSide, parent);
+        bool distalStartsAtCutPlane = lowerIsRootSide;
+        if (!TryPreserveVanillaCutChildTransform(distalSide, parent, rootSide, axis, distalStartsAtCutPlane))
         {
             error = $"Could not cut {originalName}: failed to preserve the new segment position under its parent.";
             return false;
         }
 
-        first.Children = [second];
-        ResetVanillaCutElementRuntimeState(first, parent);
+        rootSide.Children = [distalSide];
+        ResetVanillaCutElementRuntimeState(rootSide, parent);
 
         ShapeElement[] siblings = parent?.Children ?? shape.Elements;
         List<ShapeElement> updated = siblings.ToList();
-        updated[index] = first;
+        updated[index] = rootSide;
         if (parent == null)
         {
             shape.Elements = updated.ToArray();
@@ -1427,7 +1438,7 @@ public sealed partial class DebugWindowManager
         }
 
         int registeredChannels = RegisterVanillaCutAnimationChannels(document, activeEntry, keyFrameIndex, originalName, newName);
-        if (!SyncVanillaCutToSourceJson(document, originalName, first, second))
+        if (!SyncVanillaCutToSourceJson(document, originalName, rootSide, distalSide))
         {
             SyncVanillaShapeElementsToSourceJson(document);
         }
@@ -1437,7 +1448,20 @@ public sealed partial class DebugWindowManager
         return true;
     }
 
-    private static bool TryPreserveVanillaCutChildTransform(ShapeElement element, ShapeElement? oldParent, ShapeElement newParent, int cutAxis)
+    private static bool VanillaCutLowerSegmentIsRootSide(ShapeElement source, int cutAxis, double coordinate)
+    {
+        if (source.From == null || source.To == null || source.From.Length < 3 || source.To.Length < 3) return true;
+
+        cutAxis = Math.Clamp(cutAxis, 0, 2);
+        double root = source.RotationOrigin != null && source.RotationOrigin.Length > cutAxis
+            ? source.RotationOrigin[cutAxis]
+            : 0.0;
+        double lowerCenter = (source.From[cutAxis] + coordinate) * 0.5;
+        double upperCenter = (coordinate + source.To[cutAxis]) * 0.5;
+        return Math.Abs(root - lowerCenter) <= Math.Abs(root - upperCenter);
+    }
+
+    private static bool TryPreserveVanillaCutChildTransform(ShapeElement element, ShapeElement? oldParent, ShapeElement newParent, int cutAxis, bool cutAtFromSide)
     {
         try
         {
@@ -1463,9 +1487,9 @@ public sealed partial class DebugWindowManager
             double sizeZ = element.To[2] - element.From[2];
             cutAxis = Math.Clamp(cutAxis, 0, 2);
             Vec3d hingeOffset = new(
-                cutAxis == 0 ? 0.0 : sizeX * 0.5,
-                cutAxis == 1 ? 0.0 : sizeY * 0.5,
-                cutAxis == 2 ? 0.0 : sizeZ * 0.5);
+                cutAxis == 0 ? (cutAtFromSide ? 0.0 : sizeX) : sizeX * 0.5,
+                cutAxis == 1 ? (cutAtFromSide ? 0.0 : sizeY) : sizeY * 0.5,
+                cutAxis == 2 ? (cutAtFromSide ? 0.0 : sizeZ) : sizeZ * 0.5);
             Vec3d newFrom = Add(Sub(localBoxOrigin, hingeOffset), newRotation.TransformDirection(hingeOffset));
             Vec3d newOriginLocal = Add(newFrom, hingeOffset);
 
@@ -1653,7 +1677,24 @@ public sealed partial class DebugWindowManager
         JObject second = (JObject)sourceToken.DeepClone();
         SetVanillaElementJsonFromShape(first, firstElement);
         SetVanillaElementJsonFromShape(second, secondElement);
-        RemoveVanillaElementJsonProperty(second, "children");
+        if (secondElement.Children is { Length: > 0 })
+        {
+            JToken? originalChildren = GetVanillaJsonProperty(sourceToken, "children")?.Value.DeepClone();
+            JArray existingChildTokens = originalChildren as JArray ?? JArray.FromObject(secondElement.Children, JsonSerializer.Create(VanillaShapeElementJsonSettings));
+            JProperty? childProperty = GetVanillaJsonProperty(second, "children");
+            if (childProperty == null)
+            {
+                second["children"] = existingChildTokens;
+            }
+            else
+            {
+                childProperty.Value = existingChildTokens;
+            }
+        }
+        else
+        {
+            RemoveVanillaElementJsonProperty(second, "children");
+        }
         RemoveVanillaElementJsonProperty(second, "stepParentName");
         RemoveVanillaElementJsonProperty(second, "stepparentname");
 
