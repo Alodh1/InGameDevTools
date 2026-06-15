@@ -26,7 +26,8 @@ public sealed partial class DebugWindowManager
         Move,
         Resize,
         Rotate,
-        Cut
+        Cut,
+        Chisel
     }
 
     private enum ModelCutOrientation
@@ -218,6 +219,7 @@ public sealed partial class DebugWindowManager
     private bool _modelSnapEnabled = true;
     private float _modelSnapMoveUnits = 0.5f;
     private float _modelSnapRotateDegrees = 5f;
+    private string _modelChiselTexture = "";
     private int _modelArrowNudgePlane;
     private int _modelWheelNudgeAxis = 2;
     private ModelShapeAssetEntry? _modelPendingOpenEntry;
@@ -560,7 +562,33 @@ public sealed partial class DebugWindowManager
             ImGui.TextColored(new NVector4(0.62f, 0.8f, 0.62f, 1f), _modelStatus);
         }
 
+        DrawModelChiselToolbar();
         ImGui.Separator();
+    }
+
+    private void DrawModelChiselToolbar()
+    {
+        if (_modelDoc == null || _modelGizmoTool != ModelGizmoTool.Chisel) return;
+
+        List<string> textureCodes = _modelDoc.Textures.Select(texture => texture.Code).ToList();
+        if (string.IsNullOrWhiteSpace(_modelChiselTexture))
+        {
+            _modelChiselTexture = textureCodes.FirstOrDefault() ?? "";
+        }
+
+        ImGui.Spacing();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled("Chisel");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(190f);
+        if (ModelFilteredCombo("Texture##model-chisel-texture", _modelChiselTexture, textureCodes, out string pickedTexture, allowCustom: true, filterHint: "filter texture codes"))
+        {
+            _modelChiselTexture = pickedTexture.Trim();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Texture code used by newly added chisel microblocks.");
+        }
     }
 
     private void DrawModelSelectionToolbar()
@@ -702,7 +730,7 @@ public sealed partial class DebugWindowManager
         try
         {
             ImGui.SeparatorText("Keyboard");
-            ImGui.TextUnformatted("Ctrl+Shift+1..5   Select / Move / Resize / Rotate / Cut tool");
+            ImGui.TextUnformatted("Ctrl+Shift+1..6   Select / Move / Resize / Rotate / Cut / Chisel tool");
             ImGui.TextUnformatted("Ctrl+Z / Ctrl+Y   Undo / Redo");
             ImGui.TextUnformatted("Ctrl+D            Duplicate selected element");
             ImGui.TextUnformatted("Ctrl+C            Copy selected elements as JSON");
@@ -717,6 +745,7 @@ public sealed partial class DebugWindowManager
             ImGui.SeparatorText("Viewport mouse");
             ImGui.TextUnformatted("Left click        Select element / drag gizmo");
             ImGui.TextUnformatted("Ctrl+Left click   Toggle element in multi-selection");
+            ImGui.TextUnformatted("Chisel mode       Left click adds, right click removes");
             ImGui.TextUnformatted("Right drag        Orbit camera");
             ImGui.TextUnformatted("Middle or Shift+Right drag   Pan camera");
             ImGui.TextUnformatted("Mouse wheel       Zoom");
@@ -2204,6 +2233,10 @@ public sealed partial class DebugWindowManager
         {
             _modelGizmoTool = ModelGizmoTool.Cut;
         }
+        else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._6, GlKeys.Number6))
+        {
+            _modelGizmoTool = ModelGizmoTool.Chisel;
+        }
         else if (ModelHandleNudgeShortcuts())
         {
         }
@@ -2910,6 +2943,119 @@ public sealed partial class DebugWindowManager
         _modelStatus = $"Cut {element.Name} on {ModelAxisName(axis)} at {coordinate:0.###}.";
     }
 
+    private void ModelAddChiselMicroblock(ModelElementData element, double[] from, double[] to)
+    {
+        if (_modelDoc == null) return;
+
+        if (ModelChiselWouldOverlap(element, from, to))
+        {
+            _modelStatus = "Chisel add skipped: that microblock space is already occupied.";
+            return;
+        }
+
+        List<ModelElementData> siblings = element.Parent?.Children ?? _modelDoc.Roots;
+        int insertIndex = siblings.IndexOf(element);
+        if (insertIndex < 0)
+        {
+            _modelStatus = "Could not chisel: element is no longer in the document.";
+            return;
+        }
+
+        HashSet<string> reservedNames = new(_modelDoc.EnumerateElements().Select(candidate => candidate.Name), StringComparer.OrdinalIgnoreCase);
+        string texture = ModelResolveChiselTexture(element);
+        ModelElementData microblock = ModelCreateChiselMicroblock(
+            element,
+            from,
+            to,
+            texture,
+            desired => ModelReserveUniqueElementName(reservedNames, desired));
+
+        ModelBeginEdit();
+        siblings.Insert(insertIndex + 1, microblock);
+        ModelSelectElement(microblock);
+        ModelMarkChanged();
+        ModelEndEdit("Chisel add microblock");
+        _modelStatus = $"Added chisel microblock {microblock.Name}.";
+    }
+
+    private void ModelRemoveChiselMicroblock(ModelElementData element, double[] removeFrom, double[] removeTo)
+    {
+        if (_modelDoc == null) return;
+
+        if (element.Children.Count > 0)
+        {
+            _modelStatus = $"'{element.Name}' has children; unparent them before chiseling it.";
+            return;
+        }
+
+        List<ModelElementData> siblings = element.Parent?.Children ?? _modelDoc.Roots;
+        int insertIndex = siblings.IndexOf(element);
+        if (insertIndex < 0)
+        {
+            _modelStatus = "Could not chisel: element is no longer in the document.";
+            return;
+        }
+
+        HashSet<string> reservedNames = new(
+            _modelDoc.EnumerateElements()
+                .Where(candidate => !ReferenceEquals(candidate, element))
+                .Select(candidate => candidate.Name),
+            StringComparer.OrdinalIgnoreCase);
+        string texture = ModelResolveChiselTexture(element);
+        List<ModelElementData> pieces = ModelBuildChiselRemovalPieces(
+            element,
+            removeFrom,
+            removeTo,
+            texture,
+            desired => ModelReserveUniqueElementName(reservedNames, desired));
+
+        ModelBeginEdit();
+        foreach (ModelElementData piece in pieces)
+        {
+            piece.Parent = element.Parent;
+        }
+        siblings.RemoveAt(insertIndex);
+        if (pieces.Count > 0)
+        {
+            siblings.InsertRange(insertIndex, pieces);
+            ModelSelectElements(pieces, pieces[0]);
+        }
+        else
+        {
+            ModelSelectElement(element.Parent ?? _modelDoc.Roots.FirstOrDefault());
+        }
+        if (ReferenceEquals(_modelReparentSource, element)) _modelReparentSource = null;
+        ModelMarkChanged();
+        ModelEndEdit("Chisel remove microblock");
+        _modelStatus = pieces.Count == 0
+            ? $"Removed {element.Name}."
+            : $"Removed one chisel microblock from {element.Name}.";
+    }
+
+    private string ModelResolveChiselTexture(ModelElementData? source)
+    {
+        if (!string.IsNullOrWhiteSpace(_modelChiselTexture)) return _modelChiselTexture.Trim();
+
+        string texture = source == null ? "" : ModelBestElementTexture(source);
+        if (!string.IsNullOrWhiteSpace(texture)) return texture;
+        return _modelDoc?.Textures.FirstOrDefault()?.Code ?? "";
+    }
+
+    private bool ModelChiselWouldOverlap(ModelElementData template, double[] from, double[] to)
+    {
+        if (_modelDoc == null) return false;
+
+        foreach (ModelElementData candidate in _modelDoc.EnumerateElements())
+        {
+            if (!ModelElementHasRenderableBox(candidate)) continue;
+            if (!ReferenceEquals(candidate.Parent, template.Parent)) continue;
+            if (!ModelChiselTransformsMatch(candidate, template)) continue;
+            if (ModelAxisAlignedBoxesOverlap(from, to, candidate.From, candidate.To)) return true;
+        }
+
+        return false;
+    }
+
     private bool ModelCanCutSelection(int partsX, int partsY, int partsZ, out string reason)
     {
         reason = "";
@@ -3074,6 +3220,91 @@ public sealed partial class DebugWindowManager
         return [first, second];
     }
 
+    private static ModelElementData ModelCreateChiselMicroblock(
+        ModelElementData template,
+        double[] from,
+        double[] to,
+        string texture,
+        System.Func<string, string>? reserveName = null)
+    {
+        ModelElementData element = new()
+        {
+            Name = reserveName?.Invoke(ModelChiselPieceName(template.Name, "add")) ?? ModelChiselPieceName(template.Name, "add"),
+            From = ModelRoundVector(from),
+            To = ModelRoundVector(to),
+            RotationOrigin = (double[]?)template.RotationOrigin?.Clone(),
+            RotationX = template.RotationX,
+            RotationY = template.RotationY,
+            RotationZ = template.RotationZ,
+            Shade = template.Shade,
+            StepParentName = template.StepParentName,
+            Parent = template.Parent
+        };
+        ModelApplyContinuousUvToElement(element, texture, replaceTexture: true);
+        return element;
+    }
+
+    private static List<ModelElementData> ModelBuildChiselRemovalPieces(
+        ModelElementData source,
+        double[] removeFrom,
+        double[] removeTo,
+        string texture,
+        System.Func<string, string>? reserveName = null)
+    {
+        double[] sourceFrom = source.From;
+        double[] sourceTo = source.To;
+        double[] cutFrom =
+        [
+            Math.Clamp(Math.Min(removeFrom[0], removeTo[0]), sourceFrom[0], sourceTo[0]),
+            Math.Clamp(Math.Min(removeFrom[1], removeTo[1]), sourceFrom[1], sourceTo[1]),
+            Math.Clamp(Math.Min(removeFrom[2], removeTo[2]), sourceFrom[2], sourceTo[2])
+        ];
+        double[] cutTo =
+        [
+            Math.Clamp(Math.Max(removeFrom[0], removeTo[0]), sourceFrom[0], sourceTo[0]),
+            Math.Clamp(Math.Max(removeFrom[1], removeTo[1]), sourceFrom[1], sourceTo[1]),
+            Math.Clamp(Math.Max(removeFrom[2], removeTo[2]), sourceFrom[2], sourceTo[2])
+        ];
+
+        if (!ModelAxisAlignedBoxesOverlap(sourceFrom, sourceTo, cutFrom, cutTo)) return [];
+
+        List<ModelElementData> pieces = [];
+        void AddPiece(double x0, double y0, double z0, double x1, double y1, double z1, string suffix)
+        {
+            if (x1 - x0 <= 0.000001 || y1 - y0 <= 0.000001 || z1 - z0 <= 0.000001) return;
+
+            ModelElementData piece = source.CloneShallow();
+            piece.Name = reserveName?.Invoke(ModelChiselPieceName(source.Name, suffix)) ?? ModelChiselPieceName(source.Name, suffix);
+            piece.From = ModelRoundVector([x0, y0, z0]);
+            piece.To = ModelRoundVector([x1, y1, z1]);
+            piece.Parent = null;
+            piece.Children.Clear();
+            ModelApplyContinuousUvToElement(piece, texture, replaceTexture: false);
+            pieces.Add(piece);
+        }
+
+        double x0 = sourceFrom[0];
+        double y0 = sourceFrom[1];
+        double z0 = sourceFrom[2];
+        double x1 = sourceTo[0];
+        double y1 = sourceTo[1];
+        double z1 = sourceTo[2];
+        double cx0 = cutFrom[0];
+        double cy0 = cutFrom[1];
+        double cz0 = cutFrom[2];
+        double cx1 = cutTo[0];
+        double cy1 = cutTo[1];
+        double cz1 = cutTo[2];
+
+        AddPiece(x0, y0, z0, cx0, y1, z1, "x0");
+        AddPiece(cx1, y0, z0, x1, y1, z1, "x1");
+        AddPiece(cx0, y0, z0, cx1, cy0, z1, "y0");
+        AddPiece(cx0, cy1, z0, cx1, y1, z1, "y1");
+        AddPiece(cx0, cy0, z0, cx1, cy1, cz0, "z0");
+        AddPiece(cx0, cy0, cz1, cx1, cy1, z1, "z1");
+        return pieces;
+    }
+
     private static double[] ModelBuildCutBounds(double from, double to, int parts)
     {
         parts = ModelNormalizeCutParts(parts);
@@ -3097,6 +3328,12 @@ public sealed partial class DebugWindowManager
         if (partsY > 1) suffix.Add($"y{y + 1}");
         if (partsZ > 1) suffix.Add($"z{z + 1}");
         return suffix.Count == 0 ? name : $"{name}_{string.Join("_", suffix)}";
+    }
+
+    private static string ModelChiselPieceName(string baseName, string suffix)
+    {
+        string name = string.IsNullOrWhiteSpace(baseName) ? "Element" : baseName.Trim();
+        return $"{name}_chisel_{suffix}";
     }
 
     private static string ModelReserveUniqueElementName(HashSet<string> reservedNames, string desired)
@@ -3138,6 +3375,85 @@ public sealed partial class DebugWindowManager
         1 => "Y",
         _ => "Z"
     };
+
+    private static bool ModelChiselTransformsMatch(ModelElementData left, ModelElementData right)
+    {
+        return Math.Abs(left.RotationX - right.RotationX) <= 0.000001 &&
+            Math.Abs(left.RotationY - right.RotationY) <= 0.000001 &&
+            Math.Abs(left.RotationZ - right.RotationZ) <= 0.000001 &&
+            ModelVectorsEqual(left.RotationOrigin, right.RotationOrigin);
+    }
+
+    private static bool ModelVectorsEqual(double[]? left, double[]? right)
+    {
+        if (left == null || right == null) return left == null && right == null;
+        return left.Length >= 3 && right.Length >= 3 &&
+            Math.Abs(left[0] - right[0]) <= 0.000001 &&
+            Math.Abs(left[1] - right[1]) <= 0.000001 &&
+            Math.Abs(left[2] - right[2]) <= 0.000001;
+    }
+
+    private static bool ModelAxisAlignedBoxesOverlap(double[] leftFrom, double[] leftTo, double[] rightFrom, double[] rightTo)
+    {
+        return ModelAxisOverlap(leftFrom[0], leftTo[0], rightFrom[0], rightTo[0]) > 0.000001 &&
+            ModelAxisOverlap(leftFrom[1], leftTo[1], rightFrom[1], rightTo[1]) > 0.000001 &&
+            ModelAxisOverlap(leftFrom[2], leftTo[2], rightFrom[2], rightTo[2]) > 0.000001;
+    }
+
+    private static double ModelAxisOverlap(double leftFrom, double leftTo, double rightFrom, double rightTo)
+    {
+        return Math.Min(leftTo, rightTo) - Math.Max(leftFrom, rightFrom);
+    }
+
+    private static string ModelBestElementTexture(ModelElementData element)
+    {
+        return element.Faces
+            .Where(face => face != null && !string.IsNullOrWhiteSpace(face.Texture))
+            .GroupBy(face => face!.Texture, StringComparer.Ordinal)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group => group.Key)
+            .FirstOrDefault() ?? "";
+    }
+
+    private static void ModelApplyContinuousUvToElement(ModelElementData element, string texture, bool replaceTexture)
+    {
+        for (int faceIndex = 0; faceIndex < 6; faceIndex++)
+        {
+            ModelFaceData face = element.Faces[faceIndex] ?? new ModelFaceData();
+            if (replaceTexture || string.IsNullOrWhiteSpace(face.Texture))
+            {
+                face.Texture = texture;
+            }
+            face.Enabled = true;
+            float[] uv = ModelContinuousUvForFace(element, faceIndex);
+            face.Uv[0] = uv[0];
+            face.Uv[1] = uv[1];
+            face.Uv[2] = uv[2];
+            face.Uv[3] = uv[3];
+            element.Faces[faceIndex] = face;
+        }
+    }
+
+    private static float[] ModelContinuousUvForFace(ModelElementData element, int faceIndex)
+    {
+        return faceIndex switch
+        {
+            0 or 2 => [(float)element.From[0], (float)element.From[1], (float)element.To[0], (float)element.To[1]],
+            1 or 3 => [(float)element.From[2], (float)element.From[1], (float)element.To[2], (float)element.To[1]],
+            _ => [(float)element.From[0], (float)element.From[2], (float)element.To[0], (float)element.To[2]]
+        };
+    }
+
+    private static double[] ModelRoundVector(double[] vector)
+    {
+        return [ModelRoundForChisel(vector[0]), ModelRoundForChisel(vector[1]), ModelRoundForChisel(vector[2])];
+    }
+
+    private static double ModelRoundForChisel(double value)
+    {
+        return Math.Abs(value) < 0.000001 ? 0.0 : Math.Round(value, 6);
+    }
 
     private void ModelMirrorElementSubtree(ModelElementData element, int axis)
     {

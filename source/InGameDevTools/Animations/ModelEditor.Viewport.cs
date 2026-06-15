@@ -91,6 +91,17 @@ public sealed partial class DebugWindowManager
         Vector3 LineStart,
         Vector3 LineEnd);
 
+    private readonly record struct ModelChiselPreview(
+        ModelElementData Element,
+        int FaceAxis,
+        bool FacePositive,
+        double[] RemoveFrom,
+        double[] RemoveTo,
+        double[] AddFrom,
+        double[] AddTo,
+        Vector3[] RemoveCorners,
+        Vector3[] AddCorners);
+
     // Local box corner index layout: bit0 = +X, bit1 = +Y, bit2 = +Z is NOT used here;
     // corners follow the same winding as AnimationElementPicking boxes.
     private static Vector3[] ModelLocalBoxCorners(ModelElementData element)
@@ -384,6 +395,10 @@ public sealed partial class DebugWindowManager
             {
                 gizmoConsumedMouse = DrawModelCutTool(drawList, camera, hovered);
             }
+            else if (_modelGizmoTool == ModelGizmoTool.Chisel)
+            {
+                gizmoConsumedMouse = DrawModelChiselTool(drawList, camera, hovered);
+            }
             else if (selected != null && _modelDoc.EnumerateElements().Contains(selected))
             {
                 gizmoConsumedMouse = DrawModelGizmo(drawList, camera, selected, hovered);
@@ -444,7 +459,7 @@ public sealed partial class DebugWindowManager
     {
         float rowHeight = Math.Max(20f, ImGui.GetFrameHeight());
         float spacingY = ImGui.GetStyle().ItemSpacing.Y;
-        int rows = _modelGizmoTool == ModelGizmoTool.Cut ? 10 : 5;
+        int rows = _modelGizmoTool == ModelGizmoTool.Cut ? 11 : 6;
         return new NVector2(112f, rowHeight * rows + spacingY * (rows - 1) + 10f);
     }
 
@@ -462,7 +477,7 @@ public sealed partial class DebugWindowManager
             float localY = point.Y - position.Y - 5f;
             float rowStride = Math.Max(20f, ImGui.GetFrameHeight()) + ImGui.GetStyle().ItemSpacing.Y;
             int row = (int)MathF.Floor(localY / Math.Max(1f, rowStride));
-            if (row >= 0 && row < 5)
+            if (row >= 0 && row < 6)
             {
                 if (_modelGizmoDragging) ModelEndGizmoDrag(commit: true);
                 _modelGizmoTool = row switch
@@ -471,16 +486,17 @@ public sealed partial class DebugWindowManager
                     1 => ModelGizmoTool.Move,
                     2 => ModelGizmoTool.Resize,
                     3 => ModelGizmoTool.Rotate,
-                    _ => ModelGizmoTool.Cut
+                    4 => ModelGizmoTool.Cut,
+                    _ => ModelGizmoTool.Chisel
                 };
             }
-            else if (_modelGizmoTool == ModelGizmoTool.Cut && row >= 6 && row < 10)
+            else if (_modelGizmoTool == ModelGizmoTool.Cut && row >= 7 && row < 11)
             {
                 _modelCutOrientation = row switch
                 {
-                    7 => ModelCutOrientation.X,
-                    8 => ModelCutOrientation.Y,
-                    9 => ModelCutOrientation.Z,
+                    8 => ModelCutOrientation.X,
+                    9 => ModelCutOrientation.Y,
+                    10 => ModelCutOrientation.Z,
                     _ => ModelCutOrientation.Auto
                 };
             }
@@ -510,15 +526,16 @@ public sealed partial class DebugWindowManager
             DrawModelViewportToolRadio(position, rowStride, 2, "Resize", ModelGizmoTool.Resize, "Drag face or corner handles to resize/deform the selection (Ctrl+Shift+3).", ref hoveredOrActive);
             DrawModelViewportToolRadio(position, rowStride, 3, "Rotate", ModelGizmoTool.Rotate, "Drag the rings to rotate around the rotation origin (Ctrl+Shift+4).", ref hoveredOrActive);
             DrawModelViewportToolRadio(position, rowStride, 4, "Cut", ModelGizmoTool.Cut, "Hover a cuboid to preview a cut line, then click to split it (Ctrl+Shift+5).", ref hoveredOrActive);
+            DrawModelViewportToolRadio(position, rowStride, 5, "Chisel", ModelGizmoTool.Chisel, "Add or remove one microblock on the hovered face (Ctrl+Shift+6).", ref hoveredOrActive);
             if (_modelGizmoTool == ModelGizmoTool.Cut)
             {
-                ImGui.SetCursorScreenPos(position + new NVector2(0f, 5f * rowStride));
+                ImGui.SetCursorScreenPos(position + new NVector2(0f, 6f * rowStride));
                 ImGui.TextDisabled("Cut axis");
                 hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();
-                DrawModelCutOrientationRadio(position, rowStride, 6, "Auto", ModelCutOrientation.Auto, "Pick the best cut axis from the hovered face.", ref hoveredOrActive);
-                DrawModelCutOrientationRadio(position, rowStride, 7, "X", ModelCutOrientation.X, "Cut along the element's local X axis.", ref hoveredOrActive);
-                DrawModelCutOrientationRadio(position, rowStride, 8, "Y", ModelCutOrientation.Y, "Cut along the element's local Y axis.", ref hoveredOrActive);
-                DrawModelCutOrientationRadio(position, rowStride, 9, "Z", ModelCutOrientation.Z, "Cut along the element's local Z axis.", ref hoveredOrActive);
+                DrawModelCutOrientationRadio(position, rowStride, 7, "Auto", ModelCutOrientation.Auto, "Pick the best cut axis from the hovered face.", ref hoveredOrActive);
+                DrawModelCutOrientationRadio(position, rowStride, 8, "X", ModelCutOrientation.X, "Cut along the element's local X axis.", ref hoveredOrActive);
+                DrawModelCutOrientationRadio(position, rowStride, 9, "Y", ModelCutOrientation.Y, "Cut along the element's local Y axis.", ref hoveredOrActive);
+                DrawModelCutOrientationRadio(position, rowStride, 10, "Z", ModelCutOrientation.Z, "Cut along the element's local Z axis.", ref hoveredOrActive);
             }
         }
         finally
@@ -1357,6 +1374,38 @@ public sealed partial class DebugWindowManager
         return true;
     }
 
+    private bool DrawModelChiselTool(ImDrawListPtr drawList, DevToolsPreviewCamera camera, bool hovered)
+    {
+        if (!hovered || _modelDoc == null) return false;
+        if (!ModelTryPickChiselPreview(camera, ImGui.GetMousePos(), out ModelChiselPreview preview)) return false;
+
+        bool addBlocked = ModelChiselWouldOverlap(preview.Element, preview.AddFrom, preview.AddTo);
+        uint addColor = ImGui.ColorConvertFloat4ToU32(addBlocked
+            ? new NVector4(1f, 0.28f, 0.22f, 0.88f)
+            : new NVector4(0.36f, 0.95f, 0.46f, 0.9f));
+        uint removeColor = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.72f, 0.22f, 0.94f));
+        DrawModelChiselBoxOutline(drawList, camera, preview.AddCorners, addColor, 2.4f);
+        DrawModelChiselBoxOutline(drawList, camera, preview.RemoveCorners, removeColor, 1.7f);
+
+        if (camera.Project(ModelChiselBoxCenter(preview.AddCorners), out NVector2 labelPosition, out _))
+        {
+            string label = addBlocked ? "occupied" : ModelResolveChiselTexture(preview.Element);
+            drawList.AddText(labelPosition + new NVector2(8f, -18f), addColor, string.IsNullOrWhiteSpace(label) ? "chisel" : label);
+        }
+
+        ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            ModelAddChiselMicroblock(preview.Element, preview.AddFrom, preview.AddTo);
+        }
+        else if (ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+        {
+            ModelRemoveChiselMicroblock(preview.Element, preview.RemoveFrom, preview.RemoveTo);
+        }
+
+        return true;
+    }
+
     private bool ModelTryPickCutPreview(DevToolsPreviewCamera camera, NVector2 mouse, out ModelCutPreview preview)
     {
         preview = default;
@@ -1405,6 +1454,56 @@ public sealed partial class DebugWindowManager
 
         return bestElement != null &&
             ModelTryBuildCutPreview(camera, bestElement, bestLocalUnits, bestFaceAxis, bestFacePositive, out preview);
+    }
+
+    private bool ModelTryPickChiselPreview(DevToolsPreviewCamera camera, NVector2 mouse, out ModelChiselPreview preview)
+    {
+        preview = default;
+        if (_modelDoc == null) return false;
+
+        Vector3 rayOrigin = camera.Position;
+        if (!ModelViewportMouseRay(camera, mouse, out Vector3 rayDirection)) return false;
+
+        ModelElementData? bestElement = null;
+        double[] bestLocalUnits = [0, 0, 0];
+        int bestFaceAxis = -1;
+        bool bestFacePositive = false;
+        float bestDistance = float.MaxValue;
+        int bestDepth = -1;
+
+        void Visit(ModelElementData element, int depth)
+        {
+            if (!element.Visible) return;
+
+            if (ModelElementHasRenderableBox(element) &&
+                ModelTryRayElementLocalHit(element, rayOrigin, rayDirection, out float distance, out double[] localUnits, out int faceAxis, out bool facePositive))
+            {
+                bool better = distance < bestDistance - 0.001f ||
+                    (Math.Abs(distance - bestDistance) <= 0.001f && depth > bestDepth);
+                if (better)
+                {
+                    bestElement = element;
+                    bestLocalUnits = localUnits;
+                    bestFaceAxis = faceAxis;
+                    bestFacePositive = facePositive;
+                    bestDistance = distance;
+                    bestDepth = depth;
+                }
+            }
+
+            foreach (ModelElementData child in element.Children)
+            {
+                Visit(child, depth + 1);
+            }
+        }
+
+        foreach (ModelElementData root in _modelDoc.Roots)
+        {
+            Visit(root, 0);
+        }
+
+        return bestElement != null &&
+            ModelTryBuildChiselPreview(bestElement, bestLocalUnits, bestFaceAxis, bestFacePositive, out preview);
     }
 
     private bool ModelTryBuildCutPreview(
@@ -1469,6 +1568,86 @@ public sealed partial class DebugWindowManager
 
         preview = best;
         return found;
+    }
+
+    private static bool ModelTryBuildChiselPreview(
+        ModelElementData element,
+        double[] localUnits,
+        int faceAxis,
+        bool facePositive,
+        out ModelChiselPreview preview)
+    {
+        preview = default;
+        if (faceAxis < 0 || faceAxis > 2) return false;
+
+        double[] removeFrom = new double[3];
+        double[] removeTo = new double[3];
+        double[] addFrom = new double[3];
+        double[] addTo = new double[3];
+        for (int axis = 0; axis < 3; axis++)
+        {
+            double min = Math.Min(element.From[axis], element.To[axis]);
+            double max = Math.Max(element.From[axis], element.To[axis]);
+            double size = max - min;
+            if (size <= 0.000001) return false;
+
+            if (axis == faceAxis)
+            {
+                if (size <= 1.0)
+                {
+                    removeFrom[axis] = min;
+                    removeTo[axis] = max;
+                }
+                else if (facePositive)
+                {
+                    removeFrom[axis] = max - 1.0;
+                    removeTo[axis] = max;
+                }
+                else
+                {
+                    removeFrom[axis] = min;
+                    removeTo[axis] = min + 1.0;
+                }
+
+                addFrom[axis] = facePositive ? max : min - 1.0;
+                addTo[axis] = facePositive ? max + 1.0 : min;
+                continue;
+            }
+
+            double coordinate = element.From[axis] + Math.Clamp(localUnits[axis], 0.0, size);
+            if (size <= 1.0)
+            {
+                removeFrom[axis] = min;
+                removeTo[axis] = max;
+            }
+            else
+            {
+                double start = Math.Floor(coordinate);
+                if (coordinate >= max - 0.000001) start = max - 1.0;
+                start = Math.Clamp(start, min, max - 1.0);
+                removeFrom[axis] = start;
+                removeTo[axis] = start + 1.0;
+            }
+
+            addFrom[axis] = removeFrom[axis];
+            addTo[axis] = removeTo[axis];
+        }
+
+        removeFrom = ModelRoundVector(removeFrom);
+        removeTo = ModelRoundVector(removeTo);
+        addFrom = ModelRoundVector(addFrom);
+        addTo = ModelRoundVector(addTo);
+        preview = new ModelChiselPreview(
+            element,
+            faceAxis,
+            facePositive,
+            removeFrom,
+            removeTo,
+            addFrom,
+            addTo,
+            ModelChiselBoxWorldCorners(element, removeFrom, removeTo),
+            ModelChiselBoxWorldCorners(element, addFrom, addTo));
+        return true;
     }
 
     private int[] ModelCutCandidateAxes(int faceAxis)
@@ -1596,6 +1775,59 @@ public sealed partial class DebugWindowManager
         points[3][axisB] = size[axisB];
 
         return points.Select(point => ModelLocalUnitsPoint(matrix, point)).ToArray();
+    }
+
+    private static Vector3[] ModelChiselBoxWorldCorners(ModelElementData element, double[] from, double[] to)
+    {
+        Matrixf matrix = ModelComputeElementMatrix(element);
+        double[] localFrom =
+        [
+            from[0] - element.From[0],
+            from[1] - element.From[1],
+            from[2] - element.From[2]
+        ];
+        double[] localTo =
+        [
+            to[0] - element.From[0],
+            to[1] - element.From[1],
+            to[2] - element.From[2]
+        ];
+        double x0 = localFrom[0];
+        double y0 = localFrom[1];
+        double z0 = localFrom[2];
+        double x1 = localTo[0];
+        double y1 = localTo[1];
+        double z1 = localTo[2];
+        double[][] points =
+        [
+            [x0, y0, z0],
+            [x1, y0, z0],
+            [x1, y1, z0],
+            [x0, y1, z0],
+            [x0, y0, z1],
+            [x1, y0, z1],
+            [x1, y1, z1],
+            [x0, y1, z1]
+        ];
+        return points.Select(point => ModelLocalUnitsPoint(matrix, point)).ToArray();
+    }
+
+    private static void DrawModelChiselBoxOutline(ImDrawListPtr drawList, DevToolsPreviewCamera camera, Vector3[] corners, uint color, float thickness)
+    {
+        foreach ((int a, int b) in ModelBoxEdges)
+        {
+            DrawModelViewportLine(drawList, camera, corners[a], corners[b], color, thickness);
+        }
+    }
+
+    private static Vector3 ModelChiselBoxCenter(Vector3[] corners)
+    {
+        Vector3 center = Vector3.Zero;
+        foreach (Vector3 corner in corners)
+        {
+            center += corner;
+        }
+        return center / Math.Max(1, corners.Length);
     }
 
     private static Vector3 ModelLocalUnitsPoint(Matrixf matrix, double[] localUnits)

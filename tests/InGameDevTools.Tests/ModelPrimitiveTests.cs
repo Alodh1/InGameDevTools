@@ -264,6 +264,75 @@ public sealed class ModelPrimitiveTests
             new PrimitiveBox((double[])GetMember(right, "From"), (double[])GetMember(right, "To"))));
     }
 
+    [Fact]
+    public void ChiselMicroblock_UsesSelectedTextureAndContinuousUv()
+    {
+        object source = CreateElement("Box", [0, 0, 0], [16, 16, 16], faces: true);
+        SetMember(source, "RotationOrigin", new double[] { 8, 8, 8 });
+        SetMember(source, "RotationY", 22.5);
+
+        MethodInfo create = typeof(DebugWindowManager).GetMethod("ModelCreateChiselMicroblock", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelCreateChiselMicroblock");
+        object block = create.Invoke(null, [source, new double[] { 2, 3, 4 }, new double[] { 3, 4, 5 }, "stone", (Func<string, string>)(name => name)])!;
+
+        Assert.Equal(new double[] { 2, 3, 4 }, (double[])GetMember(block, "From"));
+        Assert.Equal(new double[] { 3, 4, 5 }, (double[])GetMember(block, "To"));
+        Assert.Equal(new double[] { 8, 8, 8 }, (double[])GetMember(block, "RotationOrigin"));
+        Assert.Equal(22.5, GetDouble(block, "RotationY"));
+
+        Array faces = (Array)GetMember(block, "Faces");
+        Assert.Equal("stone", GetMember(faces.GetValue(0)!, "Texture"));
+        Assert.Equal(new float[] { 2, 3, 3, 4 }, (float[])GetMember(faces.GetValue(0)!, "Uv"));
+        Assert.Equal(new float[] { 4, 3, 5, 4 }, (float[])GetMember(faces.GetValue(1)!, "Uv"));
+        Assert.Equal(new float[] { 2, 4, 3, 5 }, (float[])GetMember(faces.GetValue(4)!, "Uv"));
+    }
+
+    [Fact]
+    public void ChiselRemoval_SplitsAroundRemovedCellWithoutOverlapsOrGaps()
+    {
+        object source = CreateElement("Box", [0, 0, 0], [3, 3, 3], faces: true);
+
+        MethodInfo build = typeof(DebugWindowManager).GetMethod("ModelBuildChiselRemovalPieces", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelBuildChiselRemovalPieces");
+        IList pieces = (IList)build.Invoke(null, [source, new double[] { 1, 1, 1 }, new double[] { 2, 2, 2 }, "stone", (Func<string, string>)(name => name)])!;
+
+        Assert.Equal(6, pieces.Count);
+        List<PrimitiveBox> boxes = pieces.Cast<object>()
+            .Select(piece => new PrimitiveBox((double[])GetMember(piece, "From"), (double[])GetMember(piece, "To")))
+            .ToList();
+
+        for (int left = 0; left < boxes.Count; left++)
+        {
+            for (int right = left + 1; right < boxes.Count; right++)
+            {
+                Assert.False(BoxesOverlap(boxes[left], boxes[right]), $"{boxes[left]} overlaps {boxes[right]}");
+            }
+        }
+
+        for (double x = 0.5; x < 3.0; x += 1.0)
+        {
+            for (double y = 0.5; y < 3.0; y += 1.0)
+            {
+                for (double z = 0.5; z < 3.0; z += 1.0)
+                {
+                    int expected = x == 1.5 && y == 1.5 && z == 1.5 ? 0 : 1;
+                    Assert.Equal(expected, boxes.Count(box => box.Contains(x, y, z)));
+                }
+            }
+        }
+
+        foreach (object piece in pieces)
+        {
+            Array faces = (Array)GetMember(piece, "Faces");
+            for (int faceIndex = 0; faceIndex < faces.Length; faceIndex++)
+            {
+                object face = faces.GetValue(faceIndex)!;
+                Assert.NotNull(face);
+                Assert.Equal("stone", GetMember(face, "Texture"));
+            }
+        }
+    }
+
     private static int NonZeroRotationAxes(PrimitiveElement element)
     {
         int axes = 0;
