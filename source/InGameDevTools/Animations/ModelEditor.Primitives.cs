@@ -107,22 +107,11 @@ public sealed partial class DebugWindowManager
         return !ModelPrimitiveSupportsExactMergedStyle(kind) || exactMergedSelected;
     }
 
-    private void DrawModelPrimitiveWindow()
+    private void DrawModelPrimitivePanel()
     {
         if (!_modelPrimitiveWindowOpen) return;
 
-        ImGui.SetNextWindowPos(new NVector2(420f, 140f), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new NVector2(420f, 0f), ImGuiCond.FirstUseEver);
-        ImGuiWindowFlags flags = ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.AlwaysAutoResize;
-        if (!ImGui.Begin("Prism helper##model-primitive-window", ref _modelPrimitiveWindowOpen, flags))
         {
-            ImGui.End();
-            return;
-        }
-
-        try
-        {
-            ImGui.SetWindowFontScale(_devToolsUiScale);
             if (_modelDoc == null)
             {
                 ImGui.TextDisabled("Open a shape or create a new one first.");
@@ -238,10 +227,6 @@ public sealed partial class DebugWindowManager
             {
                 _modelPrimitiveWindowOpen = false;
             }
-        }
-        finally
-        {
-            ImGui.End();
         }
     }
 

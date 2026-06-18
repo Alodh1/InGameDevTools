@@ -90,6 +90,8 @@ public sealed class InGameDevToolsModSystem : ModSystem
 
         api.Event.PlayerEntitySpawn += EnsurePlayerAnimationBehaviors;
         api.Event.LevelFinalize += EnsurePlayerAnimationBehaviors;
+        api.Event.LeaveWorld += CloseDevToolsOnLeaveWorld;
+        api.Event.LeftWorld += CloseDevToolsOnLeaveWorld;
         _ensureBehaviorsListener = api.Event.RegisterGameTickListener(_ => EnsurePlayerAnimationBehaviors(), 1000, 1000);
 
         if (config.OpenOnStartup)
@@ -120,6 +122,8 @@ public sealed class InGameDevToolsModSystem : ModSystem
         {
             _api.Event.PlayerEntitySpawn -= EnsurePlayerAnimationBehaviors;
             _api.Event.LevelFinalize -= EnsurePlayerAnimationBehaviors;
+            _api.Event.LeaveWorld -= CloseDevToolsOnLeaveWorld;
+            _api.Event.LeftWorld -= CloseDevToolsOnLeaveWorld;
             StopEnsureBehaviorsListener();
         }
 
@@ -160,6 +164,11 @@ public sealed class InGameDevToolsModSystem : ModSystem
 
         _api.Event.UnregisterGameTickListener(_ensureBehaviorsListener);
         _ensureBehaviorsListener = -1;
+    }
+
+    private void CloseDevToolsOnLeaveWorld()
+    {
+        _debugWindowManager?.CloseExternalDevTools();
     }
 
     private static void RegisterStandaloneClasses(ICoreAPI api)

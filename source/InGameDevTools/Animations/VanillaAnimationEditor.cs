@@ -85,6 +85,7 @@ public sealed partial class DebugWindowManager
     private bool _vanillaOverwriteExport;
     private string _vanillaEntityFilter = "";
     private string _vanillaBlockFilter = "";
+    private string _vanillaShapeFilter = "";
     private VanillaAnimationSourceMode _vanillaSourceMode = VanillaAnimationSourceMode.Entities;
     private VanillaAnimationSourceMode _vanillaSourceModeTabRequest = VanillaAnimationSourceMode.Entities;
     private bool _vanillaSourceModeTabRequestPending;

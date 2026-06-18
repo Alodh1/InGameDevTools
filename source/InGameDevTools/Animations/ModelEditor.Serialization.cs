@@ -488,22 +488,12 @@ public sealed partial class DebugWindowManager
 
         try
         {
-            string assetPath = _modelDoc.AssetPath.Trim().Replace('\\', '/');
-            if (string.IsNullOrWhiteSpace(assetPath))
+            if (!ModelComputeAuthoredSaveTarget(out _, out _, out string outputPath, out string newText, out string error))
             {
-                return SourceSaveResult.Fail("Model save failed: asset path is empty.");
+                return SourceSaveResult.Fail($"Model save failed: {error}");
             }
-            if (!assetPath.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase))
-            {
-                assetPath = "shapes/" + assetPath.TrimStart('/');
-            }
-            assetPath = EnsureJsonFilePath(assetPath);
-            _modelDoc.AssetPath = assetPath;
 
             ModelDocumentData doc = _modelDoc;
-            string newText = ModelSerializeDocument(doc, includeInvisible: true, indented: true);
-            string relativePath = Path.Combine("assets", doc.Domain, assetPath.Replace('/', Path.DirectorySeparatorChar));
-            string outputPath = GetToolAuthoredAssetPath("models", relativePath);
             string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : doc.SourceText;
             SourceSaveRequest request = new(
                 outputPath,
@@ -527,6 +517,135 @@ public sealed partial class DebugWindowManager
         {
             return SourceSaveResult.Fail($"Model save failed for {_modelDoc.DisplayPath}: {exception.Message}");
         }
+    }
+
+    /// <summary>
+    /// Resolves the authored output path and serialized JSON for the current document, normalizing the asset
+    /// path to a <c>shapes/....json</c> form. Shared by the diff-preview save and the one-click "Animate" save.
+    /// </summary>
+    private bool ModelComputeAuthoredSaveTarget(out string domain, out string assetPath, out string outputPath, out string newText, out string error)
+    {
+        domain = "";
+        assetPath = "";
+        outputPath = "";
+        newText = "";
+        error = "";
+        if (_modelDoc == null)
+        {
+            error = "no shape document open.";
+            return false;
+        }
+
+        string path = _modelDoc.AssetPath.Trim().Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            error = "asset path is empty.";
+            return false;
+        }
+        if (!path.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase))
+        {
+            path = "shapes/" + path.TrimStart('/');
+        }
+        path = EnsureJsonFilePath(path);
+        _modelDoc.AssetPath = path;
+
+        domain = _modelDoc.Domain;
+        assetPath = path;
+        newText = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: true);
+        string relativePath = Path.Combine("assets", domain, path.Replace('/', Path.DirectorySeparatorChar));
+        outputPath = GetToolAuthoredAssetPath("models", relativePath);
+        return true;
+    }
+
+    /// <summary>
+    /// One-click hand-off to the animation editor: writes the shape to the authored models folder (no diff
+    /// preview), then loads it into the animator's Shapes tab. Works on a generated creature that has no
+    /// animations yet - the animator can create the first one.
+    /// </summary>
+    private void ModelAnimateCurrentShape()
+    {
+        if (_modelDoc == null)
+        {
+            _modelStatus = "Open or create a shape first.";
+            return;
+        }
+
+        try
+        {
+            ModelPrepareAnimateAssetTarget();
+            if (!ModelComputeAuthoredSaveTarget(out string domain, out string assetPath, out string outputPath, out string newText, out string error))
+            {
+                _modelStatus = $"Animate failed: {error}";
+                return;
+            }
+
+            string writeError = WriteAuthoredFile(outputPath, newText);
+            if (!string.IsNullOrEmpty(writeError))
+            {
+                _modelStatus = $"Animate failed: {writeError}";
+                return;
+            }
+
+            _modelDoc.Dirty = false;
+            _modelDoc.SourceText = newText;
+            _modelDoc.IsNew = false;
+            _modelDoc.FromAuthoredFile = true;
+            _modelShapeIndex = null;
+            EnsureModelShapeIndex();
+
+            Shape? shape = JsonUtil.ToObject<Shape>(newText, domain);
+            if (shape == null)
+            {
+                _modelStatus = $"Saved {domain}:{assetPath}, but it could not be parsed for animation.";
+                return;
+            }
+
+            CommitPendingVanillaHistory();
+            _vanillaIndex.SetShapeDocument(_api, shape, domain, assetPath, $"{domain}:{assetPath}", TryParseJsonObject(newText));
+            RequestVanillaAnimationSourceTab(VanillaAnimationSourceMode.Shapes);
+            _vanillaShapeFilter = assetPath;
+            _vanillaDomainFilter = "";
+            ResetVanillaEntitySelectionState();
+            _activeDevToolsTab = DevToolsTab.Animations;
+            _modelStatus = $"Saved {domain}:{assetPath} and opened it in the animation editor.";
+        }
+        catch (Exception exception)
+        {
+            _modelStatus = $"Animate failed: {exception.Message}";
+        }
+    }
+
+    /// <summary>
+    /// When the document is still the untouched "new shape" template, retargets it to a creature-friendly
+    /// authored location (own mod domain, filename from the root element) so animating it does not overwrite
+    /// the shared template path.
+    /// </summary>
+    private void ModelPrepareAnimateAssetTarget()
+    {
+        if (_modelDoc == null) return;
+
+        string path = _modelDoc.AssetPath.Trim().Replace('\\', '/');
+        bool isTemplateDefault = string.Equals(_modelDoc.Domain, "game", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(path, "shapes/block/new-shape.json", StringComparison.OrdinalIgnoreCase);
+        if (!isTemplateDefault) return;
+
+        string name = ModelSanitizeFileName(_modelDoc.Roots.FirstOrDefault()?.Name);
+        _modelDoc.Domain = "ingamedevtools";
+        _modelDoc.AssetPath = $"shapes/{name}.json";
+    }
+
+    private static string ModelSanitizeFileName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "shape";
+
+        StringBuilder builder = new(name.Length);
+        foreach (char character in name.ToLowerInvariant())
+        {
+            builder.Append(char.IsLetterOrDigit(character) || character is '-' or '_' ? character : '-');
+        }
+
+        string sanitized = builder.ToString().Trim('-');
+        return string.IsNullOrEmpty(sanitized) ? "shape" : sanitized;
     }
 
     private void DrawModelRuntimeControls(ModelDocumentData doc)

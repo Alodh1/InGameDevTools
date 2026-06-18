@@ -30,6 +30,7 @@ public sealed partial class DebugWindowManager
 
         DrawAnimationSourceTab("Entities", VanillaAnimationSourceMode.Entities, deltaSeconds);
         DrawAnimationSourceTab("Blocks", VanillaAnimationSourceMode.Blocks, deltaSeconds);
+        DrawAnimationSourceTab("Shapes", VanillaAnimationSourceMode.Shapes, deltaSeconds);
         DrawAnimationSourceTab("CO", VanillaAnimationSourceMode.OverhaulLib, deltaSeconds);
 
         ImGui.EndTabBar();
@@ -111,6 +112,10 @@ public sealed partial class DebugWindowManager
         {
             _vanillaIndex.EnsureBlockList(_api);
         }
+        else if (_vanillaSourceMode == VanillaAnimationSourceMode.Shapes)
+        {
+            EnsureModelShapeIndex();
+        }
         else
         {
             _vanillaIndex.EnsureEntityList(_api);
@@ -173,7 +178,6 @@ public sealed partial class DebugWindowManager
         ImGui.BeginChild("##vanilla-animation-bottom-panel", new NVector2(available.X, bottomHeight), true);
         DrawVanillaTimeline(selected);
         ImGui.EndChild();
-
     }
 
     private void ResetVanillaLayout()
@@ -313,7 +317,12 @@ public sealed partial class DebugWindowManager
 
     private void DrawVanillaBrowser(IReadOnlyList<VanillaBrowserRow> rows)
     {
-        ImGui.SeparatorText(_vanillaSourceMode == VanillaAnimationSourceMode.Blocks ? "Block animations" : "Entity animations");
+        ImGui.SeparatorText(_vanillaSourceMode switch
+        {
+            VanillaAnimationSourceMode.Blocks => "Block animations",
+            VanillaAnimationSourceMode.Shapes => "Shape animations",
+            _ => "Entity animations"
+        });
 
         if (ImGuiLayoutHelper.DrawDomainCombo("Domain##vanilla-domain-filter", ref _vanillaDomainFilter, GetVanillaDomains()))
         {
@@ -324,14 +333,21 @@ public sealed partial class DebugWindowManager
         {
             DrawVanillaBlockSelector();
         }
+        else if (_vanillaSourceMode == VanillaAnimationSourceMode.Shapes)
+        {
+            DrawVanillaShapeSelector();
+        }
         else
         {
             DrawVanillaEntitySelector();
         }
 
-        string filterHint = _vanillaSourceMode == VanillaAnimationSourceMode.Blocks
-            ? "filter animations by code, block, kind"
-            : "filter animations by code, entity, kind";
+        string filterHint = _vanillaSourceMode switch
+        {
+            VanillaAnimationSourceMode.Blocks => "filter animations by code, block, kind",
+            VanillaAnimationSourceMode.Shapes => "filter animations by code, shape, kind",
+            _ => "filter animations by code, entity, kind"
+        };
         if (ImGui.InputTextWithHint("##vanilla-filter", filterHint, ref _vanillaFilter, 300))
         {
             InvalidateVanillaBrowserFilter();
@@ -450,6 +466,20 @@ public sealed partial class DebugWindowManager
             CreateVanillaAnimation(shapeDocument!);
         }
         if (!canCreate) ImGui.EndDisabled();
+
+        bool generatorOpen = _vanillaAnimationGeneratorWindowOpen;
+        if (generatorOpen) ImGui.PushStyleColor(ImGuiCol.Button, new NVector4(0.2f, 0.42f, 0.55f, 1f));
+        if (ImGui.Button("Procedural generator...##vanilla-gen-toggle", new NVector2(-1, 0)))
+        {
+            _vanillaAnimationGeneratorWindowOpen = !_vanillaAnimationGeneratorWindowOpen;
+        }
+        if (generatorOpen) ImGui.PopStyleColor();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Open a parameter-driven tool that generates keyframed oscillation or locomotion animations for this shape. " +
+                "It opens as a floating window on top of the editor.");
+        }
+        // The generator itself is drawn as a floating overlay after the main window (DrawDevToolsGeneratorOverlays).
     }
 
     private VanillaAnimationDocument? GetVanillaTargetShapeDocument()
@@ -530,16 +560,7 @@ public sealed partial class DebugWindowManager
             selectedRow = BuildVanillaBrowserRow(metadataEntry);
         }
 
-        _vanillaIndex.RebuildLinks();
-        InvalidateVanillaBrowserRows();
-        _vanillaBrowserQuickFilter = VanillaBrowserQuickFilter.All;
-        _vanillaFilter = code;
-        _vanillaShowDirtyOnly = false;
-        EnsureVanillaBrowserVisibleRows();
-
-        selectedRow ??= BuildVanillaBrowserRow(shapeEntry);
-        SelectVanillaRow(selectedRow);
-        BuildVanillaPreviewScene(selectedRow, rebuildMesh: true);
+        SelectAndPreviewVanillaShapeAnimation(code, shapeEntry, selectedRow);
         string setupStatus = TryApplyBlockAnimationSetup(shapeDocument, code);
         _vanillaStatus = string.IsNullOrWhiteSpace(setupStatus)
             ? $"Created animation '{code}' in {shapeDocument.DisplayPath}. Export the dirty document to save a copied JSON asset."
@@ -547,6 +568,24 @@ public sealed partial class DebugWindowManager
 
         _vanillaNewAnimationCode = NextVanillaAnimationDraftCode(code);
         _vanillaNewAnimationName = "";
+    }
+
+    /// <summary>
+    /// Shared tail of animation creation: refresh the browser, focus the filter on the new code, select the
+    /// row and rebuild the preview so it plays immediately. Used by manual creation and the generator.
+    /// </summary>
+    private void SelectAndPreviewVanillaShapeAnimation(string code, VanillaShapeAnimationEntry shapeEntry, VanillaBrowserRow? preferredRow = null)
+    {
+        _vanillaIndex.RebuildLinks();
+        InvalidateVanillaBrowserRows();
+        _vanillaBrowserQuickFilter = VanillaBrowserQuickFilter.All;
+        _vanillaFilter = code;
+        _vanillaShowDirtyOnly = false;
+        EnsureVanillaBrowserVisibleRows();
+
+        VanillaBrowserRow row = preferredRow ?? BuildVanillaBrowserRow(shapeEntry);
+        SelectVanillaRow(row);
+        BuildVanillaPreviewScene(row, rebuildMesh: true);
     }
 
     private string TryApplyBlockAnimationSetup(VanillaAnimationDocument shapeDocument, string animationCode)
@@ -768,6 +807,84 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private void DrawVanillaShapeSelector()
+    {
+        ImGui.SeparatorText("Shape");
+
+        ImGui.InputTextWithHint("##vanilla-shape-filter", "filter shapes", ref _vanillaShapeFilter, 240);
+
+        EnsureModelShapeIndex();
+        List<ModelShapeAssetEntry> entries = _modelShapeIndex ?? [];
+        string shapeFilter = _vanillaShapeFilter.Trim();
+        List<int> visible = [];
+        for (int index = 0; index < entries.Count; index++)
+        {
+            if (!ImGuiLayoutHelper.MatchesDomain(_vanillaDomainFilter, entries[index].Domain)) continue;
+            if (string.IsNullOrWhiteSpace(shapeFilter) || entries[index].SearchText.Contains(shapeFilter, StringComparison.OrdinalIgnoreCase))
+            {
+                visible.Add(index);
+            }
+        }
+
+        string preview = _vanillaIndex.SelectedShapeLabel ?? "Select shape";
+        if (ImGui.BeginCombo("Shape##vanilla-shape", preview))
+        {
+            const int maxVisible = 500;
+            int shown = 0;
+            foreach (int index in visible)
+            {
+                if (shown++ >= maxVisible)
+                {
+                    ImGui.TextDisabled($"... {visible.Count - maxVisible} more. Refine the filter.");
+                    break;
+                }
+
+                ModelShapeAssetEntry entry = entries[index];
+                bool selected = _vanillaIndex.IsSelectedShape($"{entry.Domain}:{entry.AssetPath}");
+                string suffix = entry.Authored ? " (authored)" : "";
+                if (ImGui.Selectable($"{entry.Display}{suffix}##vanilla-shape-{index}", selected))
+                {
+                    CommitPendingVanillaHistory();
+                    OpenShapeAssetInAnimator(entry);
+                    ResetVanillaEntitySelectionState();
+                }
+
+                if (selected)
+                {
+                    ImGui.SetItemDefaultFocus();
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        if (_vanillaIndex.HasSelectedShape)
+        {
+            ImGui.TextDisabled("Animations created here export to the shape's own JSON. Generated creatures appear as authored shapes.");
+        }
+    }
+
+    private void OpenShapeAssetInAnimator(ModelShapeAssetEntry entry)
+    {
+        try
+        {
+            string text = entry.Asset.ToText();
+            Shape? shape = JsonUtil.ToObject<Shape>(text, entry.Domain);
+            if (shape == null)
+            {
+                _vanillaStatus = $"Could not parse shape {entry.Display}.";
+                return;
+            }
+
+            _vanillaIndex.SetShapeDocument(_api, shape, entry.Domain, entry.AssetPath, entry.Display, TryParseJsonObject(text));
+            _vanillaStatus = _vanillaIndex.Status;
+        }
+        catch (Exception exception)
+        {
+            _vanillaStatus = $"Could not load shape {entry.Display}: {exception.Message}";
+        }
+    }
+
     private void DrawVanillaEntitySelector()
     {
         ImGui.SeparatorText("Entity");
@@ -921,9 +1038,12 @@ public sealed partial class DebugWindowManager
 
     private IEnumerable<string> GetVanillaDomains()
     {
-        IEnumerable<string> sourceDomains = _vanillaSourceMode == VanillaAnimationSourceMode.Blocks
-            ? _vanillaIndex.AllBlockDomains
-            : _vanillaIndex.AllEntityDomains;
+        IEnumerable<string> sourceDomains = _vanillaSourceMode switch
+        {
+            VanillaAnimationSourceMode.Blocks => _vanillaIndex.AllBlockDomains,
+            VanillaAnimationSourceMode.Shapes => (_modelShapeIndex ?? []).Select(entry => entry.Domain),
+            _ => _vanillaIndex.AllEntityDomains
+        };
 
         return sourceDomains
             .Concat(_vanillaIndex.Documents.Select(document => document.Domain));

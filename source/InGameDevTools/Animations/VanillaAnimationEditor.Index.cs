@@ -41,10 +41,18 @@ public sealed partial class DebugWindowManager
         public VanillaEntityOption? SelectedEntityOption { get; private set; }
         public VanillaBlockOption? SelectedBlockOption { get; private set; }
         public int SelectedMemberIndex { get; private set; } = -1;
+        public string? SelectedShapeKey { get; private set; }
+        public string? SelectedShapeLabel { get; private set; }
         public string? SelectedEntityLabel => SelectedEntityOption?.Label;
         public string? SelectedBlockLabel => SelectedBlockOption?.Label;
         public bool HasSelectedEntity => SelectedEntityOption != null && SelectedMemberIndex >= 0;
         public bool HasSelectedBlock => SelectedBlockOption != null;
+        public bool HasSelectedShape => SelectedShapeKey != null;
+
+        public bool IsSelectedShape(string key)
+        {
+            return SelectedShapeKey != null && string.Equals(SelectedShapeKey, key, StringComparison.OrdinalIgnoreCase);
+        }
         public string Status { get; private set; } = "Select an entity to index its vanilla animations.";
 
         public IReadOnlyList<VanillaEntityOption> GetEntityOptions(VanillaEntitySelectorMode mode, bool showHidden)
@@ -242,9 +250,67 @@ public sealed partial class DebugWindowManager
             SelectedEntityOption = null;
             SelectedBlockOption = null;
             SelectedMemberIndex = -1;
+            SelectedShapeKey = null;
+            SelectedShapeLabel = null;
             _documents.Clear();
             _shapeAnimationsByCode.Clear();
             Status = "Select an entity or block to index its vanilla animations.";
+        }
+
+        /// <summary>
+        /// Loads an already-parsed <see cref="Shape"/> (e.g. an authored model-editor shape or any indexed
+        /// shape asset) as the editable shape document, mirroring <see cref="IndexSelectedBlock"/> but without a
+        /// backing runtime block. New animations can be added even when the shape ships none.
+        /// </summary>
+        public void SetShapeDocument(ICoreClientAPI api, Shape shape, string domain, string assetPath, string label, JObject? sourceJson)
+        {
+            try
+            {
+                ClearSelection();
+
+                shape.ResolveReferences(api.Logger, label);
+                shape.Animations ??= [];
+                string normalizedPath = EnsureJsonPath(assetPath);
+
+                VanillaAnimationDocument shapeDocument = new()
+                {
+                    Kind = VanillaDocumentKind.Shape,
+                    Domain = domain,
+                    AssetPath = normalizedPath,
+                    DisplayPath = label,
+                    EntityCode = label,
+                    Shape = shape,
+                    SourceJson = sourceJson,
+                    GroupLabel = label,
+                    RuntimeGroupKind = "shape"
+                };
+
+                for (int index = 0; index < shape.Animations.Length; index++)
+                {
+                    VanillaAnimation animation = CloneVanillaAnimation(shape.Animations[index]);
+                    if (string.IsNullOrWhiteSpace(animation.Code)) animation.Code = animation.Name;
+                    VanillaShapeAnimationEntry entry = new(shapeDocument, index, animation, GetSourceArrayElement(sourceJson, "animations", index));
+                    shapeDocument.ShapeAnimations.Add(entry);
+                    RegisterShapeAnimation(entry);
+                }
+
+                _documents.Add(shapeDocument);
+                shapeDocument.MarkClean();
+                RebuildLinks();
+
+                SelectedShapeKey = $"{domain}:{normalizedPath}";
+                SelectedShapeLabel = label;
+                Status = $"Loaded shape {label}: {shapeDocument.ShapeAnimations.Count} animation(s). New animations can be added even if the shape has none.";
+            }
+            catch (Exception exception)
+            {
+                _documents.Clear();
+                _shapeAnimationsByCode.Clear();
+                SelectedShapeKey = null;
+                SelectedShapeLabel = null;
+                Status = $"Could not load shape {label}: {exception.Message}";
+                LoggerUtil.Warn(api, this, $"Could not load shape '{label}' for animation: {exception}");
+            }
         }
 
         private static IEnumerable<VanillaEntityOption> BuildGroupedEntityOptions(IReadOnlyList<VanillaEntityMember> members)

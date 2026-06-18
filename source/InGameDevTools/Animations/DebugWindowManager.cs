@@ -38,6 +38,7 @@ public sealed partial class DebugWindowManager : IDisposable
         else
         {
             _imguiModSystem.Draw += DrawEditor;
+            _imguiModSystem.Closed += CloseExternalDevTools;
             _drawSubscribed = true;
         }
         _transformGizmoRenderer = new TransformGizmoRenderer(api, this);
@@ -70,9 +71,12 @@ public sealed partial class DebugWindowManager : IDisposable
             _inputSuppressionTickListener = -1;
         }
 
+        SetEditorViewportSuppression(false);
+
         if (!_drawSubscribed || _imguiModSystem == null) return;
 
         _imguiModSystem.Draw -= DrawEditor;
+        _imguiModSystem.Closed -= CloseExternalDevTools;
         _drawSubscribed = false;
     }
 
@@ -849,6 +853,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _showAnimationEditor = !_showAnimationEditor;
         if (_showAnimationEditor && !wasOpen)
         {
+            _imguiModSystem?.Show();
             _devToolsCollapsed = false;
             _selectVanillaAnimationsTabOnNextDraw = true;
         }
@@ -863,6 +868,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
     public bool OpenExternalDevTools()
     {
+        _imguiModSystem?.Show();
         _showAnimationEditor = true;
         _devToolsCollapsed = false;
         _selectVanillaAnimationsTabOnNextDraw = true;
@@ -871,10 +877,105 @@ public sealed partial class DebugWindowManager : IDisposable
 
     public bool ToggleExternalDevTools() => ToggleDevTools();
 
+    public void CloseExternalDevTools()
+    {
+        SetEditorViewportSuppression(false);
+        _showAnimationEditor = false;
+        _devToolsCollapsed = false;
+        _vanillaAnimationGeneratorWindowOpen = false;
+        _modelCreatureWindowOpen = false;
+        _modelPrimitiveWindowOpen = false;
+        _vanillaViewportPoppedOut = false;
+        OnDebugEditorClosed();
+        RestoreExpandedEditorInputSuppression();
+        RestoreWorldgenPreviewForEditorTeardown("devtools closed");
+        ResetDevToolsKeyboardState();
+        ClearActiveTransformGizmo();
+        _imguiAnimationViewportRenderer?.SetVisible(false);
+        _vanillaPreviewRenderer?.SetVisible(false);
+    }
+
     public string GetExternalDevToolsStatus()
     {
         string state = _showAnimationEditor ? _devToolsCollapsed ? "collapsed" : "open" : "closed";
         return $"In-game devtools ImGui editor {state}.";
+    }
+
+    // VSImGui force-enables ImGui multi-viewports (OS-level secondary windows). In fullscreen, GLFW
+    // auto-iconifies (minimizes) the main game window the instant focus moves to one of those secondary
+    // windows - which happens whenever a dropdown, tooltip or floating panel spills past the game window's
+    // bounds. Our editor is a full-screen overlay whose windows and dropdowns all live inside the main
+    // window, so we never need OS viewports while it is open: clearing the flag keeps every ImGui window
+    // merged into the main one and removes the minimize entirely. VSImGui's controller still calls
+    // UpdatePlatformWindows unconditionally, but that is a no-op while the flag is clear. The original state
+    // is restored when the editor closes or is disposed.
+    private bool _editorViewportsSuppressed;
+
+    private void SetEditorViewportSuppression(bool suppress)
+    {
+        // Skip touching the ImGui context when nothing changes (also keeps Dispose safe if the editor was
+        // already closed before shutdown).
+        if (suppress == _editorViewportsSuppressed) return;
+
+        ImGuiIOPtr io = ImGui.GetIO();
+        if (suppress)
+        {
+            // Don't claim ownership if some other consumer already turned viewports off.
+            if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) == 0) return;
+            io.ConfigFlags &= ~ImGuiConfigFlags.ViewportsEnable;
+            _editorViewportsSuppressed = true;
+        }
+        else
+        {
+            io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;
+            _editorViewportsSuppressed = false;
+        }
+    }
+
+    private bool AnyDevToolsGeneratorOverlayOpen =>
+        _modelCreatureWindowOpen || _modelPrimitiveWindowOpen || _playerModelWindowOpen || _vanillaAnimationGeneratorWindowOpen;
+
+    /// <summary>
+    /// Begins a floating, resizable tool window that hovers on top of the editor instead of stealing layout
+    /// space from it. Returns whether the body is visible; callers MUST always pair this with ImGui.End().
+    /// The visible label may change without resetting position/size because the persistent id (after '###')
+    /// stays fixed.
+    /// </summary>
+    private bool BeginDevToolsFloatingTool(string titleId, ref bool open, NVector2 defaultSize)
+    {
+        ImGuiViewportPtr viewport = ImGui.GetMainViewport();
+        NVector2 work = viewport.WorkSize;
+        NVector2 workPos = viewport.WorkPos;
+        NVector2 size = new(
+            Math.Min(defaultSize.X * _devToolsUiScale, work.X * 0.95f),
+            Math.Min(defaultSize.Y * _devToolsUiScale, work.Y * 0.9f));
+
+        ImGui.SetNextWindowSizeConstraints(new NVector2(300f, 180f), new NVector2(work.X * 0.96f, work.Y * 0.94f));
+        ImGui.SetNextWindowSize(size, ImGuiCond.FirstUseEver);
+        // Anchor near the top-right so the left browser/tree panels stay reachable underneath.
+        ImGui.SetNextWindowPos(new NVector2(workPos.X + work.X - size.X - 24f, workPos.Y + 86f), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowBgAlpha(0.97f);
+
+        bool visible = ImGui.Begin(titleId, ref open, ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoCollapse);
+        if (visible)
+        {
+            ImGui.SetWindowFontScale(_devToolsUiScale);
+        }
+        return visible;
+    }
+
+    // Generator tool windows are drawn after the main window closes (like the popped-out viewport) so they
+    // float on top as independent windows rather than nesting inside panels and reserving space.
+    private void DrawDevToolsGeneratorOverlays()
+    {
+        if (_activeDevToolsTab == DevToolsTab.Models)
+        {
+            DrawModelGeneratorOverlay();
+        }
+        else if (_activeDevToolsTab == DevToolsTab.Animations)
+        {
+            DrawVanillaAnimationGeneratorPanel();
+        }
     }
 
     private CallbackGUIStatus DrawEditor(float deltaSeconds)
@@ -884,14 +985,24 @@ public sealed partial class DebugWindowManager : IDisposable
         _imguiAnimationViewportRenderer?.SetVisible(false);
         _vanillaPreviewRenderer?.SetVisible(false);
 
+        if (_showAnimationEditor && !IsDevToolsWorldAvailable())
+        {
+            CloseExternalDevTools();
+            return CallbackGUIStatus.Closed;
+        }
+
         if (!_showAnimationEditor)
         {
+            SetEditorViewportSuppression(false);
             OnDebugEditorClosed();
             RestoreExpandedEditorInputSuppression();
             ResetDevToolsKeyboardState();
             return CallbackGUIStatus.Closed;
         }
 
+        // The editor renders this frame (collapsed or expanded); keep OS viewports off so it cannot minimize
+        // the game in fullscreen.
+        SetEditorViewportSuppression(true);
         UpdateDevToolsKeyboardState();
 
         NVector2 displaySize = ImGui.GetIO().DisplaySize;
@@ -919,8 +1030,10 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGui.SetNextWindowSize(displaySize, ImGuiCond.Always);
         ImGui.SetNextWindowBgAlpha(0.96f);
         windowFlags |= ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize;
-        if (_vanillaViewportPoppedOut)
+        if (_vanillaViewportPoppedOut || AnyDevToolsGeneratorOverlayOpen)
         {
+            // Keep the full-screen background from jumping above the floating viewport / generator windows
+            // when its own content is clicked.
             windowFlags |= ImGuiWindowFlags.NoBringToFrontOnFocus;
         }
 
@@ -1045,11 +1158,29 @@ public sealed partial class DebugWindowManager : IDisposable
         }
 
         DrawVanillaPoppedOutViewport();
+        DrawDevToolsGeneratorOverlays();
 
         _detachedEditorCamera?.Update(deltaSeconds, _showAnimationEditor);
         FlushDevToolsConfigSave(force: false);
 
         return _showAnimationEditor ? CallbackGUIStatus.GrabMouse : CallbackGUIStatus.Closed;
+    }
+
+    private bool IsDevToolsWorldAvailable()
+    {
+        try
+        {
+            if (_api.World is ClientMain { exitToMainMenu: true } or ClientMain { exitToDisconnectScreen: true } or ClientMain { threadsShouldExit: true } or ClientMain { disposed: true })
+            {
+                return false;
+            }
+
+            return _api.World?.Player?.Entity != null;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void UpdateDevToolsKeyboardState()

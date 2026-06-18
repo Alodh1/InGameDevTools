@@ -416,6 +416,8 @@ public sealed partial class DebugWindowManager
             }
 
             DrawModelPrimitiveGhost(drawList, camera);
+            DrawModelCreatureGhost(drawList, camera);
+            DrawPlayerModelGhost(drawList, camera);
 
             if (hovered && !gizmoConsumedMouse && !_modelGizmoDragging && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {

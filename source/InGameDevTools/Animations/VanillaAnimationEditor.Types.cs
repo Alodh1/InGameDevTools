@@ -149,6 +149,7 @@ public sealed partial class DebugWindowManager
     {
         Entities,
         Blocks,
+        Shapes,
         OverhaulLib
     }
 

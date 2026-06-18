@@ -15,6 +15,7 @@ namespace InGameDevTools.Animations;
 public sealed partial class DebugWindowManager
 {
     private static readonly string[] ModelFaceNames = ["north", "east", "south", "west", "up", "down"];
+    private static readonly string[] ModelGeneratorToolLabels = ["None", "Prism helper", "Creature generator", "PlayerModel generator"];
     private const int ModelBrowserMaxVisibleEntries = 600;
     private const int ModelHistoryLimit = 120;
     private const int ModelCutMaxPiecesPerElement = 512;
@@ -424,7 +425,6 @@ public sealed partial class DebugWindowManager
         DrawModelInspectorPanel(new NVector2(rightWidth, height));
 
         DrawModelDiscardPopup();
-        DrawModelPrimitiveWindow();
         ModelMaybeAutoApplyLive(force: false);
         _modelDiagnostics.Draw("models-tab", showDiagnostics);
     }
@@ -467,18 +467,7 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SameLine();
-        bool primitiveOpen = _modelPrimitiveWindowOpen;
-        if (primitiveOpen) ImGui.PushStyleColor(ImGuiCol.Button, new NVector4(0.55f, 0.42f, 0.2f, 1f));
-        if (ImGui.Button("Prism helper##model-primitive-toggle"))
-        {
-            _modelPrimitiveWindowOpen = !_modelPrimitiveWindowOpen;
-            _modelPrimitivePreviewDirty = true;
-        }
-        if (primitiveOpen) ImGui.PopStyleColor();
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Generate smooth shapes (spheres, cylinders, cones, tori, arches) out of cuboids, with a live viewport preview.");
-        }
+        DrawModelGeneratorToolPicker("##model-generator-toolbar");
 
         ImGui.SameLine();
         if (ImGui.Button("Shortcuts##model-shortcuts"))
@@ -564,6 +553,85 @@ public sealed partial class DebugWindowManager
 
         DrawModelChiselToolbar();
         ImGui.Separator();
+    }
+
+    private void DrawModelGeneratorToolPicker(string id)
+    {
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled("Generator");
+        ImGui.SameLine();
+        int tool = _modelPrimitiveWindowOpen ? 1 : _modelCreatureWindowOpen ? 2 : _playerModelWindowOpen ? 3 : 0;
+        ImGui.SetNextItemWidth(160f * _devToolsUiScale);
+        if (ImGui.Combo(id, ref tool, ModelGeneratorToolLabels, ModelGeneratorToolLabels.Length))
+        {
+            SetModelGeneratorTool(tool);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Show a model generator inside the main editor.");
+        }
+    }
+
+    private void SetModelGeneratorTool(int tool)
+    {
+        bool primitiveOpen = tool == 1;
+        bool creatureOpen = tool == 2;
+        bool playerModelOpen = tool == 3;
+        if (primitiveOpen && !_modelPrimitiveWindowOpen)
+        {
+            _modelPrimitivePreviewDirty = true;
+        }
+        if (creatureOpen && !_modelCreatureWindowOpen)
+        {
+            _modelCreaturePreviewDirty = true;
+        }
+        if (playerModelOpen && !_playerModelWindowOpen)
+        {
+            _playerModelPreviewDirty = true;
+        }
+
+        _modelPrimitiveWindowOpen = primitiveOpen;
+        _modelCreatureWindowOpen = creatureOpen;
+        _playerModelWindowOpen = playerModelOpen;
+    }
+
+    // Floating tool window (drawn on top of the editor) rather than an inline drawer that ate a large slice
+    // of the Models tab. Drawn after the main window via DrawDevToolsGeneratorOverlays.
+    private void DrawModelGeneratorOverlay()
+    {
+        if (!_modelPrimitiveWindowOpen && !_modelCreatureWindowOpen && !_playerModelWindowOpen) return;
+
+        bool open = true;
+        // The visible label switches with the active tool while the id after '###' stays fixed, so the window
+        // keeps its position and size when you toggle between the tools.
+        string title = _modelCreatureWindowOpen
+            ? "Creature generator###model-generator-overlay"
+            : _playerModelWindowOpen
+                ? "PlayerModel generator###model-generator-overlay"
+                : "Prism helper###model-generator-overlay";
+        if (BeginDevToolsFloatingTool(title, ref open, new NVector2(480f, 580f)))
+        {
+            DrawModelGeneratorToolPicker("##model-generator-overlay-picker");
+            ImGui.Separator();
+            if (_modelPrimitiveWindowOpen)
+            {
+                DrawModelPrimitivePanel();
+            }
+            else if (_modelCreatureWindowOpen)
+            {
+                DrawModelCreaturePanel();
+            }
+            else if (_playerModelWindowOpen)
+            {
+                DrawPlayerModelPanel();
+            }
+        }
+        ImGui.End();
+
+        if (!open)
+        {
+            SetModelGeneratorTool(0);
+        }
     }
 
     private void DrawModelChiselToolbar()
@@ -1280,8 +1348,7 @@ public sealed partial class DebugWindowManager
             ImGui.SameLine();
             if (ImGui.SmallButton("Add primitive##model-tree-add-primitive"))
             {
-                _modelPrimitiveWindowOpen = true;
-                _modelPrimitivePreviewDirty = true;
+                SetModelGeneratorTool(1);
             }
             if (ImGui.IsItemHovered())
             {
@@ -1679,6 +1746,16 @@ public sealed partial class DebugWindowManager
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Write the shape JSON to the InGameDevTools authored models folder with a diff preview.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Animate this shape##model-animate"))
+        {
+            ModelAnimateCurrentShape();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Save this shape to the authored models folder and open it in the animation editor's Shapes tab. If it has no animations yet, you can create the first one there.");
         }
 
         DrawModelRuntimeControls(doc);
