@@ -180,4 +180,70 @@ public sealed class DevToolsConfigLibDocumentTests
             Path.Combine("assets", "example-mod", "compatibility", "meteoricsteel", "configlib.json"),
             document.BuildPatchAssetRelativePath());
     }
+
+    [Fact]
+    public void ScratchDocument_GeneratesPatchModConfigAndCSharpLoader()
+    {
+        DevToolsConfigLibDocumentDraft document = DevToolsConfigLibDocumentDraft.Scratch("Example Mod");
+        document.Settings.Clear();
+        document.Settings.Add(DevToolsConfigLibSettingDraft.FromInferred("enabled", "boolean", new JValue(true)));
+        document.Settings.Add(DevToolsConfigLibSettingDraft.FromInferred("combat/damageMultiplier", "float", new JValue(1.5)));
+        document.Settings.Add(DevToolsConfigLibSettingDraft.FromInferred("display/name", "string", new JValue("Longsword")));
+
+        JObject patch = JObject.Parse(document.ToPatchJson());
+        JObject modConfig = JObject.Parse(document.ToModConfigJson(includedOnly: true));
+        string csharp = document.ToCSharpLoaderCode();
+
+        Assert.Equal("enabled", patch["settings"]![0]!["code"]!.ToString());
+        Assert.True(modConfig["enabled"]!.Value<bool>());
+        Assert.Equal(1.5, modConfig["combat"]!["damageMultiplier"]!.Value<double>());
+        Assert.Contains("namespace ExampleMod;", csharp, StringComparison.Ordinal);
+        Assert.Contains("public sealed class ExampleModConfig", csharp, StringComparison.Ordinal);
+        Assert.Contains("public CombatConfig Combat { get; set; } = new();", csharp, StringComparison.Ordinal);
+        Assert.Contains("public float DamageMultiplier { get; set; } = 1.5f;", csharp, StringComparison.Ordinal);
+        Assert.Contains("public const string FileName = \"example-mod.json\";", csharp, StringComparison.Ordinal);
+        Assert.Contains("api.LoadModConfig<ExampleModConfig>(FileName)", csharp, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CSharpLoader_GeneratesJsonLinqTypesForObjectAndArraySettings()
+    {
+        DevToolsConfigLibDocumentDraft document = DevToolsConfigLibDocumentDraft.Empty("complex");
+        document.Settings.Add(DevToolsConfigLibSettingDraft.FromInferred("advanced/options", "object", JObject.Parse("""{ "speed": 2 }""")));
+        document.Settings.Add(DevToolsConfigLibSettingDraft.FromInferred("entries", "array", JArray.Parse("""[ "a", "b" ]""")));
+
+        string csharp = document.ToCSharpLoaderCode();
+
+        Assert.Contains("using Newtonsoft.Json.Linq;", csharp, StringComparison.Ordinal);
+        Assert.Contains("public JObject Options { get; set; } = JObject.Parse(\"{\\\"speed\\\":2}\");", csharp, StringComparison.Ordinal);
+        Assert.Contains("public JArray Entries { get; set; } = JArray.Parse(\"[\\\"a\\\",\\\"b\\\"]\");", csharp, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CSharpValidation_CatchesBadNamesAndDuplicateGeneratedProperties()
+    {
+        DevToolsConfigLibDocumentDraft document = DevToolsConfigLibDocumentDraft.Empty("example");
+        document.CSharpNamespace = "bad namespace";
+        document.LoaderClassName = "";
+        document.Settings.Add(DevToolsConfigLibSettingDraft.FromInferred("foo-bar", "boolean", new JValue(true)));
+        document.Settings.Add(DevToolsConfigLibSettingDraft.FromInferred("foo_bar", "boolean", new JValue(false)));
+
+        List<DevToolsConfigLibValidationIssue> issues = document.Validate(modConfigIncludedOnly: false);
+
+        Assert.Contains(issues, issue => issue.Severity == DevToolsConfigLibIssueSeverity.Warning && issue.Message.Contains("namespace", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(issues, issue => issue.Severity == DevToolsConfigLibIssueSeverity.Error && issue.Message.Contains("Loader class name", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(issues, issue => issue.Severity == DevToolsConfigLibIssueSeverity.Error && issue.Message.Contains("property name conflict", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void CSharpOutputPath_NormalizesUnderAuthoredConfigLibSourceFolder()
+    {
+        DevToolsConfigLibDocumentDraft document = DevToolsConfigLibDocumentDraft.Empty("example");
+        document.CSharpNamespace = "Example.Mod.Config";
+        document.LoaderClassName = "ExampleConfigLoader";
+
+        Assert.Equal(
+            Path.Combine("src", "Example", "Mod", "Config", "ExampleConfigLoader.cs"),
+            document.BuildCSharpRelativePath());
+    }
 }

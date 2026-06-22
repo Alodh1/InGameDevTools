@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -22,6 +23,10 @@ internal sealed class DevToolsConfigLibDocumentDraft
     public string Domain { get; set; } = "generatedconfig";
     public string RelativePath { get; set; } = "config/configlib-patches.json";
     public string ModConfigRelativePath { get; set; } = "generatedconfig.json";
+    public string CSharpNamespace { get; set; } = "GeneratedConfig";
+    public string ConfigClassName { get; set; } = "GeneratedConfigConfig";
+    public string LoaderClassName { get; set; } = "GeneratedConfigLoader";
+    public string CurrentPropertyName { get; set; } = "Current";
     public int Version { get; set; }
     public List<DevToolsConfigLibSettingDraft> Settings { get; } = [];
     public List<DevToolsConfigLibFormattingDraft> Formatting { get; } = [];
@@ -30,12 +35,28 @@ internal sealed class DevToolsConfigLibDocumentDraft
 
     public static DevToolsConfigLibDocumentDraft Empty(string domain = "generatedconfig")
     {
+        string sanitizedDomain = SanitizeDomain(domain);
+        string csharpStem = ToPascalIdentifier(sanitizedDomain, "GeneratedConfig");
         return new()
         {
-            Domain = SanitizeDomain(domain),
+            Domain = sanitizedDomain,
             RelativePath = "config/configlib-patches.json",
-            ModConfigRelativePath = $"{SanitizeDomain(domain)}.json"
+            ModConfigRelativePath = $"{sanitizedDomain}.json",
+            CSharpNamespace = csharpStem,
+            ConfigClassName = $"{csharpStem}Config",
+            LoaderClassName = $"{csharpStem}ConfigLoader"
         };
+    }
+
+    public static DevToolsConfigLibDocumentDraft Scratch(string domain = "generatedconfig")
+    {
+        DevToolsConfigLibDocumentDraft document = Empty(domain);
+        DevToolsConfigLibSettingDraft setting = DevToolsConfigLibSettingDraft.FromInferred("enabled", "boolean", new JValue(true));
+        setting.Title = "Enabled";
+        setting.Comment = "Example setting generated for a new scratch config.";
+        setting.Weight = 1;
+        document.Settings.Add(setting);
+        return document;
     }
 
     public static DevToolsConfigLibDocumentDraft FromPatchJson(string text, string domain, string relativePath)
@@ -47,6 +68,7 @@ internal sealed class DevToolsConfigLibDocumentDraft
             RelativePath = NormalizeRelativePath(relativePath, "config/configlib-patches.json"),
             Version = root["version"]?.Value<int?>() ?? 0
         };
+        document.ApplyCSharpDefaultsFromDomain();
 
         foreach (JProperty property in root.Properties())
         {
@@ -187,6 +209,47 @@ internal sealed class DevToolsConfigLibDocumentDraft
         return lines.Count == 0 ? "No enabled ConfigLib rows." : string.Join(Environment.NewLine, lines);
     }
 
+    public string ToCSharpLoaderCode()
+    {
+        CSharpConfigNode root = BuildCSharpConfigNode(out bool needsJsonLinq, out _);
+        string namespaceName = SanitizeNamespace(CSharpNamespace, "GeneratedConfig");
+        string configClass = SanitizeCSharpTypeName(ConfigClassName, "GeneratedConfigConfig");
+        string loaderClass = SanitizeCSharpTypeName(LoaderClassName, "GeneratedConfigLoader");
+        string currentProperty = SanitizeCSharpPropertyName(CurrentPropertyName, "Current");
+        string fileName = NormalizeRelativePath(ModConfigRelativePath, $"{SanitizeDomain(Domain)}.json");
+
+        StringBuilder sb = new();
+        if (needsJsonLinq)
+        {
+            sb.AppendLine("using Newtonsoft.Json.Linq;");
+        }
+
+        sb.AppendLine("using Vintagestory.API.Common;");
+        sb.AppendLine();
+        sb.AppendLine($"namespace {namespaceName};");
+        sb.AppendLine();
+        AppendCSharpConfigClass(sb, root, configClass, 0);
+        sb.AppendLine();
+        sb.AppendLine($"public static class {loaderClass}");
+        sb.AppendLine("{");
+        sb.AppendLine($"    public const string FileName = {ToCSharpStringLiteral(fileName)};");
+        sb.AppendLine($"    public static {configClass} {currentProperty} {{ get; private set; }} = new();");
+        sb.AppendLine();
+        sb.AppendLine($"    public static {configClass} Load(ICoreAPI api)");
+        sb.AppendLine("    {");
+        sb.AppendLine($"        {currentProperty} = api.LoadModConfig<{configClass}>(FileName) ?? new {configClass}();");
+        sb.AppendLine($"        api.StoreModConfig({currentProperty}, FileName);");
+        sb.AppendLine($"        return {currentProperty};");
+        sb.AppendLine("    }");
+        sb.AppendLine();
+        sb.AppendLine("    public static void Save(ICoreAPI api)");
+        sb.AppendLine("    {");
+        sb.AppendLine($"        api.StoreModConfig({currentProperty}, FileName);");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        return sb.ToString();
+    }
+
     public List<DevToolsConfigLibValidationIssue> Validate(bool modConfigIncludedOnly)
     {
         List<DevToolsConfigLibValidationIssue> issues = [];
@@ -235,6 +298,7 @@ internal sealed class DevToolsConfigLibDocumentDraft
         }
 
         if (enabledCount == 0) issues.Add(new(DevToolsConfigLibIssueSeverity.Error, "At least one setting must be enabled before saving."));
+        ValidateCSharpOutput(issues);
         return issues;
     }
 
@@ -246,6 +310,23 @@ internal sealed class DevToolsConfigLibDocumentDraft
     public string BuildModConfigRelativePath()
     {
         return Path.Combine("ModConfig", NormalizeRelativePath(ModConfigRelativePath, $"{SanitizeDomain(Domain)}.json").Replace('/', Path.DirectorySeparatorChar));
+    }
+
+    public string BuildCSharpRelativePath()
+    {
+        string namespaceName = SanitizeNamespace(CSharpNamespace, "GeneratedConfig");
+        string loaderClass = SanitizeCSharpTypeName(LoaderClassName, "GeneratedConfigLoader");
+        string namespacePath = namespaceName.Replace('.', Path.DirectorySeparatorChar);
+        return Path.Combine("src", namespacePath, $"{loaderClass}.cs");
+    }
+
+    public void ApplyCSharpDefaultsFromDomain()
+    {
+        string stem = ToPascalIdentifier(SanitizeDomain(Domain), "GeneratedConfig");
+        CSharpNamespace = stem;
+        ConfigClassName = $"{stem}Config";
+        LoaderClassName = $"{stem}ConfigLoader";
+        CurrentPropertyName = "Current";
     }
 
     public static string ExtractRelativePatchPath(string assetPath)
@@ -538,6 +619,257 @@ internal sealed class DevToolsConfigLibDocumentDraft
         char[] invalid = Path.GetInvalidFileNameChars();
         return new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray());
     }
+
+    private void ValidateCSharpOutput(List<DevToolsConfigLibValidationIssue> issues)
+    {
+        if (string.IsNullOrWhiteSpace(CSharpNamespace))
+        {
+            issues.Add(new(DevToolsConfigLibIssueSeverity.Error, "C# namespace is required."));
+        }
+        else
+        {
+            string sanitized = SanitizeNamespace(CSharpNamespace, "GeneratedConfig");
+            if (!string.Equals(CSharpNamespace.Trim(), sanitized, StringComparison.Ordinal))
+            {
+                issues.Add(new(DevToolsConfigLibIssueSeverity.Warning, $"C# namespace will be saved as '{sanitized}'."));
+            }
+        }
+
+        ValidateCSharpTypeName(ConfigClassName, "Config class name", "GeneratedConfigConfig", issues);
+        ValidateCSharpTypeName(LoaderClassName, "Loader class name", "GeneratedConfigLoader", issues);
+        ValidateCSharpPropertyName(CurrentPropertyName, "Static instance property name", "Current", issues);
+
+        BuildCSharpConfigNode(out _, out List<string> duplicateProperties);
+        foreach (string duplicate in duplicateProperties.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            issues.Add(new(DevToolsConfigLibIssueSeverity.Error, $"Generated C# property name conflict: {duplicate}."));
+        }
+    }
+
+    private static void ValidateCSharpTypeName(string value, string label, string fallback, List<DevToolsConfigLibValidationIssue> issues)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            issues.Add(new(DevToolsConfigLibIssueSeverity.Error, $"{label} is required."));
+            return;
+        }
+
+        string sanitized = SanitizeCSharpTypeName(value, fallback);
+        if (!string.Equals(value.Trim(), sanitized, StringComparison.Ordinal))
+        {
+            issues.Add(new(DevToolsConfigLibIssueSeverity.Warning, $"{label} will be saved as '{sanitized}'."));
+        }
+    }
+
+    private static void ValidateCSharpPropertyName(string value, string label, string fallback, List<DevToolsConfigLibValidationIssue> issues)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            issues.Add(new(DevToolsConfigLibIssueSeverity.Error, $"{label} is required."));
+            return;
+        }
+
+        string sanitized = SanitizeCSharpPropertyName(value, fallback);
+        if (!string.Equals(value.Trim(), sanitized, StringComparison.Ordinal))
+        {
+            issues.Add(new(DevToolsConfigLibIssueSeverity.Warning, $"{label} will be saved as '{sanitized}'."));
+        }
+    }
+
+    private CSharpConfigNode BuildCSharpConfigNode(out bool needsJsonLinq, out List<string> duplicateProperties)
+    {
+        CSharpConfigNode root = new("", SanitizeCSharpTypeName(ConfigClassName, "GeneratedConfigConfig"));
+        needsJsonLinq = false;
+        duplicateProperties = [];
+
+        List<DevToolsConfigLibSettingDraft> enabledSettings = Settings
+            .Where(setting => setting.Enabled && !string.IsNullOrWhiteSpace(setting.Code))
+            .ToList();
+        List<string> codes = enabledSettings.Select(setting => setting.Code.Trim()).ToList();
+
+        foreach (DevToolsConfigLibSettingDraft setting in enabledSettings)
+        {
+            if (!setting.TryGetDefaultToken(out JToken? defaultToken, out _) || defaultToken == null) continue;
+            string code = setting.Code.Trim();
+            if (HasDescendantSetting(code, codes)) continue;
+
+            string[] parts = code.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0) continue;
+            bool canNest = parts.Length > 1 && parts.All(IsPracticalNestedCSharpPart);
+            CSharpConfigNode target = root;
+            string propertyName;
+            if (canNest)
+            {
+                for (int index = 0; index < parts.Length - 1; index++)
+                {
+                    string childProperty = SanitizeCSharpPropertyName(parts[index], $"Group{index + 1}");
+                    if (target.Properties.Any(property => property.Name.Equals(childProperty, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        duplicateProperties.Add($"{target.ClassName}.{childProperty}");
+                    }
+
+                    if (!target.Children.TryGetValue(childProperty, out CSharpConfigNode? child))
+                    {
+                        child = new(childProperty, $"{childProperty}Config");
+                        target.Children[childProperty] = child;
+                    }
+
+                    target = child;
+                }
+
+                propertyName = SanitizeCSharpPropertyName(parts[^1], "Setting");
+            }
+            else
+            {
+                propertyName = SanitizeCSharpPropertyName(string.Join(" ", parts), "Setting");
+            }
+
+            if (target.Children.ContainsKey(propertyName) ||
+                target.Properties.Any(property => property.Name.Equals(propertyName, StringComparison.OrdinalIgnoreCase)))
+            {
+                duplicateProperties.Add($"{target.ClassName}.{propertyName}");
+            }
+
+            CSharpProperty property = BuildCSharpProperty(setting, propertyName, defaultToken);
+            needsJsonLinq |= property.NeedsJsonLinq;
+            target.Properties.Add(property);
+        }
+
+        return root;
+    }
+
+    private static bool HasDescendantSetting(string code, IReadOnlyList<string> codes)
+    {
+        string prefix = code.TrimEnd('/') + "/";
+        return codes.Any(candidate => candidate.Length > prefix.Length && candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsPracticalNestedCSharpPart(string value)
+    {
+        return value.Any(char.IsLetter) && value.All(character => char.IsLetterOrDigit(character) || character is '-' or '_' or ' ');
+    }
+
+    private static CSharpProperty BuildCSharpProperty(DevToolsConfigLibSettingDraft setting, string propertyName, JToken defaultToken)
+    {
+        string type = setting.Type.Trim().ToLowerInvariant();
+        return type switch
+        {
+            "boolean" => new(propertyName, "bool", defaultToken.Value<bool?>() == true ? "true" : "false", false),
+            "integer" => new(propertyName, "int", defaultToken.Value<int?>()?.ToString(CultureInfo.InvariantCulture) ?? "0", false),
+            "float" => new(propertyName, "float", BuildCSharpFloatLiteral(defaultToken), false),
+            "object" => new(propertyName, "JObject", defaultToken is JObject ? $"JObject.Parse({ToCSharpStringLiteral(JsonConvert.SerializeObject(defaultToken, Newtonsoft.Json.Formatting.None))})" : "new JObject()", true),
+            "array" => new(propertyName, "JArray", defaultToken is JArray ? $"JArray.Parse({ToCSharpStringLiteral(JsonConvert.SerializeObject(defaultToken, Newtonsoft.Json.Formatting.None))})" : "new JArray()", true),
+            _ => new(propertyName, "string", ToCSharpStringLiteral(defaultToken.Type == JTokenType.Null ? "" : defaultToken.ToString()), false)
+        };
+    }
+
+    private static string BuildCSharpFloatLiteral(JToken token)
+    {
+        double value = token.Value<double?>() ?? 0;
+        string text = value.ToString("0.########", CultureInfo.InvariantCulture);
+        return text.Contains('.', StringComparison.Ordinal) ? $"{text}f" : $"{text}.0f";
+    }
+
+    private static void AppendCSharpConfigClass(StringBuilder sb, CSharpConfigNode node, string className, int indent)
+    {
+        string pad = new(' ', indent * 4);
+        sb.AppendLine($"{pad}public sealed class {className}");
+        sb.AppendLine($"{pad}{{");
+
+        foreach (CSharpConfigNode child in node.Children.Values)
+        {
+            sb.AppendLine($"{pad}    public {child.ClassName} {child.PropertyName} {{ get; set; }} = new();");
+        }
+
+        foreach (CSharpProperty property in node.Properties)
+        {
+            sb.AppendLine($"{pad}    public {property.TypeName} {property.Name} {{ get; set; }} = {property.DefaultExpression};");
+        }
+
+        if (node.Children.Count > 0)
+        {
+            sb.AppendLine();
+            bool first = true;
+            foreach (CSharpConfigNode child in node.Children.Values)
+            {
+                if (!first) sb.AppendLine();
+                AppendCSharpConfigClass(sb, child, child.ClassName, indent + 1);
+                first = false;
+            }
+        }
+
+        sb.AppendLine($"{pad}}}");
+    }
+
+    private static string SanitizeNamespace(string value, string fallback)
+    {
+        string[] rawParts = value
+            .Replace('\\', '.')
+            .Replace('/', '.')
+            .Split('.', StringSplitOptions.RemoveEmptyEntries);
+        List<string> parts = [];
+        foreach (string rawPart in rawParts)
+        {
+            string part = SanitizeCSharpTypeName(rawPart, "");
+            if (!string.IsNullOrWhiteSpace(part)) parts.Add(part);
+        }
+
+        return parts.Count == 0 ? fallback : string.Join('.', parts);
+    }
+
+    private static string SanitizeCSharpTypeName(string value, string fallback)
+    {
+        string identifier = ToPascalIdentifier(value, fallback);
+        if (identifier.Length == 0) return fallback;
+        return char.IsDigit(identifier[0]) ? $"{fallback}{identifier}" : identifier;
+    }
+
+    private static string SanitizeCSharpPropertyName(string value, string fallback)
+    {
+        string identifier = ToPascalIdentifier(value, fallback);
+        if (identifier.Length == 0) return fallback;
+        return char.IsDigit(identifier[0]) ? $"_{identifier}" : identifier;
+    }
+
+    private static string ToPascalIdentifier(string value, string fallback)
+    {
+        StringBuilder sb = new();
+        bool newWord = true;
+        foreach (char character in value.Trim())
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                sb.Append(newWord ? char.ToUpperInvariant(character) : character);
+                newWord = false;
+                continue;
+            }
+
+            newWord = true;
+        }
+
+        return sb.Length == 0 ? fallback : sb.ToString();
+    }
+
+    private static string ToCSharpStringLiteral(string value)
+    {
+        return JsonConvert.SerializeObject(value);
+    }
+
+    private sealed class CSharpConfigNode
+    {
+        public CSharpConfigNode(string propertyName, string className)
+        {
+            PropertyName = propertyName;
+            ClassName = className;
+        }
+
+        public string PropertyName { get; }
+        public string ClassName { get; }
+        public Dictionary<string, CSharpConfigNode> Children { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public List<CSharpProperty> Properties { get; } = [];
+    }
+
+    private sealed record CSharpProperty(string Name, string TypeName, string DefaultExpression, bool NeedsJsonLinq);
 }
 
 internal sealed class DevToolsConfigLibSettingDraft

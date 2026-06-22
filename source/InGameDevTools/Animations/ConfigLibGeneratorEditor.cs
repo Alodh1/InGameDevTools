@@ -12,7 +12,7 @@ namespace InGameDevTools.Animations;
 public sealed partial class DebugWindowManager
 {
     private static readonly string[] ConfigLibBrowserModeLabels = ["ModConfig JSON", "ConfigLib patch files", "Authored outputs"];
-    private static readonly string[] ConfigLibPreviewModeLabels = ["ConfigLib patch JSON", "ModConfig JSON", "Order summary", "Diff"];
+    private static readonly string[] ConfigLibPreviewModeLabels = ["ConfigLib patch JSON", "ModConfig JSON", "C# loader", "Order summary", "Diff"];
     private static readonly string[] ConfigLibSettingTypeLabels = ["boolean", "integer", "float", "string", "object", "array"];
 
     private readonly List<ConfigLibModConfigEntry> _configLibSources = [];
@@ -244,6 +244,11 @@ public sealed partial class DebugWindowManager
             RequestConfigLibDocumentAction("new", "");
         }
 
+        if (ImGui.Button("New scratch config##configlib-scratch", new NVector2(-1, 0)))
+        {
+            RequestConfigLibDocumentAction("scratch", "");
+        }
+
         if (ImGui.Button("Clear document##configlib-clear", new NVector2(-1, 0)))
         {
             RequestConfigLibDocumentAction("clear", "");
@@ -431,6 +436,19 @@ public sealed partial class DebugWindowManager
             _configLibSelectedFormattingIndex = 0;
             _configLibJsonBuffers.Clear();
             _configLibStatus = "Cleared ConfigLib document.";
+            return;
+        }
+
+        if (action.Equals("scratch", StringComparison.OrdinalIgnoreCase))
+        {
+            _configLibDocument = DevToolsConfigLibDocumentDraft.Scratch(_configLibDocument.Domain);
+            _configLibLoadedDocumentKey = "";
+            _configLibOriginalPatchJson = _configLibDocument.ToPatchJson();
+            _configLibDocumentDirty = true;
+            _configLibSelectedSettingIndex = 0;
+            _configLibSelectedFormattingIndex = 0;
+            _configLibJsonBuffers.Clear();
+            _configLibStatus = "Started a scratch ConfigLib document with ModConfig and C# loader outputs.";
             return;
         }
 
@@ -1022,6 +1040,40 @@ public sealed partial class DebugWindowManager
             MarkConfigLibDocumentDirty("Updated ModConfig path.");
         }
 
+        string csharpNamespace = _configLibDocument.CSharpNamespace;
+        if (ImGui.InputText("C# namespace##configlib-csharp-namespace", ref csharpNamespace, 180))
+        {
+            _configLibDocument.CSharpNamespace = csharpNamespace;
+            MarkConfigLibDocumentDirty("Updated C# namespace.");
+        }
+
+        string configClassName = _configLibDocument.ConfigClassName;
+        if (ImGui.InputText("Config class##configlib-csharp-config-class", ref configClassName, 180))
+        {
+            _configLibDocument.ConfigClassName = configClassName;
+            MarkConfigLibDocumentDirty("Updated C# config class.");
+        }
+
+        string loaderClassName = _configLibDocument.LoaderClassName;
+        if (ImGui.InputText("Loader class##configlib-csharp-loader-class", ref loaderClassName, 180))
+        {
+            _configLibDocument.LoaderClassName = loaderClassName;
+            MarkConfigLibDocumentDirty("Updated C# loader class.");
+        }
+
+        string currentPropertyName = _configLibDocument.CurrentPropertyName;
+        if (ImGui.InputText("Static instance##configlib-csharp-current-property", ref currentPropertyName, 120))
+        {
+            _configLibDocument.CurrentPropertyName = currentPropertyName;
+            MarkConfigLibDocumentDirty("Updated C# static instance property.");
+        }
+
+        if (ImGui.Button("Reset C# names from domain##configlib-csharp-reset"))
+        {
+            _configLibDocument.ApplyCSharpDefaultsFromDomain();
+            MarkConfigLibDocumentDirty("Reset C# names from domain.");
+        }
+
         int version = _configLibDocument.Version;
         if (ImGui.InputInt("Version##configlib-version", ref version))
         {
@@ -1046,13 +1098,16 @@ public sealed partial class DebugWindowManager
 
         string patchPreview = _configLibDocument.ToPatchJson();
         string modConfigPreview = _configLibDocument.ToModConfigJson(_configLibModConfigIncludedOnly);
+        string csharpPreview = _configLibDocument.ToCSharpLoaderCode();
         string patchOutputPath = GetToolAuthoredAssetPath("configlib", _configLibDocument.BuildPatchAssetRelativePath());
         string modConfigOutputPath = GetToolAuthoredAssetPath("configlib", _configLibDocument.BuildModConfigRelativePath());
+        string csharpOutputPath = GetToolAuthoredAssetPath("configlib", _configLibDocument.BuildCSharpRelativePath());
         List<DevToolsConfigLibValidationIssue> issues = _configLibDocument.Validate(_configLibModConfigIncludedOnly);
         bool hasErrors = issues.Any(issue => issue.Severity == DevToolsConfigLibIssueSeverity.Error);
 
         ImGui.TextWrapped($"ConfigLib: {patchOutputPath}");
         ImGui.TextWrapped($"ModConfig: {modConfigOutputPath}");
+        ImGui.TextWrapped($"C#: {csharpOutputPath}");
         if (File.Exists(patchOutputPath) && !string.Equals(File.ReadAllText(patchOutputPath), patchPreview, StringComparison.Ordinal))
         {
             ImGui.TextColored(new NVector4(1f, 0.72f, 0.32f, 1f), "Saving will overwrite the existing authored ConfigLib patch file.");
@@ -1070,15 +1125,24 @@ public sealed partial class DebugWindowManager
         {
             QueueSourceSave(TrySaveConfigLibModConfig(modConfigOutputPath, modConfigPreview), status => _configLibStatus = status);
         }
+        ImGui.SameLine();
+        if (ImGui.Button("Save C# loader##configlib-save-csharp"))
+        {
+            QueueSourceSave(TrySaveConfigLibCSharp(csharpOutputPath, csharpPreview), status => _configLibStatus = status);
+        }
         if (ImGui.Button("Save both authored files##configlib-save-both", new NVector2(-1, 0)))
         {
             QueueSourceSave(TrySaveConfigLibBundle(patchOutputPath, patchPreview, modConfigOutputPath, modConfigPreview), status => _configLibStatus = status);
+        }
+        if (ImGui.Button("Save All##configlib-save-all", new NVector2(-1, 0)))
+        {
+            QueueSourceSave(TrySaveConfigLibAll(patchOutputPath, patchPreview, modConfigOutputPath, modConfigPreview, csharpOutputPath, csharpPreview), status => _configLibStatus = status);
         }
         if (hasErrors) ImGui.EndDisabled();
 
         if (ImGui.Button("Copy preview##configlib-copy-preview"))
         {
-            ImGui.SetClipboardText(BuildConfigLibPreviewText(patchPreview, modConfigPreview, patchOutputPath));
+            ImGui.SetClipboardText(BuildConfigLibPreviewText(patchPreview, modConfigPreview, csharpPreview, patchOutputPath));
             _configLibStatus = $"Copied {ConfigLibPreviewModeLabels[Math.Clamp(_configLibPreviewMode, 0, ConfigLibPreviewModeLabels.Length - 1)]}.";
         }
 
@@ -1086,7 +1150,7 @@ public sealed partial class DebugWindowManager
         ImGui.SeparatorText("Preview");
         ImGui.Combo("Preview##configlib-preview-mode", ref _configLibPreviewMode, ConfigLibPreviewModeLabels, ConfigLibPreviewModeLabels.Length);
         _configLibPreviewMode = Math.Clamp(_configLibPreviewMode, 0, ConfigLibPreviewModeLabels.Length - 1);
-        string preview = BuildConfigLibPreviewText(patchPreview, modConfigPreview, patchOutputPath);
+        string preview = BuildConfigLibPreviewText(patchPreview, modConfigPreview, csharpPreview, patchOutputPath);
         ImGui.InputTextMultiline(
             "##configlib-preview-json",
             ref preview,
@@ -1098,13 +1162,14 @@ public sealed partial class DebugWindowManager
         ImGui.EndChild();
     }
 
-    private string BuildConfigLibPreviewText(string patchPreview, string modConfigPreview, string patchOutputPath)
+    private string BuildConfigLibPreviewText(string patchPreview, string modConfigPreview, string csharpPreview, string patchOutputPath)
     {
         return _configLibPreviewMode switch
         {
             1 => modConfigPreview,
-            2 => _configLibDocument.BuildOrderSummary(),
-            3 => BuildConfigLibDiffPreview(patchOutputPath, patchPreview),
+            2 => csharpPreview,
+            3 => _configLibDocument.BuildOrderSummary(),
+            4 => BuildConfigLibDiffPreview(patchOutputPath, patchPreview),
             _ => patchPreview
         };
     }
@@ -1200,6 +1265,26 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private SourceSaveResult TrySaveConfigLibCSharp(string outputPath, string newText)
+    {
+        try
+        {
+            string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : "";
+            SourceSaveRequest request = new(
+                outputPath,
+                oldText,
+                newText,
+                $"Saved C# config loader to {outputPath}.",
+                () => WriteAuthoredFile(outputPath, newText));
+            return SourceSaveResult.Preview(request);
+        }
+        catch (Exception exception)
+        {
+            _configLibDiagnostics.Exception("ConfigLib C# loader save failed", exception);
+            return SourceSaveResult.Fail($"C# loader save failed: {exception.Message}");
+        }
+    }
+
     private SourceSaveResult TrySaveConfigLibBundle(string patchPath, string patchText, string modConfigPath, string modConfigText)
     {
         try
@@ -1233,6 +1318,46 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private SourceSaveResult TrySaveConfigLibAll(string patchPath, string patchText, string modConfigPath, string modConfigText, string csharpPath, string csharpText)
+    {
+        try
+        {
+            string oldText = BuildConfigLibBundlePreview(
+                patchPath,
+                File.Exists(patchPath) ? File.ReadAllText(patchPath) : "",
+                modConfigPath,
+                File.Exists(modConfigPath) ? File.ReadAllText(modConfigPath) : "",
+                csharpPath,
+                File.Exists(csharpPath) ? File.ReadAllText(csharpPath) : "");
+            string newText = BuildConfigLibBundlePreview(patchPath, patchText, modConfigPath, modConfigText, csharpPath, csharpText);
+            SourceSaveRequest request = new(
+                $"ConfigLib scratch bundle: {patchPath}; {modConfigPath}; {csharpPath}",
+                oldText,
+                newText,
+                $"Saved ConfigLib patch, ModConfig default, and C# loader to authored ConfigLib outputs.",
+                () =>
+                {
+                    WriteAuthoredFile(patchPath, patchText);
+                    WriteAuthoredFile(modConfigPath, modConfigText);
+                    WriteAuthoredFile(csharpPath, csharpText);
+                    _configLibDocument.Domain = DevToolsConfigLibDocumentDraft.SanitizeDomain(_configLibDocument.Domain);
+                    _configLibDocument.RelativePath = DevToolsConfigLibDocumentDraft.NormalizeRelativePath(_configLibDocument.RelativePath, "config/configlib-patches.json");
+                    _configLibDocument.ModConfigRelativePath = DevToolsConfigLibDocumentDraft.NormalizeRelativePath(_configLibDocument.ModConfigRelativePath, $"{_configLibDocument.Domain}.json");
+                    _configLibOriginalPatchJson = _configLibDocument.ToPatchJson();
+                    _configLibDocumentDirty = false;
+                    _configLibLoadedDocumentKey = $"{_configLibDocument.Domain}:{_configLibDocument.RelativePath}:authored";
+                    _configLibIndexed = false;
+                    return "";
+                });
+            return SourceSaveResult.Preview(request);
+        }
+        catch (Exception exception)
+        {
+            _configLibDiagnostics.Exception("ConfigLib scratch bundle save failed", exception);
+            return SourceSaveResult.Fail($"ConfigLib scratch bundle save failed: {exception.Message}");
+        }
+    }
+
     private static string BuildConfigLibBundlePreview(string patchPath, string patchText, string modConfigPath, string modConfigText)
     {
         return
@@ -1240,6 +1365,15 @@ public sealed partial class DebugWindowManager
             patchText + Environment.NewLine + Environment.NewLine +
             $"// {modConfigPath}" + Environment.NewLine +
             modConfigText;
+    }
+
+    private static string BuildConfigLibBundlePreview(string patchPath, string patchText, string modConfigPath, string modConfigText, string csharpPath, string csharpText)
+    {
+        return
+            BuildConfigLibBundlePreview(patchPath, patchText, modConfigPath, modConfigText) +
+            Environment.NewLine + Environment.NewLine +
+            $"// {csharpPath}" + Environment.NewLine +
+            csharpText;
     }
 
     private bool DrawConfigLibJsonObjectEditor(string title, string key, JObject current, Action<JObject> apply)
