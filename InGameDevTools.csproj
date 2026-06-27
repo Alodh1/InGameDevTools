@@ -16,6 +16,8 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Resources\assets\ingamedevtools\fonts\OpenDyslexic-Regular.otf" LogicalName="InGameDevTools.Fonts.OpenDyslexic-Regular.otf" />
+    <EmbeddedResource Include="Resources\assets\ingamedevtools\fonts\NotoSans-Regular.otf" LogicalName="InGameDevTools.Fonts.NotoSans-Regular.otf" />
+    <EmbeddedResource Include="Resources\assets\ingamedevtools\fonts\NotoSans-Bold.otf" LogicalName="InGameDevTools.Fonts.NotoSans-Bold.otf" />
   </ItemGroup>
 
   <ItemGroup>

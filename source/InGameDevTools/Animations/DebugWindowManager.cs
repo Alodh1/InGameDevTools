@@ -29,6 +29,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _particleEffectsManager = particleEffectsManager;
         _devToolsConfig = config;
         _devToolsConfig.Normalize();
+        DevToolsLang.Load(api, _devToolsConfig.Language);
         ApplyDevToolsConfigToRuntime();
         _imguiModSystem = api.ModLoader.GetModSystem<ImGuiModSystem>();
         if (_imguiModSystem == null)

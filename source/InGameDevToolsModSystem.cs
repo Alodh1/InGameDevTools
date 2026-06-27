@@ -30,6 +30,8 @@ public sealed class InGameDevToolsModSystem : ModSystem
     private static bool _fontExtractionAttempted;
 
     public static string? BundledOpenDyslexicFontPath { get; private set; }
+    public static string? BundledNotoSansRegularFontPath { get; private set; }
+    public static string? BundledNotoSansBoldFontPath { get; private set; }
     public static ICoreServerAPI? ActiveServerApi { get; private set; }
 
     public override bool ShouldLoad(EnumAppSide forSide) => forSide is EnumAppSide.Client or EnumAppSide.Server;
@@ -201,15 +203,21 @@ public sealed class InGameDevToolsModSystem : ModSystem
         if (_fontExtractionAttempted) return;
         _fontExtractionAttempted = true;
 
+        BundledOpenDyslexicFontPath = TryExtractEmbeddedFont(api, "InGameDevTools.Fonts.OpenDyslexic-Regular.otf", "OpenDyslexic-Regular.otf");
+        BundledNotoSansRegularFontPath = TryExtractEmbeddedFont(api, "InGameDevTools.Fonts.NotoSans-Regular.otf", "NotoSans-Regular.otf");
+        BundledNotoSansBoldFontPath = TryExtractEmbeddedFont(api, "InGameDevTools.Fonts.NotoSans-Bold.otf", "NotoSans-Bold.otf");
+    }
+
+    private static string? TryExtractEmbeddedFont(ICoreAPI api, string resourceName, string fileName)
+    {
         try
         {
-            string? fontPath = ExtractEmbeddedFont(api, "InGameDevTools.Fonts.OpenDyslexic-Regular.otf", "OpenDyslexic-Regular.otf");
-            if (string.IsNullOrWhiteSpace(fontPath)) return;
-            BundledOpenDyslexicFontPath = fontPath;
+            return ExtractEmbeddedFont(api, resourceName, fileName);
         }
         catch (Exception exception)
         {
-            LoggerUtil.Warn(api, typeof(InGameDevToolsModSystem), $"Could not extract bundled OpenDyslexic font: {exception}");
+            LoggerUtil.Warn(api, typeof(InGameDevToolsModSystem), $"Could not extract bundled font {fileName}: {exception}");
+            return null;
         }
     }
 
@@ -244,6 +252,7 @@ public sealed class DevToolsConfig
     public const string FontDefault = "Default";
 
     public bool OpenOnStartup { get; set; }
+    public string Language { get; set; } = DevToolsLang.AutoLanguageCode;
     public float UiScale { get; set; } = 1f;
     public bool ShowDiagnostics { get; set; }
     public bool AutoRuntimeApply { get; set; }
@@ -271,6 +280,7 @@ public sealed class DevToolsConfig
     public void Normalize()
     {
         UiScale = ClampOrDefault(UiScale, 0.75f, 1.75f, 1f);
+        Language = DevToolsLang.NormalizeConfiguredLanguageCode(Language);
         FontSize = Math.Clamp(FontSize <= 0 ? 16 : FontSize, 12, 28);
         ThemePreset = string.IsNullOrWhiteSpace(ThemePreset) ? PresetVintageBrown : ThemePreset.Trim();
         ViewportBackground = DevToolsViewportBackground.NormalizeName(ViewportBackground);

@@ -24,8 +24,16 @@ public sealed partial class DebugWindowManager
     private const string SettingsPresetCustom = "Custom";
     private const string SettingsFontDefault = DevToolsConfig.FontDefault;
     private const string SettingsFontOpenDyslexic = "OpenDyslexic-Regular";
-    private static readonly int[] SettingsOpenDyslexicSizes = Enumerable.Range(12, 17).ToArray();
-    private static readonly string[] SettingsAnimationIkModeLabels = ["Auto conservative", "Auto extended", "Manual override"];
+    private const string SettingsFontNotoSansRegular = "NotoSans-Regular";
+    private const string SettingsFontNotoSansBold = "NotoSans-Bold";
+    private const string SettingsStatusReadyFallback = "Settings ready.";
+    private static readonly int[] SettingsBundledFontSizes = Enumerable.Range(12, 17).ToArray();
+    private static readonly string[] SettingsBundledFontNames =
+    [
+        SettingsFontNotoSansRegular,
+        SettingsFontNotoSansBold,
+        SettingsFontOpenDyslexic
+    ];
     private static readonly string[] SettingsThemePresets =
     [
         SettingsPresetVintageBrown,
@@ -41,9 +49,9 @@ public sealed partial class DebugWindowManager
     private readonly DevToolsConfig _devToolsConfig;
     private bool _devToolsConfigSaveQueued;
     private double _devToolsConfigSaveAfter;
-    private string _settingsStatus = "Settings ready.";
+    private string _settingsStatus = SettingsStatusReadyFallback;
     private string _settingsImportJson = "";
-    private bool _settingsOpenDyslexicLoadQueued;
+    private bool _settingsFontLoadQueued;
     private string _settingsFontRuntimeStatus = "";
     private readonly HashSet<string> _settingsFailedRuntimeFontLoads = new(StringComparer.OrdinalIgnoreCase);
 
@@ -87,17 +95,23 @@ public sealed partial class DebugWindowManager
         _ = deltaSeconds;
         ImGui.BeginChild("##settings-tab", new NVector2(-float.Epsilon, -float.Epsilon), true);
 
-        ImGui.SeparatorText("General");
+        if (string.Equals(_settingsStatus, SettingsStatusReadyFallback, StringComparison.Ordinal))
+        {
+            _settingsStatus = DevToolsLang.Get("ui.settings.status.ready", SettingsStatusReadyFallback);
+        }
+
+        ImGui.SeparatorText(DevToolsLang.Get("ui.settings.section.general", "General"));
         bool changed = false;
+        bool languageChanged = DrawSettingsLanguageControl();
         bool openOnStartup = _devToolsConfig.OpenOnStartup;
-        if (ImGui.Checkbox("Open on startup##settings-open-startup", ref openOnStartup))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.openOnStartup", "Open on startup", "settings-open-startup"), ref openOnStartup))
         {
             _devToolsConfig.OpenOnStartup = openOnStartup;
             changed = true;
         }
 
         bool diagnostics = _showEditorDiagnostics;
-        if (ImGui.Checkbox("Diagnostics##settings-diagnostics", ref diagnostics))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.diagnostics", "Diagnostics", "settings-diagnostics"), ref diagnostics))
         {
             _showEditorDiagnostics = diagnostics;
             _devToolsConfig.ShowDiagnostics = diagnostics;
@@ -106,7 +120,7 @@ public sealed partial class DebugWindowManager
 
         float scale = _devToolsUiScale;
         ImGui.SetNextItemWidth(220f);
-        if (ImGui.SliderFloat("UI scale##settings-scale", ref scale, 0.75f, 1.75f, "%.2f"))
+        if (ImGui.SliderFloat(DevToolsLang.Label("ui.settings.uiScale", "UI scale", "settings-scale"), ref scale, 0.75f, 1.75f, "%.2f"))
         {
             _devToolsUiScale = Math.Clamp(scale, 0.75f, 1.75f);
             _devToolsConfig.UiScale = _devToolsUiScale;
@@ -114,7 +128,7 @@ public sealed partial class DebugWindowManager
         }
 
         bool autoApply = _liveApplyManager.AutoApply;
-        if (ImGui.Checkbox("Runtime apply by default##settings-runtime-apply", ref autoApply))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.runtimeApplyDefault", "Runtime apply by default", "settings-runtime-apply"), ref autoApply))
         {
             _liveApplyManager.AutoApply = autoApply;
             _devToolsConfig.AutoRuntimeApply = autoApply;
@@ -122,17 +136,18 @@ public sealed partial class DebugWindowManager
         }
 
         bool backups = _liveApplyManager.WriteBackups;
-        if (ImGui.Checkbox("Write live backup copies##settings-live-backups", ref backups))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.writeLiveBackups", "Write live backup copies", "settings-live-backups"), ref backups))
         {
             _liveApplyManager.WriteBackups = backups;
             _devToolsConfig.WriteLiveBackups = backups;
             changed = true;
         }
 
-        ImGui.SeparatorText("Theme");
+        ImGui.SeparatorText(DevToolsLang.Get("ui.settings.section.theme", "Theme"));
         int presetIndex = Array.FindIndex(SettingsThemePresets, preset => preset.Equals(_devToolsConfig.ThemePreset, StringComparison.OrdinalIgnoreCase));
         if (presetIndex < 0) presetIndex = SettingsThemePresets.Length - 1;
-        if (ImGui.Combo("Preset##settings-theme-preset", ref presetIndex, SettingsThemePresets, SettingsThemePresets.Length))
+        string[] themePresetLabels = SettingsThemePresets.Select(SettingsThemePresetLabel).ToArray();
+        if (ImGui.Combo(DevToolsLang.Label("ui.settings.themePreset", "Preset", "settings-theme-preset"), ref presetIndex, themePresetLabels, themePresetLabels.Length))
         {
             ApplyPresetToConfig(SettingsThemePresets[presetIndex]);
             changed = true;
@@ -142,7 +157,8 @@ public sealed partial class DebugWindowManager
             DevToolsViewportBackground.StyleNames,
             name => name.Equals(_devToolsConfig.ViewportBackground, StringComparison.OrdinalIgnoreCase));
         if (viewportBgIndex < 0) viewportBgIndex = 0;
-        if (ImGui.Combo("Viewport background##settings-viewport-bg", ref viewportBgIndex, DevToolsViewportBackground.StyleNames, DevToolsViewportBackground.StyleNames.Length))
+        string[] viewportBgLabels = DevToolsViewportBackground.StyleNames.Select(SettingsViewportBackgroundLabel).ToArray();
+        if (ImGui.Combo(DevToolsLang.Label("ui.settings.viewportBackground", "Viewport background", "settings-viewport-bg"), ref viewportBgIndex, viewportBgLabels, viewportBgLabels.Length))
         {
             _devToolsConfig.ViewportBackground = DevToolsViewportBackground.StyleNames[viewportBgIndex];
             DevToolsViewportBackground.Style = DevToolsViewportBackground.Parse(_devToolsConfig.ViewportBackground);
@@ -150,18 +166,18 @@ public sealed partial class DebugWindowManager
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Background tone behind 3D/preview viewports. Use Grey or Light to inspect dark models.");
+            ImGui.SetTooltip(DevToolsLang.Get("ui.settings.viewportBackground.tooltip", "Background tone behind 3D/preview viewports. Use Grey or Light to inspect dark models."));
         }
 
         bool global = _devToolsConfig.ApplyStyleGlobally;
-        if (ImGui.Checkbox("Apply style globally to VSImGui##settings-style-global", ref global))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.applyStyleGlobally", "Apply style globally to VSImGui", "settings-style-global"), ref global))
         {
             _devToolsConfig.ApplyStyleGlobally = global;
             changed = true;
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Off applies this style only to InGameDevTools. On changes VSImGui's shared default style for other ImGui mods too.");
+            ImGui.SetTooltip(DevToolsLang.Get("ui.settings.applyStyleGlobally.tooltip", "Off applies this style only to InGameDevTools. On changes VSImGui's shared default style for other ImGui mods too."));
         }
 
         DrawSettingsFontControls(ref changed);
@@ -170,26 +186,94 @@ public sealed partial class DebugWindowManager
         DrawSettingsAdvancedColors(ref changed);
         DrawSettingsImportExport(ref changed);
 
-        ImGui.SeparatorText("Status");
+        ImGui.SeparatorText(DevToolsLang.Get("ui.settings.section.status", "Status"));
         ImGui.TextWrapped(_settingsStatus);
 
-        if (changed)
+        if (changed || languageChanged)
         {
             _devToolsConfig.ThemePreset = string.IsNullOrWhiteSpace(_devToolsConfig.ThemePreset) ? SettingsPresetCustom : _devToolsConfig.ThemePreset;
             _devToolsConfig.Normalize();
-            QueueDevToolsConfigSave("Settings updated.");
+            QueueDevToolsConfigSave(languageChanged
+                ? DevToolsLang.Get("ui.settings.status.languageUpdated", "Language setting updated.")
+                : DevToolsLang.Get("ui.settings.status.updated", "Settings updated."));
         }
 
         ImGui.EndChild();
     }
 
+    private bool DrawSettingsLanguageControl()
+    {
+        IReadOnlyList<DevToolsLanguageOption> options = DevToolsLang.LanguageOptions;
+        int languageIndex = options
+            .Select((option, index) => new { option, index })
+            .FirstOrDefault(pair => pair.option.Code.Equals(_devToolsConfig.Language, StringComparison.OrdinalIgnoreCase))
+            ?.index ?? 0;
+        string[] labels = options
+            .Select(option => option.Code.Length == 0
+                ? DevToolsLang.Get("ui.settings.language.auto", "Auto (game language)")
+                : option.DisplayName)
+            .ToArray();
+
+        ImGui.SetNextItemWidth(260f);
+        bool languageChanged = ImGui.Combo(DevToolsLang.Label("ui.settings.language", "DevTools language", "settings-language"), ref languageIndex, labels, labels.Length);
+        ImGui.SameLine();
+        ImGui.TextDisabled(DevToolsLang.Get("ui.settings.language.cyrillicFontWarning", "Russian/Ukrainian require NotoSans-Regular or NotoSans-Bold."));
+        if (!languageChanged)
+        {
+            ImGui.TextDisabled(DevToolsLang.Get("ui.settings.language.active", "Active language: {0}", DevToolsLang.ActiveLanguageCode));
+            return false;
+        }
+
+        _devToolsConfig.Language = options[Math.Clamp(languageIndex, 0, options.Count - 1)].Code;
+        _devToolsConfig.Normalize();
+        DevToolsLang.Load(_api, _devToolsConfig.Language);
+        ImGui.TextDisabled(DevToolsLang.Get("ui.settings.language.active", "Active language: {0}", DevToolsLang.ActiveLanguageCode));
+        return true;
+    }
+
+    private static string SettingsThemePresetLabel(string preset)
+    {
+        return preset switch
+        {
+            SettingsPresetVintageBrown => DevToolsLang.Get("ui.settings.theme.vintageBrown", "Vintage Brown"),
+            SettingsPresetClassicDark => DevToolsLang.Get("ui.settings.theme.classicDark", "Classic Dark"),
+            SettingsPresetHighContrastDark => DevToolsLang.Get("ui.settings.theme.highContrastDark", "High Contrast Dark"),
+            SettingsPresetHighContrastLight => DevToolsLang.Get("ui.settings.theme.highContrastLight", "High Contrast Light"),
+            SettingsPresetLowContrastNeutral => DevToolsLang.Get("ui.settings.theme.lowContrastNeutral", "Low Contrast Neutral"),
+            SettingsPresetColorblindSafeDark => DevToolsLang.Get("ui.settings.theme.colorblindSafeDark", "Colorblind Safe Dark"),
+            SettingsPresetDyslexiaFriendly => DevToolsLang.Get("ui.settings.theme.dyslexiaFriendly", "Dyslexia Friendly"),
+            SettingsPresetCustom => DevToolsLang.Get("ui.settings.theme.custom", "Custom"),
+            _ => preset
+        };
+    }
+
+    private static string SettingsViewportBackgroundLabel(string name)
+    {
+        return DevToolsViewportBackground.Parse(name) switch
+        {
+            DevToolsViewportBackgroundStyle.Grey => DevToolsLang.Get("ui.settings.viewportBackground.grey", "Grey"),
+            DevToolsViewportBackgroundStyle.Light => DevToolsLang.Get("ui.settings.viewportBackground.light", "Light"),
+            _ => DevToolsLang.Get("ui.settings.viewportBackground.dark", "Dark")
+        };
+    }
+
+    private static string[] GetSettingsAnimationIkModeLabels()
+    {
+        return
+        [
+            DevToolsLang.Get("ui.settings.ikMode.autoConservative", "Auto conservative"),
+            DevToolsLang.Get("ui.settings.ikMode.autoExtended", "Auto extended"),
+            DevToolsLang.Get("ui.settings.ikMode.manualOverride", "Manual override")
+        ];
+    }
+
     private void DrawSettingsFontControls(ref bool changed)
     {
-        ImGui.SeparatorText("Font");
+        ImGui.SeparatorText(DevToolsLang.Get("ui.settings.section.font", "Font"));
         List<string> fontOptions = GetSettingsFontOptions();
         int fontIndex = fontOptions.FindIndex(font => font.Equals(_devToolsConfig.FontName, StringComparison.OrdinalIgnoreCase));
         if (fontIndex < 0) fontIndex = 0;
-        if (ImGui.Combo("Font##settings-font", ref fontIndex, fontOptions.ToArray(), fontOptions.Count))
+        if (ImGui.Combo(DevToolsLang.Label("ui.settings.font", "Font", "settings-font"), ref fontIndex, fontOptions.ToArray(), fontOptions.Count))
         {
             _devToolsConfig.FontName = fontOptions[fontIndex];
             QueueSettingsFontRuntimeLoadIfNeeded(_devToolsConfig.FontName);
@@ -216,7 +300,7 @@ public sealed partial class DebugWindowManager
             ImGui.BeginDisabled();
             int size = _devToolsConfig.FontSize;
             ImGui.SetNextItemWidth(180f);
-            ImGui.InputInt("Font size##settings-font-size-unloaded", ref size);
+            ImGui.InputInt(DevToolsLang.Label("ui.settings.fontSize", "Font size", "settings-font-size-unloaded"), ref size);
             ImGui.EndDisabled();
             return;
         }
@@ -232,7 +316,7 @@ public sealed partial class DebugWindowManager
         string[] labels = sizeOptions.Select(size => $"{size}px").ToArray();
         ImGui.SetNextItemWidth(180f);
         if (isDefaultFont) ImGui.BeginDisabled();
-        if (ImGui.Combo("Font size##settings-font-size", ref selectedIndex, labels, labels.Length))
+        if (ImGui.Combo(DevToolsLang.Label("ui.settings.fontSize", "Font size", "settings-font-size"), ref selectedIndex, labels, labels.Length))
         {
             _devToolsConfig.FontSize = sizeOptions[selectedIndex];
             changed = true;
@@ -242,21 +326,22 @@ public sealed partial class DebugWindowManager
 
     private void DrawSettingsAccessibilityControls(ref bool changed)
     {
-        if (!ImGui.CollapsingHeader("Accessibility spacing##settings-accessibility")) return;
+        if (!ImGui.CollapsingHeader(DevToolsLang.Label("ui.settings.accessibilitySpacing", "Accessibility spacing", "settings-accessibility"))) return;
 
-        changed |= DrawOptionalConfigFloat("Frame padding X", "frame-padding-x", 0f, 32f, () => _devToolsConfig.FramePaddingX, value => _devToolsConfig.FramePaddingX = value);
-        changed |= DrawOptionalConfigFloat("Frame padding Y", "frame-padding-y", 0f, 32f, () => _devToolsConfig.FramePaddingY, value => _devToolsConfig.FramePaddingY = value);
-        changed |= DrawOptionalConfigFloat("Item spacing X", "item-spacing-x", 0f, 48f, () => _devToolsConfig.ItemSpacingX, value => _devToolsConfig.ItemSpacingX = value);
-        changed |= DrawOptionalConfigFloat("Item spacing Y", "item-spacing-y", 0f, 48f, () => _devToolsConfig.ItemSpacingY, value => _devToolsConfig.ItemSpacingY = value);
-        changed |= DrawOptionalConfigFloat("Frame rounding", "frame-rounding", 0f, 16f, () => _devToolsConfig.FrameRounding, value => _devToolsConfig.FrameRounding = value);
-        changed |= DrawOptionalConfigFloat("Window rounding", "window-rounding", 0f, 16f, () => _devToolsConfig.WindowRounding, value => _devToolsConfig.WindowRounding = value);
-        changed |= DrawOptionalConfigFloat("Hover delay normal", "hover-delay-normal", 0f, 3f, () => _devToolsConfig.HoverDelayNormal, value => _devToolsConfig.HoverDelayNormal = value);
-        changed |= DrawOptionalConfigFloat("Hover delay short", "hover-delay-short", 0f, 3f, () => _devToolsConfig.HoverDelayShort, value => _devToolsConfig.HoverDelayShort = value);
+        changed |= DrawOptionalConfigFloat("ui.settings.framePaddingX", "Frame padding X", "frame-padding-x", 0f, 32f, () => _devToolsConfig.FramePaddingX, value => _devToolsConfig.FramePaddingX = value);
+        changed |= DrawOptionalConfigFloat("ui.settings.framePaddingY", "Frame padding Y", "frame-padding-y", 0f, 32f, () => _devToolsConfig.FramePaddingY, value => _devToolsConfig.FramePaddingY = value);
+        changed |= DrawOptionalConfigFloat("ui.settings.itemSpacingX", "Item spacing X", "item-spacing-x", 0f, 48f, () => _devToolsConfig.ItemSpacingX, value => _devToolsConfig.ItemSpacingX = value);
+        changed |= DrawOptionalConfigFloat("ui.settings.itemSpacingY", "Item spacing Y", "item-spacing-y", 0f, 48f, () => _devToolsConfig.ItemSpacingY, value => _devToolsConfig.ItemSpacingY = value);
+        changed |= DrawOptionalConfigFloat("ui.settings.frameRounding", "Frame rounding", "frame-rounding", 0f, 16f, () => _devToolsConfig.FrameRounding, value => _devToolsConfig.FrameRounding = value);
+        changed |= DrawOptionalConfigFloat("ui.settings.windowRounding", "Window rounding", "window-rounding", 0f, 16f, () => _devToolsConfig.WindowRounding, value => _devToolsConfig.WindowRounding = value);
+        changed |= DrawOptionalConfigFloat("ui.settings.hoverDelayNormal", "Hover delay normal", "hover-delay-normal", 0f, 3f, () => _devToolsConfig.HoverDelayNormal, value => _devToolsConfig.HoverDelayNormal = value);
+        changed |= DrawOptionalConfigFloat("ui.settings.hoverDelayShort", "Hover delay short", "hover-delay-short", 0f, 3f, () => _devToolsConfig.HoverDelayShort, value => _devToolsConfig.HoverDelayShort = value);
     }
 
-    private static bool DrawOptionalConfigFloat(string label, string id, float min, float max, Func<float> getValue, Action<float> setValue)
+    private static bool DrawOptionalConfigFloat(string labelKey, string fallbackLabel, string id, float min, float max, Func<float> getValue, Action<float> setValue)
     {
         float value = getValue();
+        string label = DevToolsLang.Get(labelKey, fallbackLabel);
         if (!DrawOptionalFloatSetting(label, id, ref value, min, max)) return false;
 
         setValue(value);
@@ -287,7 +372,7 @@ public sealed partial class DebugWindowManager
 
     private void DrawSettingsAnimationControls(ref bool changed)
     {
-        if (!ImGui.CollapsingHeader("Animation##settings-animation")) return;
+        if (!ImGui.CollapsingHeader(DevToolsLang.Label("ui.settings.animation", "Animation", "settings-animation"))) return;
 
         int modeIndex = _vanillaIkMode switch
         {
@@ -295,7 +380,8 @@ public sealed partial class DebugWindowManager
             VanillaIkChainMode.ManualOverride => 2,
             _ => 0
         };
-        if (ImGui.Combo("IK mode##settings-animation-ik-mode", ref modeIndex, SettingsAnimationIkModeLabels, SettingsAnimationIkModeLabels.Length))
+        string[] ikModeLabels = GetSettingsAnimationIkModeLabels();
+        if (ImGui.Combo(DevToolsLang.Label("ui.settings.ikMode", "IK mode", "settings-animation-ik-mode"), ref modeIndex, ikModeLabels, ikModeLabels.Length))
         {
             _vanillaIkMode = modeIndex switch
             {
@@ -308,7 +394,7 @@ public sealed partial class DebugWindowManager
         }
 
         bool lockMoveToDragAxis = _vanillaIkLockMoveToDragAxis;
-        if (ImGui.Checkbox("Lock IK move to drag axis##settings-animation-ik-axis", ref lockMoveToDragAxis))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.lockIkMoveToDragAxis", "Lock IK move to drag axis", "settings-animation-ik-axis"), ref lockMoveToDragAxis))
         {
             _vanillaIkLockMoveToDragAxis = lockMoveToDragAxis;
             _devToolsConfig.AnimationIkLockMoveToDragAxis = lockMoveToDragAxis;
@@ -316,7 +402,7 @@ public sealed partial class DebugWindowManager
         }
 
         bool preserveDraggedPartRotation = _vanillaIkPreserveDraggedPartRotation;
-        if (ImGui.Checkbox("Preserve dragged part rotation##settings-animation-ik-preserve", ref preserveDraggedPartRotation))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.preserveDraggedPartRotation", "Preserve dragged part rotation", "settings-animation-ik-preserve"), ref preserveDraggedPartRotation))
         {
             _vanillaIkPreserveDraggedPartRotation = preserveDraggedPartRotation;
             _devToolsConfig.AnimationIkPreserveDraggedPartRotation = preserveDraggedPartRotation;
@@ -325,9 +411,9 @@ public sealed partial class DebugWindowManager
 
         int anchorDocumentCount = _devToolsConfig.AnimationIkAnchors.Count;
         int anchorCount = _devToolsConfig.AnimationIkAnchors.Values.Sum(anchors => anchors?.Length ?? 0);
-        ImGui.TextDisabled($"Saved manual IK anchors: {anchorCount} anchor(s) across {anchorDocumentCount} shape(s).");
+        ImGui.TextDisabled(DevToolsLang.Get("ui.settings.savedManualIkAnchors", "Saved manual IK anchors: {0} anchor(s) across {1} shape(s).", anchorCount, anchorDocumentCount));
         if (anchorCount == 0) ImGui.BeginDisabled();
-        if (ImGui.Button("Clear saved IK anchors##settings-animation-ik-clear-anchors"))
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.clearSavedIkAnchors", "Clear saved IK anchors", "settings-animation-ik-clear-anchors")))
         {
             _devToolsConfig.AnimationIkAnchors.Clear();
             changed = true;
@@ -337,9 +423,9 @@ public sealed partial class DebugWindowManager
 
     private void DrawSettingsAdvancedColors(ref bool changed)
     {
-        if (!ImGui.CollapsingHeader("Advanced colors##settings-colors")) return;
+        if (!ImGui.CollapsingHeader(DevToolsLang.Label("ui.settings.advancedColors", "Advanced colors", "settings-colors"))) return;
 
-        if (ImGui.Button("Reset all colors##settings-reset-colors"))
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.resetAllColors", "Reset all colors", "settings-reset-colors")))
         {
             _devToolsConfig.AdvancedColorOverrides.Clear();
             _devToolsConfig.ThemePreset = SettingsPresetCustom;
@@ -356,10 +442,10 @@ public sealed partial class DebugWindowManager
             ImGuiTableFlags.SizingStretchProp;
         if (!ImGui.BeginTable("##settings-color-table", 4, flags, new NVector2(-float.Epsilon, height))) return;
 
-        ImGui.TableSetupColumn("Color", ImGuiTableColumnFlags.WidthFixed, 58f);
-        ImGui.TableSetupColumn("Slot", ImGuiTableColumnFlags.WidthStretch);
-        ImGui.TableSetupColumn("RGBA", ImGuiTableColumnFlags.WidthFixed, 190f);
-        ImGui.TableSetupColumn("Reset", ImGuiTableColumnFlags.WidthFixed, 58f);
+        ImGui.TableSetupColumn(DevToolsLang.Get("ui.settings.colorColumn", "Color"), ImGuiTableColumnFlags.WidthFixed, 58f);
+        ImGui.TableSetupColumn(DevToolsLang.Get("ui.settings.slotColumn", "Slot"), ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn(DevToolsLang.Get("ui.settings.rgbaColumn", "RGBA"), ImGuiTableColumnFlags.WidthFixed, 190f);
+        ImGui.TableSetupColumn(DevToolsLang.Get("ui.settings.resetColumn", "Reset"), ImGuiTableColumnFlags.WidthFixed, 58f);
         ImGui.TableHeadersRow();
 
         foreach (ImGuiCol colorSlot in Enum.GetValues<ImGuiCol>())
@@ -383,7 +469,7 @@ public sealed partial class DebugWindowManager
                     SetSettingsColorOverride(name, edit);
                     changed = true;
                 }
-                if (ImGui.Button("Reset color##settings-popup-reset"))
+                if (ImGui.Button(DevToolsLang.Label("ui.settings.resetColor", "Reset color", "settings-popup-reset")))
                 {
                     _devToolsConfig.AdvancedColorOverrides.Remove(name);
                     _devToolsConfig.ThemePreset = SettingsPresetCustom;
@@ -400,7 +486,7 @@ public sealed partial class DebugWindowManager
             ImGui.TableSetColumnIndex(3);
             bool hasOverride = _devToolsConfig.AdvancedColorOverrides.ContainsKey(name);
             if (!hasOverride) ImGui.BeginDisabled();
-            if (ImGui.SmallButton("Reset"))
+            if (ImGui.SmallButton(DevToolsLang.Get("ui.settings.reset", "Reset")))
             {
                 _devToolsConfig.AdvancedColorOverrides.Remove(name);
                 _devToolsConfig.ThemePreset = SettingsPresetCustom;
@@ -414,35 +500,35 @@ public sealed partial class DebugWindowManager
 
     private void DrawSettingsImportExport(ref bool changed)
     {
-        if (!ImGui.CollapsingHeader("Import / export##settings-import-export")) return;
+        if (!ImGui.CollapsingHeader(DevToolsLang.Label("ui.settings.importExport", "Import / export", "settings-import-export"))) return;
 
-        if (ImGui.Button("Copy theme JSON##settings-copy-theme"))
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.copyThemeJson", "Copy theme JSON", "settings-copy-theme")))
         {
             ImGui.SetClipboardText(BuildSettingsThemeJson());
-            _settingsStatus = "Copied theme JSON to clipboard.";
+            _settingsStatus = DevToolsLang.Get("ui.settings.status.copiedThemeJson", "Copied theme JSON to clipboard.");
         }
         ImGui.SameLine();
-        if (ImGui.Button("Paste theme JSON##settings-paste-theme"))
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.pasteThemeJson", "Paste theme JSON", "settings-paste-theme")))
         {
             _settingsImportJson = ImGui.GetClipboardText();
         }
 
         ImGui.InputTextMultiline("##settings-theme-json", ref _settingsImportJson, 256 * 1024, new NVector2(-float.Epsilon, 120f), ImGuiInputTextFlags.AllowTabInput);
-        if (ImGui.Button("Import theme##settings-import-theme"))
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.importTheme", "Import theme", "settings-import-theme")))
         {
             try
             {
                 ImportSettingsThemeJson(_settingsImportJson);
-                _settingsStatus = "Imported theme JSON.";
+                _settingsStatus = DevToolsLang.Get("ui.settings.status.importedThemeJson", "Imported theme JSON.");
                 changed = true;
             }
             catch (Exception exception)
             {
-                _settingsStatus = $"Theme import failed: {exception.Message}";
+                _settingsStatus = DevToolsLang.Get("ui.settings.status.themeImportFailed", "Theme import failed: {0}", exception.Message);
             }
         }
         ImGui.SameLine();
-        if (ImGui.Button("Reset settings to defaults##settings-reset-defaults"))
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.resetDefaults", "Reset settings to defaults", "settings-reset-defaults")))
         {
             bool keepOpenOnStartup = _devToolsConfig.OpenOnStartup;
             _devToolsConfig.ThemePreset = SettingsPresetVintageBrown;
@@ -459,6 +545,8 @@ public sealed partial class DebugWindowManager
             _devToolsConfig.HoverDelayNormal = -1f;
             _devToolsConfig.HoverDelayShort = -1f;
             _devToolsConfig.OpenOnStartup = keepOpenOnStartup;
+            _devToolsConfig.Language = DevToolsLang.AutoLanguageCode;
+            DevToolsLang.Load(_api, _devToolsConfig.Language);
             _devToolsConfig.UiScale = 1f;
             _devToolsUiScale = 1f;
             changed = true;
@@ -487,6 +575,8 @@ public sealed partial class DebugWindowManager
         SortedSet<string> fonts = new(StringComparer.OrdinalIgnoreCase)
         {
             SettingsFontDefault,
+            SettingsFontNotoSansRegular,
+            SettingsFontNotoSansBold,
             SettingsFontOpenDyslexic
         };
 
@@ -511,23 +601,28 @@ public sealed partial class DebugWindowManager
 
     private string GetSettingsFontStatus()
     {
+        if (DevToolsLang.ActiveLanguageUsesCyrillic && !IsKnownCyrillicSettingsFont(_devToolsConfig.FontName))
+        {
+            return DevToolsLang.Get("ui.settings.fontStatus.cyrillicFontRequired", "Russian/Ukrainian need a Cyrillic-capable font. Select NotoSans-Regular or NotoSans-Bold.");
+        }
+
         if (_devToolsConfig.FontName.Equals(SettingsFontDefault, StringComparison.OrdinalIgnoreCase))
         {
-            return "Default uses the font selected by VSImGui.";
+            return DevToolsLang.Get("ui.settings.fontStatus.default", "Default uses the font selected by VSImGui.");
         }
 
         bool loaded = TryResolveSettingsFontName(_devToolsConfig.FontName, _devToolsConfig.FontSize, out _);
         return loaded
-            ? $"Loaded: {_devToolsConfig.FontName} {_devToolsConfig.FontSize}px."
-            : $"{_devToolsConfig.FontName} is not loaded yet.";
+            ? DevToolsLang.Get("ui.settings.fontStatus.loaded", "Loaded: {0} {1}px.", _devToolsConfig.FontName, _devToolsConfig.FontSize)
+            : DevToolsLang.Get("ui.settings.fontStatus.notLoaded", "{0} is not loaded yet.", _devToolsConfig.FontName);
     }
 
     private int[] GetSettingsFontSizeOptions(string fontName)
     {
         if (fontName.Equals(SettingsFontDefault, StringComparison.OrdinalIgnoreCase)) return [];
-        if (fontName.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase) && IsAnyOpenDyslexicSizeLoaded())
+        if (IsBundledSettingsFont(fontName) && IsAnyBundledFontSizeLoaded(fontName))
         {
-            return SettingsOpenDyslexicSizes;
+            return SettingsBundledFontSizes;
         }
 
         try
@@ -572,11 +667,13 @@ public sealed partial class DebugWindowManager
         return bestIndex;
     }
 
-    private static bool IsAnyOpenDyslexicSizeLoaded()
+    private static bool IsAnyBundledFontSizeLoaded(string fontName)
     {
         try
         {
-            return FontManager.GetLoadedFonts().Any(entry => entry.font.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase));
+            return FontManager.GetLoadedFonts().Any(entry =>
+                entry.font.Equals(fontName, StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileNameWithoutExtension(entry.font).Equals(fontName, StringComparison.OrdinalIgnoreCase));
         }
         catch
         {
@@ -610,20 +707,20 @@ public sealed partial class DebugWindowManager
 
     private void QueueSettingsFontRuntimeLoadIfNeeded(string fontName)
     {
-        if (!fontName.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase)) return;
-        if (IsAnyOpenDyslexicSizeLoaded()) return;
-        if (_settingsOpenDyslexicLoadQueued) return;
+        if (!IsBundledSettingsFont(fontName)) return;
+        if (IsAnyBundledFontSizeLoaded(fontName)) return;
+        if (_settingsFontLoadQueued) return;
 
         string loadKey = fontName;
         if (_settingsFailedRuntimeFontLoads.Contains(loadKey)) return;
 
-        _settingsOpenDyslexicLoadQueued = true;
-        _settingsFontRuntimeStatus = $"Loading {SettingsFontOpenDyslexic} sizes...";
+        _settingsFontLoadQueued = true;
+        _settingsFontRuntimeStatus = DevToolsLang.Get("ui.settings.fontStatus.loading", "Loading {0} sizes...", fontName);
         _api.Event.EnqueueMainThreadTask(() =>
         {
-            _settingsOpenDyslexicLoadQueued = false;
-            _settingsFontRuntimeStatus = TryLoadOpenDyslexicRuntime();
-            if (!IsAnyOpenDyslexicSizeLoaded())
+            _settingsFontLoadQueued = false;
+            _settingsFontRuntimeStatus = TryLoadBundledRuntimeFont(fontName);
+            if (!IsAnyBundledFontSizeLoaded(fontName))
             {
                 _settingsFailedRuntimeFontLoads.Add(loadKey);
             }
@@ -631,44 +728,64 @@ public sealed partial class DebugWindowManager
             {
                 SnapSettingsFontSizeToLoadedOption();
             }
-        }, "ingamedevtools-load-opendyslexic-font");
+        }, $"ingamedevtools-load-{fontName.ToLowerInvariant()}-font");
     }
 
-    private string TryLoadOpenDyslexicRuntime()
+    private static bool IsBundledSettingsFont(string fontName)
+    {
+        return SettingsBundledFontNames.Any(name => name.Equals(fontName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsKnownCyrillicSettingsFont(string fontName)
+    {
+        return fontName.Equals(SettingsFontNotoSansRegular, StringComparison.OrdinalIgnoreCase) ||
+            fontName.Equals(SettingsFontNotoSansBold, StringComparison.OrdinalIgnoreCase) ||
+            fontName.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string TryLoadBundledRuntimeFont(string fontName)
     {
         try
         {
-            if (IsAnyOpenDyslexicSizeLoaded())
+            if (IsAnyBundledFontSizeLoaded(fontName))
             {
-                return $"{SettingsFontOpenDyslexic} is loaded.";
+                return DevToolsLang.Get("ui.settings.fontStatus.loadedName", "{0} is loaded.", fontName);
             }
 
-            string? path = InGameDevToolsModSystem.BundledOpenDyslexicFontPath;
+            string? path = GetBundledSettingsFontPath(fontName);
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             {
-                return "OpenDyslexic font file was not extracted; restart may be required.";
+                return DevToolsLang.Get("ui.settings.fontStatus.missingFile", "{0} font file was not extracted; restart may be required.", fontName);
             }
 
             int loadedCount = 0;
-            foreach (int size in SettingsOpenDyslexicSizes)
+            foreach (int size in SettingsBundledFontSizes)
             {
-                if (TryResolveSettingsFontName(SettingsFontOpenDyslexic, size, out _)) continue;
+                if (TryResolveSettingsFontName(fontName, size, out _)) continue;
 
-                ImFontPtr font = ImGui.GetIO().Fonts.AddFontFromFileTTF(path, size);
+                ImFontPtr font = ImGui.GetIO().Fonts.AddFontFromFileTTF(path, size, null, ImGui.GetIO().Fonts.GetGlyphRangesCyrillic());
                 RegisterRuntimeFontWithVSImGui(path, size, font);
                 loadedCount++;
             }
 
             bool refreshed = loadedCount == 0 || RefreshVSImGuiFontTexture();
             return refreshed
-                ? $"Loaded {SettingsFontOpenDyslexic} sizes at runtime."
-                : $"Loaded {SettingsFontOpenDyslexic} sizes; texture refresh may require reopening the ImGui window.";
+                ? DevToolsLang.Get("ui.settings.fontStatus.runtimeLoaded", "Loaded {0} sizes at runtime.", fontName)
+                : DevToolsLang.Get("ui.settings.fontStatus.runtimeLoadedNeedsRefresh", "Loaded {0} sizes; texture refresh may require reopening the ImGui window.", fontName);
         }
         catch (Exception exception)
         {
-            _api.Logger.Warning("[InGameDevTools] OpenDyslexic runtime load failed: {0}", exception);
-            return $"OpenDyslexic runtime load failed: {exception.Message}";
+            _api.Logger.Warning("[InGameDevTools] Runtime font load failed for {0}: {1}", fontName, exception);
+            return DevToolsLang.Get("ui.settings.fontStatus.runtimeLoadFailed", "{0} runtime load failed: {1}", fontName, exception.Message);
         }
+    }
+
+    private static string? GetBundledSettingsFontPath(string fontName)
+    {
+        if (fontName.Equals(SettingsFontNotoSansRegular, StringComparison.OrdinalIgnoreCase)) return InGameDevToolsModSystem.BundledNotoSansRegularFontPath;
+        if (fontName.Equals(SettingsFontNotoSansBold, StringComparison.OrdinalIgnoreCase)) return InGameDevToolsModSystem.BundledNotoSansBoldFontPath;
+        if (fontName.Equals(SettingsFontOpenDyslexic, StringComparison.OrdinalIgnoreCase)) return InGameDevToolsModSystem.BundledOpenDyslexicFontPath;
+        return null;
     }
 
     private static void RegisterRuntimeFontWithVSImGui(string path, int size, ImFontPtr font)
@@ -953,11 +1070,11 @@ public sealed partial class DebugWindowManager
             _devToolsConfig.Normalize();
             _api.StoreModConfig(_devToolsConfig, DevToolsConfig.FileName);
             _devToolsConfigSaveQueued = false;
-            _settingsStatus = "Settings saved.";
+            _settingsStatus = DevToolsLang.Get("ui.settings.status.saved", "Settings saved.");
         }
         catch (Exception exception)
         {
-            _settingsStatus = $"Settings save failed: {exception.Message}";
+            _settingsStatus = DevToolsLang.Get("ui.settings.status.saveFailed", "Settings save failed: {0}", exception.Message);
             _api.Logger.Warning("[InGameDevTools] Settings save failed: {0}", exception);
         }
     }
