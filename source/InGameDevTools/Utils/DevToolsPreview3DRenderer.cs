@@ -11,11 +11,13 @@ namespace InGameDevTools.Utils;
 internal sealed class DevToolsPreview3DRenderer : IDisposable
 {
     private const string PreviewQuadParticleShaderName = "ingamedevtools-preview-particlesquad-v6";
+    private const string BillboardShaderName = "ingamedevtools-preview-billboard-v1";
 
     private readonly ICoreClientAPI _api;
     private FrameBufferRef? _frameBuffer;
     private EngineParticlePreview? _particlePreview;
     private IShaderProgram? _previewQuadParticleShader;
+    private IShaderProgram? _billboardShader;
     private readonly HashSet<string> _missingParticleUniformsLogged = new(StringComparer.Ordinal);
 
     public DevToolsPreview3DRenderer(ICoreClientAPI api)
@@ -24,9 +26,16 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         EngineParticleSpawnRedirect.EnsurePatched(api);
     }
 
+    private static readonly IReadOnlyList<DevToolsPreviewBillboard> NoBillboards = Array.Empty<DevToolsPreviewBillboard>();
+
     public int RenderToTexture(float width, float height, DevToolsPreviewCamera camera, IReadOnlyList<DevToolsPreviewMeshInstance> instances, out string? skipReason)
     {
-        return RenderToTexture(width, height, camera, instances, 0f, out skipReason);
+        return RenderToTexture(width, height, camera, instances, NoBillboards, out skipReason);
+    }
+
+    public int RenderToTexture(float width, float height, DevToolsPreviewCamera camera, IReadOnlyList<DevToolsPreviewMeshInstance> instances, float particleDeltaSeconds, out string? skipReason)
+    {
+        return RenderToTexture(width, height, camera, instances, NoBillboards, out skipReason);
     }
 
     public int RenderToTexture(
@@ -34,7 +43,7 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         float height,
         DevToolsPreviewCamera camera,
         IReadOnlyList<DevToolsPreviewMeshInstance> instances,
-        float particleDeltaSeconds,
+        IReadOnlyList<DevToolsPreviewBillboard> billboards,
         out string? skipReason)
     {
         skipReason = null;
@@ -44,7 +53,7 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
             return 0;
         }
 
-        if (instances.Count == 0 && ParticleCount == 0)
+        if (instances.Count == 0 && billboards.Count == 0 && ParticleCount == 0)
         {
             skipReason = "nothing to render";
             return 0;
@@ -128,10 +137,16 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
                 activeShader = null;
             }
 
+            if (billboards.Count > 0)
+            {
+                previousShader?.Stop();
+                RenderBillboards(render, camera, billboards);
+            }
+
             if (ParticleCount > 0)
             {
                 previousShader?.Stop();
-                RenderEngineParticles(camera, particleDeltaSeconds);
+                RenderEngineParticles(camera, 0f);
             }
 
             previousShader?.Use();
@@ -210,6 +225,150 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         SetUniform(shader, "rgbaTint", instance.Tint.X, instance.Tint.Y, instance.Tint.Z, instance.Tint.W);
         SetUniformMatrix(shader, "modelMatrix", instance.ModelMatrix.Values);
         render.RenderMultiTextureMesh(instance.Mesh.MeshRef, "tex", 0);
+    }
+
+    // Renders the CPU-simulated particles as camera-facing billboards into the framebuffer with a
+    // self-contained shader. Cubes are drawn first (opaque, depth-writing); glowing quads second
+    // (additive, order-independent so no sorting needed, no depth write so they don't occlude each other).
+    private void RenderBillboards(IRenderAPI render, DevToolsPreviewCamera camera, IReadOnlyList<DevToolsPreviewBillboard> billboards)
+    {
+        IShaderProgram shader = EnsureBillboardShader();
+        shader.Use();
+        try
+        {
+            SetUniformMatrix(shader, "projectionMatrix", camera.Projection.Values);
+            SetUniformMatrix(shader, "modelViewMatrix", camera.View.Values);
+
+            // Opaque cube billboards.
+            render.GLDepthMask(true);
+            render.GlToggleBlend(true, EnumBlendMode.Standard);
+            SetUniform(shader, "softEdge", 0);
+            RenderBillboardBatch(render, camera, billboards, wantQuad: false);
+
+            // Additive glowing quad billboards.
+            render.GLDepthMask(false);
+            GL.Enable(EnableCap.Blend);
+            GL.BlendEquationSeparate(BlendEquationMode.FuncAdd, BlendEquationMode.FuncAdd);
+            GL.BlendFuncSeparate(BlendingFactorSrc.SrcAlpha, BlendingFactorDest.One, BlendingFactorSrc.Zero, BlendingFactorDest.One);
+            SetUniform(shader, "softEdge", 1);
+            RenderBillboardBatch(render, camera, billboards, wantQuad: true);
+
+            render.GLDepthMask(true);
+        }
+        finally
+        {
+            shader.Stop();
+        }
+    }
+
+    private void RenderBillboardBatch(IRenderAPI render, DevToolsPreviewCamera camera, IReadOnlyList<DevToolsPreviewBillboard> billboards, bool wantQuad)
+    {
+        int count = 0;
+        for (int index = 0; index < billboards.Count; index++)
+        {
+            if (billboards[index].Quad == wantQuad) count++;
+        }
+        if (count == 0) return;
+
+        OpenTK.Mathematics.Vector3 right = camera.Right;
+        OpenTK.Mathematics.Vector3 up = camera.Up;
+
+        MeshData mesh = new(count * 4, count * 6);
+        mesh.SetVerticesCount(count * 4);
+        mesh.SetIndicesCount(count * 6);
+
+        int vertex = 0;
+        int indexPos = 0;
+        for (int billboardIndex = 0; billboardIndex < billboards.Count; billboardIndex++)
+        {
+            DevToolsPreviewBillboard billboard = billboards[billboardIndex];
+            if (billboard.Quad != wantQuad) continue;
+
+            OpenTK.Mathematics.Vector3 center = billboard.Center;
+            float hw = billboard.HalfWidth;
+            OpenTK.Mathematics.Vector3 rx = right * hw;
+            OpenTK.Mathematics.Vector3 uy = up * hw;
+            byte r = (byte)(Math.Clamp(billboard.Color.X, 0f, 1f) * 255f);
+            byte g = (byte)(Math.Clamp(billboard.Color.Y, 0f, 1f) * 255f);
+            byte b = (byte)(Math.Clamp(billboard.Color.Z, 0f, 1f) * 255f);
+            byte a = (byte)(Math.Clamp(billboard.Color.W, 0f, 1f) * 255f);
+
+            int baseVertex = vertex;
+            AddBillboardVertex(mesh, ref vertex, center - rx - uy, 0f, 0f, r, g, b, a);
+            AddBillboardVertex(mesh, ref vertex, center + rx - uy, 1f, 0f, r, g, b, a);
+            AddBillboardVertex(mesh, ref vertex, center + rx + uy, 1f, 1f, r, g, b, a);
+            AddBillboardVertex(mesh, ref vertex, center - rx + uy, 0f, 1f, r, g, b, a);
+
+            mesh.Indices[indexPos++] = baseVertex + 0;
+            mesh.Indices[indexPos++] = baseVertex + 1;
+            mesh.Indices[indexPos++] = baseVertex + 2;
+            mesh.Indices[indexPos++] = baseVertex + 0;
+            mesh.Indices[indexPos++] = baseVertex + 2;
+            mesh.Indices[indexPos++] = baseVertex + 3;
+        }
+
+        MeshRef meshRef = render.UploadMesh(mesh);
+        try
+        {
+            render.RenderMesh(meshRef);
+        }
+        finally
+        {
+            meshRef.Dispose();
+        }
+    }
+
+    private static void AddBillboardVertex(MeshData mesh, ref int vertex, OpenTK.Mathematics.Vector3 position, float u, float v, byte r, byte g, byte b, byte a)
+    {
+        int xyz = vertex * 3;
+        mesh.xyz[xyz] = position.X;
+        mesh.xyz[xyz + 1] = position.Y;
+        mesh.xyz[xyz + 2] = position.Z;
+
+        int uvOffset = vertex * 2;
+        mesh.Uv[uvOffset] = u;
+        mesh.Uv[uvOffset + 1] = v;
+
+        int rgba = vertex * 4;
+        mesh.Rgba[rgba] = r;
+        mesh.Rgba[rgba + 1] = g;
+        mesh.Rgba[rgba + 2] = b;
+        mesh.Rgba[rgba + 3] = a;
+
+        vertex++;
+    }
+
+    private IShaderProgram EnsureBillboardShader()
+    {
+        if (_billboardShader is { Disposed: false, LoadError: false })
+        {
+            return _billboardShader;
+        }
+
+        IShaderProgram? existing = TryGetShaderProgram(BillboardShaderName);
+        if (existing is { Disposed: false, LoadError: false })
+        {
+            _billboardShader = existing;
+            return existing;
+        }
+
+        IShaderProgram shader = _api.Shader.NewShaderProgram();
+        IShader vertexShader = _api.Shader.NewShader(EnumShaderType.VertexShader);
+        vertexShader.Code = BillboardVertexShader;
+        shader.VertexShader = vertexShader;
+
+        IShader fragmentShader = _api.Shader.NewShader(EnumShaderType.FragmentShader);
+        fragmentShader.Code = BillboardFragmentShader;
+        shader.FragmentShader = fragmentShader;
+
+        _api.Shader.RegisterMemoryShaderProgram(BillboardShaderName, shader);
+        if (!shader.Compile())
+        {
+            throw new InvalidOperationException("Could not compile preview billboard shader.");
+        }
+
+        _billboardShader = shader;
+        return shader;
     }
 
     private FrameBufferRef EnsureFrameBuffer(int width, int height)
@@ -463,14 +622,38 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         private const int QuadPoolSize = 4096;
         private const int CubePoolSize = 2048;
         private readonly ICoreClientAPI _api;
+        private readonly ClientMain _client;
         private bool _primed;
         private bool _updating;
 
         public EngineParticlePreview(ICoreClientAPI api, ClientMain client)
         {
             _api = api;
+            _client = client;
             QuadPool = new ParticlePoolQuads(QuadPoolSize, client, offthread: false);
             CubePool = new ParticlePoolCubes(CubePoolSize, client, offthread: false);
+        }
+
+        // The engine particle pools refuse to do anything while the game is paused: ParticlePool*.OnNewFrame
+        // returns immediately (so QuantityAlive is never refreshed and the instance mesh is never uploaded)
+        // and SpawnParticles multiplies the spawn quantity by currentGamespeed, which only ever gets set
+        // inside OnNewFrame. The dev tools editor is an ImGui overlay that very often runs while the game is
+        // paused (single-player pauses on lost focus the moment VSImGui spills onto an OS viewport, and the
+        // escape menu pauses too), which left the preview permanently empty. Clearing IsPaused for the
+        // duration of our isolated tick/spawn restores the engine behaviour without disturbing game state -
+        // it is set back before the call returns, all on the render thread.
+        private void RunUnpaused(Action action)
+        {
+            bool wasPaused = _client.IsPaused;
+            if (wasPaused) _client.IsPaused = false;
+            try
+            {
+                action();
+            }
+            finally
+            {
+                if (wasPaused) _client.IsPaused = true;
+            }
         }
 
         public IParticlePool QuadPool { get; }
@@ -489,20 +672,23 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
 
         public int Spawn(IEnumerable<IParticlePropertiesProvider> particleProperties, Vector3 cameraPosition)
         {
-            Prime(cameraPosition);
             int spawned = 0;
-            foreach (IParticlePropertiesProvider particle in particleProperties)
+            RunUnpaused(() =>
             {
-                if (particle == null) continue;
-                particle.Init(_api);
-                IParticlePool pool = particle.ParticleModel == EnumParticleModel.Quad ? QuadPool : CubePool;
-                spawned += pool.SpawnParticles(particle);
-            }
+                Prime(cameraPosition);
+                foreach (IParticlePropertiesProvider particle in particleProperties)
+                {
+                    if (particle == null) continue;
+                    particle.Init(_api);
+                    IParticlePool pool = particle.ParticleModel == EnumParticleModel.Quad ? QuadPool : CubePool;
+                    spawned += pool.SpawnParticles(particle);
+                }
 
-            if (spawned > 0 && !_updating)
-            {
-                Upload(cameraPosition);
-            }
+                if (spawned > 0 && !_updating)
+                {
+                    Upload(cameraPosition);
+                }
+            });
 
             return spawned;
         }
@@ -525,11 +711,11 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
             _updating = true;
             try
             {
-                EngineParticleSpawnRedirect.RunWithPreview(this, () =>
+                RunUnpaused(() => EngineParticleSpawnRedirect.RunWithPreview(this, () =>
                 {
                     CubePool.OnNewFrame(deltaSeconds, cameraPos);
                     QuadPool.OnNewFrame(deltaSeconds, cameraPos);
-                });
+                }));
             }
             finally
             {
@@ -730,6 +916,57 @@ void main()
     outColor = vec4(clamp(rgb, vec3(0.0), vec3(1.0)), alpha);
 }
 """;
+
+    // Self-contained billboard shader (no engine globals): transforms world-space camera-facing quads and
+    // applies the same soft-square edge falloff the engine quad particle shader uses.
+    private const string BillboardVertexShader = """
+#version 330 core
+#extension GL_ARB_explicit_attrib_location: enable
+
+layout (location = 0) in vec3 vertexPosition;
+layout (location = 1) in vec2 uvIn;
+layout (location = 2) in vec4 colorIn;
+
+uniform mat4 projectionMatrix;
+uniform mat4 modelViewMatrix;
+
+out vec2 uv;
+out vec4 color;
+
+void main()
+{
+    uv = uvIn;
+    color = colorIn;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(vertexPosition, 1.0);
+}
+""";
+
+    private const string BillboardFragmentShader = """
+#version 330 core
+#extension GL_ARB_explicit_attrib_location: enable
+
+in vec2 uv;
+in vec4 color;
+
+uniform int softEdge;
+
+layout(location = 0) out vec4 outColor;
+
+void main()
+{
+    vec4 c = color;
+    if (softEdge == 1) {
+        vec2 edge = vec2(
+            max(max(0.0, 0.1 - uv.x), max(0.0, uv.x - 0.9)),
+            max(max(0.0, 0.1 - uv.y), max(0.0, uv.y - 0.9))
+        );
+        c.a *= 1.0 - clamp(length(edge) * 10.0, 0.0, 1.0);
+    }
+
+    if (c.a < 0.004) discard;
+    outColor = vec4(clamp(c.rgb, vec3(0.0), vec3(1.0)), clamp(c.a, 0.0, 1.0));
+}
+""";
 }
 
 internal sealed class DevToolsPreviewMesh : IDisposable
@@ -769,6 +1006,13 @@ internal readonly record struct DevToolsPreviewMeshInstance
     public Matrixf ModelMatrix { get; }
     public Vector4 Tint { get; }
 }
+
+/// <summary>
+/// A single camera-facing particle billboard in preview-world space. <paramref name="HalfWidth"/> is the
+/// half-extent in blocks; <paramref name="Quad"/> particles are drawn additively with a soft-square edge,
+/// cubes opaquely.
+/// </summary>
+internal readonly record struct DevToolsPreviewBillboard(Vector3 Center, float HalfWidth, Vector4 Color, bool Quad);
 
 internal static class DevToolsPreviewMeshFactory
 {

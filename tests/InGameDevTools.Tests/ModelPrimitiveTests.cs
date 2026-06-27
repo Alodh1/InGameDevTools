@@ -265,6 +265,31 @@ public sealed class ModelPrimitiveTests
     }
 
     [Fact]
+    public void ElementCut_ReparentsChildrenToContainingPieces()
+    {
+        object source = CreateElement("Parent", [0, 0, 0], [8, 4, 4], faces: true);
+        object leftChild = CreateElement("LeftChild", [1, 1, 1], [2, 2, 2], faces: true);
+        object rightChild = CreateElement("RightChild", [6, 1, 1], [7, 2, 2], faces: true);
+        AddChild(source, leftChild);
+        AddChild(source, rightChild);
+
+        MethodInfo buildCutPieces = typeof(DebugWindowManager).GetMethod("ModelBuildCutPieces", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelBuildCutPieces");
+        IList pieces = (IList)buildCutPieces.Invoke(null, [source, 2, 1, 1, (Func<string, string>)(name => name)])!;
+        MethodInfo attach = typeof(DebugWindowManager).GetMethod("ModelAttachCutChildrenToPieces", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelAttachCutChildrenToPieces");
+        attach.Invoke(null, [source, pieces]);
+
+        object leftPiece = pieces[0]!;
+        object rightPiece = pieces[1]!;
+        Assert.Empty((IList)GetMember(source, "Children"));
+        Assert.Same(leftPiece, GetMember(leftChild, "Parent"));
+        Assert.Same(rightPiece, GetMember(rightChild, "Parent"));
+        Assert.Contains(leftChild, ((IList)GetMember(leftPiece, "Children")).Cast<object>());
+        Assert.Contains(rightChild, ((IList)GetMember(rightPiece, "Children")).Cast<object>());
+    }
+
+    [Fact]
     public void ChiselMicroblock_UsesSelectedTextureAndContinuousUv()
     {
         object source = CreateElement("Box", [0, 0, 0], [16, 16, 16], faces: true);
@@ -285,6 +310,62 @@ public sealed class ModelPrimitiveTests
         Assert.Equal(new float[] { 2, 3, 3, 4 }, (float[])GetMember(faces.GetValue(0)!, "Uv"));
         Assert.Equal(new float[] { 4, 3, 5, 4 }, (float[])GetMember(faces.GetValue(1)!, "Uv"));
         Assert.Equal(new float[] { 2, 4, 3, 5 }, (float[])GetMember(faces.GetValue(4)!, "Uv"));
+    }
+
+    [Fact]
+    public void ChiselMerge_CombinesAdjacentSameTextureCubes()
+    {
+        object source = CreateElement("Box", [0, 0, 0], [16, 16, 16], faces: true);
+        IList elements = CreateElementList();
+        elements.Add(CreateChiselBlock(source, [0, 0, 0], [1, 1, 1], "stone"));
+        object preferred = CreateChiselBlock(source, [1, 0, 0], [2, 1, 1], "stone");
+        elements.Add(preferred);
+
+        object? selected = InvokeMergeChiselElements(elements, preferred);
+
+        Assert.Same(preferred, selected);
+        Assert.Single(elements);
+        object merged = elements[0]!;
+        Assert.Equal(new double[] { 0, 0, 0 }, (double[])GetMember(merged, "From"));
+        Assert.Equal(new double[] { 2, 1, 1 }, (double[])GetMember(merged, "To"));
+        Array faces = (Array)GetMember(merged, "Faces");
+        Assert.Equal("stone", GetMember(faces.GetValue(0)!, "Texture"));
+        Assert.Equal(new float[] { 0, 0, 2, 1 }, (float[])GetMember(faces.GetValue(0)!, "Uv"));
+    }
+
+    [Fact]
+    public void ChiselMerge_DoesNotCombineDifferentTextures()
+    {
+        object source = CreateElement("Box", [0, 0, 0], [16, 16, 16], faces: true);
+        IList elements = CreateElementList();
+        object stone = CreateChiselBlock(source, [0, 0, 0], [1, 1, 1], "stone");
+        object clay = CreateChiselBlock(source, [1, 0, 0], [2, 1, 1], "clay");
+        elements.Add(stone);
+        elements.Add(clay);
+
+        object? selected = InvokeMergeChiselElements(elements, clay);
+
+        Assert.Same(clay, selected);
+        Assert.Equal(2, elements.Count);
+        Assert.Contains(elements.Cast<object>(), element => string.Equals("stone", GetMember(((Array)GetMember(element, "Faces")).GetValue(0)!, "Texture")));
+        Assert.Contains(elements.Cast<object>(), element => string.Equals("clay", GetMember(((Array)GetMember(element, "Faces")).GetValue(0)!, "Texture")));
+    }
+
+    [Fact]
+    public void ChiselPreview_UsesConfiguredCellSize()
+    {
+        object source = CreateElement("Box", [0, 0, 0], [16, 16, 16], faces: true);
+        MethodInfo build = typeof(DebugWindowManager).GetMethod("ModelTryBuildChiselPreview", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelTryBuildChiselPreview");
+        object?[] args = [source, new double[] { 2.2, 2.2, 16 }, 2, true, 0.5d, null];
+
+        Assert.True((bool)build.Invoke(null, args)!);
+        object preview = args[5]!;
+
+        Assert.Equal(new double[] { 2.0, 2.0, 15.5 }, (double[])GetMember(preview, "RemoveFrom"));
+        Assert.Equal(new double[] { 2.5, 2.5, 16.0 }, (double[])GetMember(preview, "RemoveTo"));
+        Assert.Equal(new double[] { 2.0, 2.0, 16.0 }, (double[])GetMember(preview, "AddFrom"));
+        Assert.Equal(new double[] { 2.5, 2.5, 16.5 }, (double[])GetMember(preview, "AddTo"));
     }
 
     [Fact]
@@ -331,6 +412,28 @@ public sealed class ModelPrimitiveTests
                 Assert.Equal("stone", GetMember(face, "Texture"));
             }
         }
+    }
+
+    [Fact]
+    public void RandomizeUvFace_PreservesSizeOrientationAndBounds()
+    {
+        object source = CreateElement("Box", [0, 0, 0], [16, 16, 16], faces: true);
+        object face = ((Array)GetMember(source, "Faces")).GetValue(0)!;
+        SetMember(face, "Uv", new float[] { 6, 3, 2, 8 });
+        MethodInfo randomize = typeof(DebugWindowManager).GetMethod("ModelRandomizeUvFace", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelRandomizeUvFace");
+
+        Assert.True((bool)randomize.Invoke(null, [face, 16, 16, new Random(123), 1f])!);
+
+        float[] uv = (float[])GetMember(face, "Uv");
+        Assert.Equal(4f, MathF.Abs(uv[2] - uv[0]), precision: 4);
+        Assert.Equal(5f, MathF.Abs(uv[3] - uv[1]), precision: 4);
+        Assert.True(uv[0] > uv[2]);
+        Assert.True(uv[1] < uv[3]);
+        Assert.InRange(MathF.Min(uv[0], uv[2]), 0f, 12f);
+        Assert.InRange(MathF.Max(uv[0], uv[2]), 4f, 16f);
+        Assert.InRange(MathF.Min(uv[1], uv[3]), 0f, 11f);
+        Assert.InRange(MathF.Max(uv[1], uv[3]), 5f, 16f);
     }
 
     private static int NonZeroRotationAxes(PrimitiveElement element)
@@ -523,6 +626,28 @@ public sealed class ModelPrimitiveTests
         }
 
         return element;
+    }
+
+    private static IList CreateElementList()
+    {
+        Type elementType = typeof(DebugWindowManager).GetNestedType("ModelElementData", BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(nameof(DebugWindowManager), "ModelElementData");
+        Type listType = typeof(List<>).MakeGenericType(elementType);
+        return (IList)(Activator.CreateInstance(listType) ?? throw new InvalidOperationException("Could not create model element list."));
+    }
+
+    private static object CreateChiselBlock(object source, double[] from, double[] to, string texture)
+    {
+        MethodInfo create = typeof(DebugWindowManager).GetMethod("ModelCreateChiselMicroblock", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelCreateChiselMicroblock");
+        return create.Invoke(null, [source, from, to, texture, (Func<string, string>)(name => name)])!;
+    }
+
+    private static object? InvokeMergeChiselElements(IList elements, object preferred)
+    {
+        MethodInfo merge = typeof(DebugWindowManager).GetMethod("ModelMergeChiselElements", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelMergeChiselElements");
+        return merge.Invoke(null, [elements, preferred]);
     }
 
     private static void AddChild(object parent, object child)

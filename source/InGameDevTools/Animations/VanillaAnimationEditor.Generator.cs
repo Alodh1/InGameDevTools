@@ -1,4 +1,5 @@
 using ImGuiNET;
+using System.Text;
 using System.Text.RegularExpressions;
 using Vintagestory.API.Common;
 using Vintagestory.API.MathTools;
@@ -106,7 +107,7 @@ public sealed partial class DebugWindowManager
         public float TailSway = 14f;
         public float TailWave = 45f;
         public float HeadBob = 4f;
-        public float WingFlap = 35f;
+        public float WingFlap;          // 0 by default: wings only flap on a flight gait (or when set by hand)
         public int WingBeats = 1;
         public float Asymmetry = 0.12f;
 
@@ -129,6 +130,7 @@ public sealed partial class DebugWindowManager
         public float BodyPitch;             // fore/aft rock of the torso (deg)
         public float BodySway;              // lateral body sway / waddle (1/16 units)
         public float HeadYaw;               // head looks left/right as it moves (deg)
+        public float HeadStabilize;         // 0..1 gaze stabilization: damp the head bob and counter the body's pitch/roll so the head holds level
         public float NeckBob;               // slow neck nod (deg)
         public float Breathing;             // torso breathing pulse (StretchY fraction)
         public int BreathRate = 1;          // breaths per loop
@@ -151,6 +153,20 @@ public sealed partial class DebugWindowManager
         public float WingChainLag;          // Task 17: phase lag (deg) added per wing segment outward (tip billow)
         public float SecondaryJiggle;       // Task 34: passive lagged wobble on loose elements (crest/fur/dewlap...)
         public float Squash;                // Task 33: 0..1 squash&stretch coupled to the body bob low point
+
+        // ---- Cutting-edge: physics-based secondary motion + a biomechanical speed model (defaults are no-ops) ----
+        public bool JigglePhysics;          // spring-damper follow-through on loose parts (tail/ear/crest/fin/...)
+        public float Floppiness = 0.5f;     // 0 = stiff & snappy, 1 = floppy & laggy (lower natural frequency)
+        public float JiggleBounce = 0.35f;  // 0 = critically damped (no overshoot), 1 = springy overshoot
+        public float Speed = 1f;            // biomechanical speed: coherently scales cadence/stride/duty/bob (1 = preset baseline)
+
+        public bool FootLock;               // ground-contact IK: the stance foot stays planted (no foot-slide)
+        public float FootLockHeight = 0.92f;// rest foot drop as a fraction of leg length (slightly bent so the IK is solvable)
+        public float FootLockReach = 1f;    // multiplier on the planted-foot fore-aft travel
+
+        // Runtime-only (not a user parameter, not serialized): the element->parent map for coupled-chain jiggle
+        // physics, populated from the shape when the document is available.
+        public Dictionary<string, string>? HierarchyParents;
 
         // Pose / action
         public VanillaGenAction Action = VanillaGenAction.Sit;
@@ -187,10 +203,18 @@ public sealed partial class DebugWindowManager
     }
 
     private readonly record struct VanillaGenElementChannel(
-        string Element, VanillaGenChannelTarget Field, VanillaGenWave Wave, double Amplitude, int Frequency, double PhaseDeg, double Bias, double Shape = 0.0, double Sharpness = 1.0);
+        string Element, VanillaGenChannelTarget Field, VanillaGenWave Wave, double Amplitude, int Frequency, double PhaseDeg, double Bias, double Shape = 0.0, double Sharpness = 1.0)
+    {
+        // When set, this channel's value is this function of the cyclic position (used by the foot-lock IK to
+        // emit per-phase joint angles); the wave/amplitude/bias/intensity path is bypassed.
+        public System.Func<double, double>? Curve { get; init; }
+    }
 
     private bool _vanillaAnimationGeneratorWindowOpen;
     private bool _vanillaGenAdvanced;
+    private bool _vanillaGenLiveUpdate = true;
+    private bool _vanillaGenApplyingLiveUpdate;
+    private string _vanillaGenLiveFingerprint = "";
     private readonly VanillaGenParams _vanillaGenParams = new();
     private string _vanillaGenLastAnimationCode = "";
 
@@ -294,6 +318,15 @@ public sealed partial class DebugWindowManager
             ImGui.SetTooltip($"Rewrite the last generated animation ('{_vanillaGenLastAnimationCode}') in place with the current parameters.");
         }
         if (!canGenerate) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Live update while playing##vanilla-gen-live", ref _vanillaGenLiveUpdate);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("When the last generated animation is selected and playing, slider edits rewrite it in place without rebuilding the preview mesh.");
+        }
+
+        UpdateVanillaGenLivePreview(document, p, canGenerate, targetCount);
 
         if (!string.IsNullOrWhiteSpace(_vanillaStatus))
         {
@@ -487,6 +520,16 @@ public sealed partial class DebugWindowManager
             ImGui.SetTooltip("Reset the locomotion parameters to sensible defaults for this gait.");
         }
 
+        ImGui.SetNextItemWidth(150f);
+        if (ImGui.SliderFloat("Speed##vanilla-gen-speed", ref p.Speed, 0.3f, 3f, "%.2fx") && p.Speed > 0f)
+        {
+            ApplyVanillaGaitPreset(p);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Biomechanical speed: one knob rescales the gait coherently - faster takes a quicker cadence, a longer stride, a lower stance (duty) factor, a bigger bob and a forward lean. Re-applies the preset.");
+        }
+
         ImGui.SeparatorText("Legs");
         ImGui.DragFloat("Stride##vanilla-gen-legstride", ref p.LegStride, 0.5f, 0f, 90f, "%.1f deg");
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Fore-aft swing of the whole leg from the hip.");
@@ -498,6 +541,16 @@ public sealed partial class DebugWindowManager
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Counter-bend of the foot/lower joints so the foot stays oriented through the step.");
         ImGui.Checkbox("Flip knee direction##vanilla-gen-kneeflip", ref p.KneeFlip);
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Flip the knee bend direction if it bends the wrong way for this rig.");
+
+        ImGui.Checkbox("Foot lock (IK)##vanilla-gen-footlock", ref p.FootLock);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Ground-contact inverse kinematics: solve the hip + knee so the stance foot stays planted (constant height, constant backward sweep) instead of arcing - zero foot-slide, the gold standard of procedural locomotion. Needs two-bone legs; tune with Flip knee. Best on legs that rest roughly straight down.");
+        if (p.FootLock)
+        {
+            ImGui.SliderFloat("Foot height##vanilla-gen-footlockheight", ref p.FootLockHeight, 0.6f, 0.99f, "%.2f");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Resting foot drop as a fraction of leg length (lower = more bent knees / crouch).");
+            ImGui.SliderFloat("Foot reach##vanilla-gen-footlockreach", ref p.FootLockReach, 0.2f, 2f, "%.2f");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("How far the planted foot travels fore-aft (scales the stride distance).");
+        }
 
         ImGui.SeparatorText("Body");
         ImGui.DragFloat("Bob##vanilla-gen-bodybob", ref p.BodyBob, 0.05f, 0f, 8f, "%.2f");
@@ -530,6 +583,8 @@ public sealed partial class DebugWindowManager
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("Lateral waddle of the torso (1/16-block units).");
             ImGui.DragFloat("Head yaw##vanilla-gen-headyaw", ref p.HeadYaw, 0.5f, 0f, 45f, "%.1f deg");
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("Head turns left/right as it moves.");
+            ImGui.SliderFloat("Gaze stabilize##vanilla-gen-headstab", ref p.HeadStabilize, 0f, 1f, "%.2f");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Hold the head level: damps its own bob and counters the body's pitch/roll so the gaze stays steady (stalking, aiming, birds of prey). 0 = off.");
             ImGui.DragFloat("Neck bob##vanilla-gen-neckbob", ref p.NeckBob, 0.5f, 0f, 45f, "%.1f deg");
             ImGui.DragFloat("Ear flop##vanilla-gen-earflop", ref p.EarFlop, 0.5f, 0f, 60f, "%.1f deg");
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("Floppy ears / antennae (any element named 'ear'), beating in sync.");
@@ -568,6 +623,17 @@ public sealed partial class DebugWindowManager
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("Task 11: hold the jaw open; large values add a pant cycle.");
             ImGui.DragFloat("Secondary jiggle##vanilla-gen-jiggle", ref p.SecondaryJiggle, 0.02f, 0f, 2f, "%.2f");
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("Task 34: passive lagged wobble on loose elements (crest/fur/dewlap/wattle/feather/fin/mane).");
+
+            ImGui.SeparatorText("Soft-body physics");
+            ImGui.Checkbox("Jiggle physics##vanilla-gen-jigglephys", ref p.JigglePhysics);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Run a real damped-spring follow-through over the keyframes for loose parts (tail/ear/antenna/crest/fin/plume/floof). They lag, overshoot and settle like soft tissue instead of snapping to their keyed pose. Works in any mode.");
+            if (p.JigglePhysics)
+            {
+                ImGui.SliderFloat("Floppiness##vanilla-gen-floppy", ref p.Floppiness, 0f, 1f, "%.2f");
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Soft tissue mass/looseness: 0 = stiff and snappy, 1 = floppy with a long lag.");
+                ImGui.SliderFloat("Bounce##vanilla-gen-jigglebounce", ref p.JiggleBounce, 0f, 1f, "%.2f");
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Damping: 0 = settles cleanly with no overshoot, 1 = springy, overshoots and wobbles before settling.");
+            }
 
             ImGui.SeparatorText("Flight");
             ImGui.SliderFloat("Leg tuck##vanilla-gen-legtuck", ref p.LegTuck, 0f, 1f, "%.2f");
@@ -751,11 +817,15 @@ public sealed partial class DebugWindowManager
 
     private static void ApplyVanillaGaitPreset(VanillaGenParams p)
     {
+        // Every preset starts the whole body STILL, then turns on only the motions that gait actually uses. So a
+        // part never moves unless this gait asks it to - e.g. wings hold their rest pose on the ground and only
+        // beat when the gait flies (set below in Fly). This is what stops walk/swim/stalk from flapping wings.
         p.KneeFlip = false;
         p.Asymmetry = 0.12f;
         p.TailWave = 45f;
-        p.WingFlap = 35f;
+        p.WingFlap = 0f;        // wings still unless the gait flies
         p.WingBeats = 1;
+        p.WingChainLag = 0f;    // flight-only; reset so it never leaks onto a ground gait
         // Secondary-motion defaults; individual gaits tune them below.
         p.FootLift = 2f;
         p.BodyPitch = 2f;
@@ -779,6 +849,7 @@ public sealed partial class DebugWindowManager
         p.FlightBob = 0f;
         p.NeckCurve = 0f;
         p.Squash = 0f;
+        p.HeadStabilize = 0f;
         switch (p.Gait)
         {
             case VanillaGenGait.Walk:
@@ -825,6 +896,7 @@ public sealed partial class DebugWindowManager
                 (p.Frames, p.LegStride, p.StanceRatio, p.KneeFlex, p.AnkleBend, p.ArmSwing, p.BodyBob, p.BodyRoll, p.SpineBend, p.TailSway, p.HeadBob) = (44, 22f, 0.72f, 18f, 8f, 14f, 0.25f, 2f, 7f, 8f, 2f);
                 (p.FootLift, p.BodyPitch) = (1f, 1f);                    // slow, low, deliberate
                 (p.BodyTilt, p.TailSet) = (-6f, -8f);                    // crouched, head and tail low
+                p.HeadStabilize = 0.7f;                                  // eyes locked on the prey
                 break;
             case VanillaGenGait.Crawl:
                 (p.Frames, p.LegStride, p.StanceRatio, p.KneeFlex, p.AnkleBend, p.ArmSwing, p.BodyBob, p.BodyRoll, p.SpineBend, p.TailSway, p.HeadBob) = (46, 20f, 0.7f, 16f, 7f, 16f, 0.2f, 2f, 11f, 10f, 2f);
@@ -842,6 +914,29 @@ public sealed partial class DebugWindowManager
                 (p.EarsBack, p.MouthOpen, p.BodyTilt, p.TailSet) = (28f, 22f, -14f, 14f);
                 break;
         }
+
+        ApplyVanillaSpeedScaling(p);
+    }
+
+    /// <summary>Biomechanical speed model: one knob coherently rescales the gait the preset just laid down.
+    /// Faster animals take a quicker cadence (fewer frames per loop), a longer stride, a LOWER duty factor
+    /// (less of the cycle spent in stance - the defining mark of a fast gait), a bigger bob/knee flex and a
+    /// slight forward lean. 1.0 leaves the preset untouched; idle is exempt.</summary>
+    private static void ApplyVanillaSpeedScaling(VanillaGenParams p)
+    {
+        double speed = Math.Clamp((double)p.Speed, 0.2, 4.0);
+        if (Math.Abs(speed - 1.0) < 1e-3 || p.Gait == VanillaGenGait.Idle) return;
+
+        p.Frames = Math.Clamp((int)Math.Round(p.Frames / Math.Sqrt(speed)), 4, 240);
+        p.LegStride *= (float)Math.Pow(speed, 0.55);
+        p.ArmSwing *= (float)Math.Pow(speed, 0.55);
+        p.StanceRatio = (float)Math.Clamp(p.StanceRatio * Math.Pow(speed, -0.32), 0.28, 0.85);
+        p.KneeFlex *= (float)Math.Pow(speed, 0.30);
+        p.AnkleBend *= (float)Math.Pow(speed, 0.30);
+        p.FootLift *= (float)speed;
+        p.BodyBob *= (float)Math.Pow(speed, 0.8);
+        p.BodyRoll *= (float)Math.Pow(speed, 0.4);
+        if (speed > 1.0) p.BodyTilt -= (float)(4.0 * (speed - 1.0)); // lean into the run
     }
 
     // ---- Generation core ---------------------------------------------------
@@ -874,6 +969,8 @@ public sealed partial class DebugWindowManager
         foreach (string name in baseSet)
         {
             if (!seen.Add(name)) continue;
+            bool explicitTargeting = p.Scope != VanillaGenTargetScope.All || include.Count > 0;
+            if (!explicitTargeting && IsVanillaGenInheritedDetail(name.ToLowerInvariant())) continue;
             if (include.Count > 0 && !include.Any(glob => glob.IsMatch(name))) continue;
             if (exclude.Count > 0 && exclude.Any(glob => glob.IsMatch(name))) continue;
             result.Add(name);
@@ -939,6 +1036,7 @@ public sealed partial class DebugWindowManager
     private sealed class VanillaLocoLeg
     {
         public List<string> Segments = [];
+        public List<double> SegmentLengths = []; // bone lengths (shape units), hip->foot, for the foot-lock IK
         public int Side;        // 0 = left, 1 = right
         public bool SideKnown;
         public int Row;         // 0 = front-most
@@ -979,19 +1077,27 @@ public sealed partial class DebugWindowManager
         {
             string lower = name.ToLowerInvariant();
             if (IsVanillaLocoLeg(lower) || IsVanillaLocoArm(lower)) continue;
+            // Generated surface/detail geometry rides its parent bone. Giving it its own channel double-transforms
+            // it, which looks like a duplicate shape clipping through the animated rig.
+            if (IsVanillaGenInheritedDetail(lower)) continue;
 
             if (lower.Contains("wing"))
             {
-                // Wings beat up and down together (a mirror image), not in alternation. The two wings are
-                // mirror images across the body's lateral axis, so an identical flap rotation lifts them in
-                // OPPOSITE vertical directions; the right side is negated so the pair stays in sync.
-                double flapSign = VanillaMirroredFlapSign(document, name, allElements);
-                // Task 17: distal wing segments lag the proximal beat, with a decaying amplitude, so the
-                // membrane billows and follows through instead of moving as one rigid plank.
-                int depth = wingDepth.TryGetValue(name, out int d) ? d : 0;
-                double lag = p.WingChainLag * depth;
-                double billowFalloff = Math.Pow(0.8, depth);
-                result.Add(new VanillaGenElementChannel(name, VanillaGenChannelTarget.RotationX, VanillaGenWave.Sine, p.WingFlap * flapSign * billowFalloff, Math.Max(1, p.WingBeats), lag, 0.0));
+                // Wings only beat when the gait actually flies (WingFlap > 0). On a ground/water gait the wings
+                // are a folded flight organ - they hold their rest pose, they do NOT flap with the stride.
+                if (p.WingFlap > 0.01)
+                {
+                    // Wings beat up and down together (a mirror image), not in alternation. The two wings are
+                    // mirror images across the body's lateral axis, so an identical flap rotation lifts them in
+                    // OPPOSITE vertical directions; the right side is negated so the pair stays in sync.
+                    double flapSign = VanillaMirroredFlapSign(document, name, allElements);
+                    // Task 17: distal wing segments lag the proximal beat, with a decaying amplitude, so the
+                    // membrane billows and follows through instead of moving as one rigid plank.
+                    int depth = wingDepth.TryGetValue(name, out int d) ? d : 0;
+                    double lag = p.WingChainLag * depth;
+                    double billowFalloff = Math.Pow(0.8, depth);
+                    result.Add(new VanillaGenElementChannel(name, VanillaGenChannelTarget.RotationX, VanillaGenWave.Sine, p.WingFlap * flapSign * billowFalloff, Math.Max(1, p.WingBeats), lag, 0.0));
+                }
             }
             else if (lower.Contains("tail"))
             {
@@ -1018,10 +1124,24 @@ public sealed partial class DebugWindowManager
             }
             else if (lower.Contains("head"))
             {
-                result.Add(new VanillaGenElementChannel(name, VanillaGenChannelTarget.RotationZ, VanillaGenWave.Sine, p.HeadBob, 2, 180.0, VanillaHeadTiltBias(p)));
+                // Gaze stabilization: a stabilized head bobs less of its own and counters the body's inherited
+                // pitch/roll (emitted on the root spine), so the head holds level - the hallmark of a steady
+                // predator/prey gaze. The head is down-chain of the spine, so an equal-and-opposite rotation
+                // cancels the body's at the head.
+                double stab = Math.Clamp(p.HeadStabilize, 0.0, 1.0);
+                double headBob = p.HeadBob * (1.0 - 0.7 * stab);
+                result.Add(new VanillaGenElementChannel(name, VanillaGenChannelTarget.RotationZ, VanillaGenWave.Sine, headBob, 2, 180.0, VanillaHeadTiltBias(p)));
                 if (p.HeadYaw > 0.01)
                 {
                     result.Add(new VanillaGenElementChannel(name, VanillaGenChannelTarget.RotationY, VanillaGenWave.Sine, p.HeadYaw, 1, 90.0, 0.0));
+                }
+                if (stab > 0.001 && p.BodyPitch > 0.01)
+                {
+                    result.Add(new VanillaGenElementChannel(name, VanillaGenChannelTarget.RotationZ, VanillaGenWave.Sine, -p.BodyPitch * stab, 2, 90.0, 0.0));
+                }
+                if (stab > 0.001 && p.BodyRoll > 0.01)
+                {
+                    result.Add(new VanillaGenElementChannel(name, VanillaGenChannelTarget.RotationX, VanillaGenWave.Sine, -p.BodyRoll * stab, 1, 0.0, 0.0));
                 }
             }
             else if (lower.Contains("neck"))
@@ -1132,6 +1252,42 @@ public sealed partial class DebugWindowManager
             || lower.Contains("tuft") || lower.Contains("whisker");
     }
 
+    /// <summary>Decorative geometry the creature generator adds as children of a real bone - rounding facets
+    /// (<c>{part}Round{n}</c>), joint-gap knuckles (<c>joint{n}</c>) and scattered quills (<c>quill{n}</c>).
+    /// These inherit their parent's motion already, so the locomotion classifier must not give them their own
+    /// channel (and a facet named after a spine/head/tail bone would otherwise corrupt the phase sequence).</summary>
+    private static bool IsVanillaGenDecorativeDetail(string lower)
+    {
+        return Regex.IsMatch(lower, @"round\d+$") || Regex.IsMatch(lower, @"^joint\d+$") || Regex.IsMatch(lower, @"^quill\d+$");
+    }
+
+    private static bool IsVanillaGenInheritedDetail(string lower)
+    {
+        return IsVanillaGenDecorativeDetail(lower)
+            || lower.Contains("membrane", StringComparison.Ordinal)
+            || lower.Contains("web", StringComparison.Ordinal);
+    }
+
+    /// <summary>element -&gt; parent-element name map from the shape hierarchy, for coupled-chain jiggle physics.</summary>
+    private static Dictionary<string, string> BuildVanillaParentMap(VanillaAnimationDocument document)
+    {
+        Dictionary<string, string> parents = new(StringComparer.OrdinalIgnoreCase);
+        Shape? shape = document.Shape;
+        if (shape == null) return parents;
+
+        void Visit(ShapeElement element)
+        {
+            string? name = element.Name;
+            foreach (ShapeElement child in element.Children ?? [])
+            {
+                if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(child.Name)) parents[child.Name!] = name!;
+                Visit(child);
+            }
+        }
+        foreach (ShapeElement root in shape.Elements ?? []) Visit(root);
+        return parents;
+    }
+
     /// <summary>Depth of each wing element within its wing chain (0 = the proximal-most wing segment), used to
     /// lag the membrane billow (Task 17). Walks the shape hierarchy counting consecutive "wing" ancestors.</summary>
     private Dictionary<string, int> BuildVanillaWingDepths(VanillaAnimationDocument document)
@@ -1188,6 +1344,16 @@ public sealed partial class DebugWindowManager
             double stride = (isArm ? p.ArmSwing : p.LegStride) * strideSign;
             double kneeFlex = (isArm ? p.KneeFlex * 0.6 : p.KneeFlex) * kneeSign;
 
+            // Ground-contact IK foot-locking: solve the hip + knee so the stance foot stays planted (constant
+            // height, constant backward sweep) instead of arcing - i.e. zero foot-slide. Needs two real bone
+            // lengths; skips arms.
+            if (p.FootLock && !isArm && leg.Segments.Count >= 2
+                && leg.SegmentLengths.Count >= 2 && leg.SegmentLengths[0] > 0.01 && leg.SegmentLengths[1] > 0.01)
+            {
+                EmitVanillaFootLockChannels(result, leg, p, duty, phase, strideSign);
+                continue;
+            }
+
             // Hip: duty-shaped fore-aft stride.
             result.Add(new VanillaGenElementChannel(leg.Segments[0], VanillaGenChannelTarget.RotationZ, VanillaGenWave.Stance, stride, 1, phase, 0.0, duty));
 
@@ -1218,6 +1384,79 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    /// <summary>Foot-lock: drives the hip + knee with per-phase IK so the foot follows a planted path (a straight,
+    /// constant-height, constant-speed backward sweep during stance; a lifted arc during swing). The result is a
+    /// gait with no foot-slide - the gold standard of procedural locomotion. Emits Curve channels (the value is the
+    /// absolute joint angle); extra distal segments are left to follow.</summary>
+    private static void EmitVanillaFootLockChannels(List<VanillaGenElementChannel> result, VanillaLocoLeg leg, VanillaGenParams p, double duty, double phaseDeg, double strideSign)
+    {
+        double l1 = leg.SegmentLengths[0];
+        double l2 = leg.SegmentLengths[1];
+        double legLength = l1 + l2;
+        double stand = Math.Clamp((double)p.FootLockHeight, 0.5, 0.99) * legLength;
+        double strideRad = Math.Clamp((double)p.LegStride, 0.0, 80.0) * 0.5 * (Math.PI / 180.0);
+        double halfReach = Math.Min(0.45 * legLength, legLength * Math.Sin(strideRad) * Math.Max(0.1, (double)p.FootLockReach));
+        int kneeSign = p.KneeFlip ? 1 : -1;
+
+        (double hip, double knee) Solve(double cyclePos)
+        {
+            double local = cyclePos - Math.Floor(cyclePos); // the channel's PhaseDeg already offsets this per leg
+            double footX, footY;
+            if (local < duty)
+            {
+                double s = duty <= 0.0 ? 0.0 : local / duty;        // stance: foot forward -> back at ground height
+                footX = halfReach * (1.0 - 2.0 * s) * strideSign;
+                footY = -stand;
+            }
+            else
+            {
+                double s = (local - duty) / Math.Max(1e-6, 1.0 - duty); // swing: back -> forward, lifted
+                footX = halfReach * (2.0 * s - 1.0) * strideSign;
+                footY = -stand + 0.13 * legLength * Math.Sin(Math.PI * s);
+            }
+            return SolveVanillaLegIk(footX, footY, l1, l2, kneeSign);
+        }
+
+        result.Add(new VanillaGenElementChannel(leg.Segments[0], VanillaGenChannelTarget.RotationZ, VanillaGenWave.Sine, 1.0, 1, phaseDeg, 0.0) { Curve = c => Solve(c).hip });
+        result.Add(new VanillaGenElementChannel(leg.Segments[1], VanillaGenChannelTarget.RotationZ, VanillaGenWave.Sine, 1.0, 1, phaseDeg, 0.0) { Curve = c => Solve(c).knee });
+
+        // A third segment (foot/toe) is held flat to the ground by cancelling the accumulated hip+knee rotation,
+        // so the sole stays level through the plant instead of the foot pitching and dragging its toe.
+        if (leg.Segments.Count >= 3)
+        {
+            result.Add(new VanillaGenElementChannel(leg.Segments[2], VanillaGenChannelTarget.RotationZ, VanillaGenWave.Sine, 1.0, 1, phaseDeg, 0.0)
+            {
+                Curve = c => { (double hip, double knee) = Solve(c); return -(hip + knee); }
+            });
+        }
+    }
+
+    /// <summary>Closed-form 2-bone IK in the leg's sagittal swing plane (origin = hip, -Y = straight down,
+    /// +X = forward). Returns the hip and knee rotationZ angles (deg) that place the foot exactly at (footX, footY).
+    /// The hip is set by the law of cosines; the knee is then aimed straight at the foot, so FK is exact for any
+    /// reachable target (the distance is clamped into the reachable annulus). kneeSign picks the elbow side.</summary>
+    private static (double hip, double knee) SolveVanillaLegIk(double footX, double footY, double l1, double l2, int kneeSign)
+    {
+        double d = Math.Clamp(Math.Sqrt(footX * footX + footY * footY), Math.Abs(l1 - l2) + 1e-4, (l1 + l2) * 0.999);
+        double phi = Math.Atan2(footX, -footY);                                  // target angle from straight-down
+        double cosBeta = Math.Clamp((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d), -1.0, 1.0);
+        double hip = phi - kneeSign * Math.Acos(cosBeta);
+        // Aim the lower bone from the knee straight at the foot (|knee->foot| == l2 by construction).
+        double kneeX = footX - l1 * Math.Sin(hip);
+        double kneeY = footY + l1 * Math.Cos(hip);
+        double knee = Math.Atan2(Math.Sin(Math.Atan2(kneeX, -kneeY) - hip), Math.Cos(Math.Atan2(kneeX, -kneeY) - hip));
+        return (hip * (180.0 / Math.PI), knee * (180.0 / Math.PI));
+    }
+
+    /// <summary>Forward kinematics of the 2-bone leg, used to verify the IK (and in tests). Mirror of the convention
+    /// in <see cref="SolveVanillaLegIk"/>.</summary>
+    private static (double x, double y) ForwardKinematicsLeg(double hipDeg, double kneeDeg, double l1, double l2)
+    {
+        double h = hipDeg * (Math.PI / 180.0);
+        double k = kneeDeg * (Math.PI / 180.0);
+        return (l1 * Math.Sin(h) + l2 * Math.Sin(h + k), -(l1 * Math.Cos(h) + l2 * Math.Cos(h + k)));
+    }
+
     /// <summary>Top-down pass that builds true world positions (no reliance on cached transforms) and extracts
     /// leg/arm joint chains from the hierarchy: a maximal parent-&gt;child run of leg (or arm) elements, ordered
     /// hip-&gt;foot.</summary>
@@ -1237,6 +1476,22 @@ public sealed partial class DebugWindowManager
 
         rig.LegRowCount = FinalizeVanillaLimbGroup(document, rig.Legs, worldPos);
         rig.ArmRowCount = FinalizeVanillaLimbGroup(document, rig.Arms, worldPos);
+
+        // Bone lengths (each segment's longest box extent, in shape units) for the foot-lock IK.
+        Dictionary<string, double> lengths = new(StringComparer.OrdinalIgnoreCase);
+        void MeasureLengths(ShapeElement element)
+        {
+            if (!string.IsNullOrWhiteSpace(element.Name) && element.From is { Length: >= 3 } f && element.To is { Length: >= 3 } t)
+            {
+                lengths[element.Name!] = Math.Max(Math.Abs(t[0] - f[0]), Math.Max(Math.Abs(t[1] - f[1]), Math.Abs(t[2] - f[2])));
+            }
+            foreach (ShapeElement child in element.Children ?? []) MeasureLengths(child);
+        }
+        foreach (ShapeElement root in shape.Elements ?? []) MeasureLengths(root);
+        foreach (VanillaLocoLeg leg in rig.Legs.Concat(rig.Arms))
+        {
+            leg.SegmentLengths = leg.Segments.Select(s => lengths.TryGetValue(s, out double len) ? len : 0.0).ToList();
+        }
         return rig;
     }
 
@@ -1415,9 +1670,29 @@ public sealed partial class DebugWindowManager
     /// alternating-tripod insect gait.</summary>
     private static double GaitPhaseFraction(VanillaGenGait gait, int row, int rowCount, int sideIndex)
     {
-        if (rowCount <= 1) return 0.5 * sideIndex;
-        if (rowCount >= 3) return 0.5 * ((sideIndex + row) % 2);
+        if (rowCount <= 1)
+        {
+            // Biped: a bound/gallop/pace plants both feet together (a hop); otherwise they alternate.
+            return gait is VanillaGenGait.Bound or VanillaGenGait.Gallop or VanillaGenGait.Pace ? 0.0 : 0.5 * sideIndex;
+        }
 
+        if (rowCount >= 3)
+        {
+            // Many-legged creatures (hexapods, the scorpion, centipedes). A 6-legged insect walks with an
+            // alternating tripod; a longer body (4+ rows = a myriapod) ripples with a metachronal wave.
+            bool myriapod = rowCount >= 4;
+            return gait switch
+            {
+                VanillaGenGait.Pace => 0.5 * sideIndex,                                  // each side moves as a unit
+                VanillaGenGait.Bound or VanillaGenGait.Gallop or VanillaGenGait.Charge   // a body wave, both sides ~together
+                    => ((double)row / rowCount + 0.06 * sideIndex) % 1.0,
+                VanillaGenGait.Walk or VanillaGenGait.Crawl or VanillaGenGait.Stalk or VanillaGenGait.Climb when myriapod
+                    => ((double)row / rowCount + 0.5 * sideIndex) % 1.0,                 // metachronal ripple down the body
+                _ => 0.5 * ((sideIndex + row) % 2)                                       // alternating tripod (insect / fast)
+            };
+        }
+
+        // Quadruped: the classic two-row gaits.
         return gait switch
         {
             VanillaGenGait.Walk => ((2 * sideIndex + 3 * row) % 4) / 4.0,   // 4-beat diagonal sequence
@@ -2152,9 +2427,17 @@ public sealed partial class DebugWindowManager
                 foreach (VanillaGenElementChannel channel in list)
                 {
                     double cyclePos = channel.Frequency * tNorm + (channel.PhaseDeg + p.GlobalPhase) / 360.0;
-                    double raw = ApplyVanillaGenSharpness(EvalVanillaGenWave(channel.Wave, cyclePos, channel.Shape), channel.Sharpness);
-                    // Intensity scales the oscillation, not the bias (resting offset).
-                    double value = channel.Bias + p.Intensity * channel.Amplitude * raw;
+                    double value;
+                    if (channel.Curve != null)
+                    {
+                        // Foot-lock IK: the curve owns its value (an absolute joint angle), so amplitude/bias/intensity don't apply.
+                        value = channel.Curve(cyclePos);
+                    }
+                    else
+                    {
+                        double raw = ApplyVanillaGenSharpness(EvalVanillaGenWave(channel.Wave, cyclePos, channel.Shape), channel.Sharpness);
+                        value = channel.Bias + p.Intensity * channel.Amplitude * raw; // Intensity scales the oscillation, not the bias
+                    }
                     AddVanillaGenChannelValue(keyElement, channel.Field, value);
                 }
                 keyFrame.Elements[element] = keyElement;
@@ -2163,9 +2446,155 @@ public sealed partial class DebugWindowManager
         }
 
         AnimationKeyFrame[] built = keyFrames.ToArray();
+        if (p.JigglePhysics) ApplyVanillaSecondaryDynamics(built, frames, p);
         if (p.AutoRotShortest) ApplyVanillaRotShortest(built);
         if (p.OptimizeKeyFrames) built = OptimizeVanillaKeyFrames(built, frames, Math.Max(0.001, p.OptimizeTolerance));
         return built;
+    }
+
+    private static bool IsVanillaJiggleElement(string lower)
+    {
+        return IsVanillaLooseElement(lower) || lower.Contains("tail") || lower.Contains("ear") || lower.Contains("antenn")
+            || lower.Contains("stinger") || lower.Contains("plume") || lower.Contains("dewlap") || lower.Contains("floof");
+    }
+
+    /// <summary>Cutting-edge physics layer: a damped-spring follow-through over the sampled keyframes for loose
+    /// parts (tails, ears, crests, fins, plumes...). Each driven rotation/offset axis is the target of a 2nd-order
+    /// spring (omega from Floppiness, damping from Bounce); the steady-state periodic response lags and overshoots
+    /// so the part trails and settles like real soft tissue. The loop stays seamless because the response of a
+    /// periodic drive is periodic. When the element hierarchy is known, the springs are COUPLED down each chain:
+    /// a child is dragged by how far its parent already lagged, so the lag accumulates and the tip whips.</summary>
+    private static void ApplyVanillaSecondaryDynamics(AnimationKeyFrame[] keyFrames, int frames, VanillaGenParams p)
+    {
+        if (keyFrames.Length < 3 || frames < 4) return;
+
+        double floppy = Math.Clamp((double)p.Floppiness, 0.0, 1.0);
+        double bounce = Math.Clamp((double)p.JiggleBounce, 0.0, 1.0);
+        double omega = 2.0 * Math.PI * (5.0 + (1.4 - 5.0) * floppy); // natural frequency: stiff -> floppy
+        double zeta = 1.0 + (0.18 - 1.0) * bounce;                   // critically damped -> springy
+        Dictionary<string, string>? parents = p.HierarchyParents;
+        const double coupling = 0.6;                                 // how strongly a child is dragged by its parent's lag
+
+        // Jiggle elements present, ordered parent-before-child so a coupled child can read its parent's response.
+        List<string> jiggle = [];
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        foreach (AnimationKeyFrame kf in keyFrames)
+            foreach (string el in kf.Elements.Keys)
+                if (seen.Add(el) && IsVanillaJiggleElement(el.ToLowerInvariant())) jiggle.Add(el);
+        if (jiggle.Count == 0) return;
+        HashSet<string> jiggleSet = new(jiggle, StringComparer.OrdinalIgnoreCase);
+
+        int Depth(string el)
+        {
+            int d = 0;
+            string cur = el;
+            HashSet<string> guard = new(StringComparer.OrdinalIgnoreCase);
+            while (parents != null && parents.TryGetValue(cur, out string? par) && par != null && jiggleSet.Contains(par) && guard.Add(cur))
+            {
+                d++;
+                cur = par;
+            }
+            return d;
+        }
+        jiggle.Sort((a, b) => Depth(a).CompareTo(Depth(b)));
+
+        foreach (VanillaGenChannelTarget axis in VanillaGenAllTargets)
+        {
+            if (axis is VanillaGenChannelTarget.StretchX or VanillaGenChannelTarget.StretchY or VanillaGenChannelTarget.StretchZ) continue;
+
+            Dictionary<string, double[]> targetOf = new(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, double[]> responseOf = new(StringComparer.OrdinalIgnoreCase);
+
+            // Keyed (dense, cyclic) target curve for every jiggle element that actually drives this axis.
+            foreach (string el in jiggle)
+            {
+                List<(int frame, double value)> series = [];
+                foreach (AnimationKeyFrame kf in keyFrames)
+                {
+                    if (kf.Elements.TryGetValue(el, out AnimationKeyFrameElement? e) && e != null && GetVanillaGenChannelValue(e, axis) is double v)
+                    {
+                        series.Add((kf.Frame, v));
+                    }
+                }
+                if (series.Count < 3) continue;
+                if (series.Max(s => s.value) - series.Min(s => s.value) < 0.05) continue; // effectively constant
+                targetOf[el] = BuildVanillaCyclicTarget(series, frames);
+            }
+            if (targetOf.Count == 0) continue;
+
+            // Solve in parent-first order; a coupled child's drive is dragged by its parent's lag (response - keyed).
+            foreach (string el in jiggle)
+            {
+                if (!targetOf.TryGetValue(el, out double[]? target)) continue;
+                double[] drive = target;
+                if (parents != null && parents.TryGetValue(el, out string? par) && par != null
+                    && responseOf.TryGetValue(par, out double[]? parResp) && targetOf.TryGetValue(par, out double[]? parTgt))
+                {
+                    drive = new double[frames];
+                    for (int f = 0; f < frames; f++) drive[f] = target[f] + coupling * (parResp[f] - parTgt[f]);
+                }
+                responseOf[el] = SolveVanillaSpring(drive, frames, omega, zeta);
+            }
+
+            // Write the spring responses back where the axis was keyed.
+            foreach ((string el, double[] response) in responseOf)
+            {
+                foreach (AnimationKeyFrame kf in keyFrames)
+                {
+                    if (kf.Elements.TryGetValue(el, out AnimationKeyFrameElement? e) && e != null && GetVanillaGenChannelValue(e, axis) != null)
+                    {
+                        SetVanillaGenChannelValue(e, axis, response[Math.Clamp(kf.Frame, 0, frames - 1)]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Cyclic linear interpolation of a sparse (frame, value) series onto every frame of the loop.</summary>
+    private static double[] BuildVanillaCyclicTarget(List<(int frame, double value)> series, int frames)
+    {
+        double[] target = new double[frames];
+        int n = series.Count;
+        for (int f = 0; f < frames; f++)
+        {
+            int next = 0;
+            while (next < n && series[next].frame < f) next++;
+            (int frame, double value) hiPt = next < n ? series[next] : (series[0].frame + frames, series[0].value);
+            (int frame, double value) loPt = next > 0 ? series[next - 1] : (series[n - 1].frame - frames, series[n - 1].value);
+            double span = hiPt.frame - loPt.frame;
+            target[f] = span <= 0 ? loPt.value : loPt.value + (hiPt.value - loPt.value) * ((f - loPt.frame) / span);
+        }
+        return target;
+    }
+
+    /// <summary>Integrates a damped spring x'' = w^2 (target - x) - 2 z w x' over a cyclic per-frame target until it
+    /// reaches its steady-state periodic orbit, then returns the response at every frame. Sub-steps keep the
+    /// explicit integration stable for stiff springs / coarse frame counts.</summary>
+    private static double[] SolveVanillaSpring(double[] target, int frames, double omega, double zeta)
+    {
+        double dt = 1.0 / frames; // one loop spans 1.0 time unit
+        int subSteps = Math.Max(1, (int)Math.Ceiling(omega * dt / 0.2));
+        double subDt = dt / subSteps;
+        double x = target[0];
+        double v = 0.0;
+        double[] response = new double[frames];
+        // A few warm-up loops let the transient decay so the recorded loop is the steady-state orbit.
+        for (int loop = 0; loop < 10; loop++)
+        {
+            bool record = loop == 9;
+            for (int f = 0; f < frames; f++)
+            {
+                double tgt = target[f];
+                for (int s = 0; s < subSteps; s++)
+                {
+                    double a = omega * omega * (tgt - x) - 2.0 * zeta * omega * v;
+                    v += a * subDt;
+                    x += v * subDt;
+                }
+                if (record) response[f] = x;
+            }
+        }
+        return response;
     }
 
     private static readonly VanillaGenChannelTarget[] VanillaGenAllTargets =
@@ -2442,7 +2871,7 @@ public sealed partial class DebugWindowManager
 
     // ---- Commit ------------------------------------------------------------
 
-    private void GenerateVanillaGeneratedAnimation(VanillaAnimationDocument document, bool regenerateInPlace)
+    private void GenerateVanillaGeneratedAnimation(VanillaAnimationDocument document, bool regenerateInPlace, bool livePreviewUpdate = false)
     {
         if (document.Shape == null) return;
 
@@ -2501,6 +2930,9 @@ public sealed partial class DebugWindowManager
                 _vanillaStatus = "Animation generator: no active channels to apply.";
                 return;
             }
+            // Hand the element hierarchy to the keyframe builder so coupled-chain jiggle physics can drag each
+            // loose segment by its parent's lag (a real tail/neck whip). Null in the test path = independent springs.
+            p.HierarchyParents = p.JigglePhysics ? BuildVanillaParentMap(document) : null;
             keyFrames = BuildVanillaGenKeyFrames(p, channels);
         }
 
@@ -2528,7 +2960,10 @@ public sealed partial class DebugWindowManager
 
         if (overwriteEntry != null)
         {
-            CommitPendingVanillaHistory();
+            if (!livePreviewUpdate)
+            {
+                CommitPendingVanillaHistory();
+            }
             string code = overwriteEntry.Animation.Code ?? overwriteEntry.Animation.Name ?? "generated";
             PopulateVanillaGenAnimation(overwriteEntry.Animation, p, code, keyFrames, overwriteEntry.Animation.Version);
             _vanillaGenLastAnimationCode = code;
@@ -2537,9 +2972,16 @@ public sealed partial class DebugWindowManager
             InvalidateVanillaBrowserRows();
             EnsureVanillaBrowserVisibleRows();
             VanillaBrowserRow row = BuildVanillaBrowserRow(overwriteEntry);
+            bool wasPlaying = _vanillaPreviewScene?.Key == row.Key && _vanillaPreviewScene.Playing;
             SelectVanillaRow(row);
-            BuildVanillaPreviewScene(row, rebuildMesh: true);
-            _vanillaStatus = $"Animation generator: updated '{code}' ({keyFrames.Length} keyframes over {targets.Count} element(s)).";
+            RefreshVanillaPreviewAfterEdit(row);
+            if ((wasPlaying || livePreviewUpdate || p.Loop) && _vanillaPreviewScene?.Key == row.Key)
+            {
+                _vanillaPreviewScene.Play();
+            }
+            _vanillaStatus = livePreviewUpdate
+                ? $"Animation generator: live-updated '{code}' ({keyFrames.Length} keyframes over {targets.Count} element(s))."
+                : $"Animation generator: updated '{code}' ({keyFrames.Length} keyframes over {targets.Count} element(s)).";
             return;
         }
 
@@ -2551,7 +2993,105 @@ public sealed partial class DebugWindowManager
         _vanillaGenLastAnimationCode = newCode;
         MarkVanillaDirty(document);
         SelectAndPreviewVanillaShapeAnimation(newCode, shapeEntry);
+        if (p.Loop && _vanillaPreviewScene?.Key == _vanillaSelection.RowKey)
+        {
+            _vanillaPreviewScene.Play();
+        }
         _vanillaStatus = $"Animation generator: created '{newCode}' ({keyFrames.Length} keyframes over {targets.Count} element(s)).";
+    }
+
+    private void UpdateVanillaGenLivePreview(VanillaAnimationDocument document, VanillaGenParams p, bool canGenerate, int targetCount)
+    {
+        string fingerprint = BuildVanillaGenLiveFingerprint(p, targetCount);
+        if (!_vanillaGenLiveUpdate || !canGenerate || _vanillaGenApplyingLiveUpdate || string.IsNullOrWhiteSpace(_vanillaGenLastAnimationCode))
+        {
+            _vanillaGenLiveFingerprint = fingerprint;
+            return;
+        }
+
+        VanillaBrowserRow? selectedRow = FindVanillaBrowserRow(_vanillaSelection.RowKey);
+        bool selectedLastGenerated = selectedRow?.ShapeAnimation != null
+            && ReferenceEquals(selectedRow.ShapeAnimation.Document, document)
+            && string.Equals(selectedRow.ShapeAnimation.Animation.Code ?? selectedRow.ShapeAnimation.Animation.Name, _vanillaGenLastAnimationCode, StringComparison.OrdinalIgnoreCase);
+        if (!selectedLastGenerated || _vanillaPreviewScene?.Key != selectedRow!.Key || !_vanillaPreviewScene.Playing)
+        {
+            _vanillaGenLiveFingerprint = fingerprint;
+            return;
+        }
+
+        if (string.IsNullOrEmpty(_vanillaGenLiveFingerprint))
+        {
+            _vanillaGenLiveFingerprint = fingerprint;
+            return;
+        }
+
+        if (string.Equals(_vanillaGenLiveFingerprint, fingerprint, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _vanillaGenLiveFingerprint = fingerprint;
+        _vanillaGenApplyingLiveUpdate = true;
+        try
+        {
+            GenerateVanillaGeneratedAnimation(document, regenerateInPlace: true, livePreviewUpdate: true);
+        }
+        finally
+        {
+            _vanillaGenApplyingLiveUpdate = false;
+        }
+    }
+
+    private static string BuildVanillaGenLiveFingerprint(VanillaGenParams p, int targetCount)
+    {
+        StringBuilder builder = new();
+        builder.Append(targetCount).Append('|');
+        AppendVanillaGenFingerprintValue(builder, p);
+        return builder.ToString();
+    }
+
+    private static void AppendVanillaGenFingerprintValue(StringBuilder builder, object? value)
+    {
+        if (value == null)
+        {
+            builder.Append("<null>");
+            return;
+        }
+
+        Type type = value.GetType();
+        if (value is string text)
+        {
+            builder.Append('"').Append(text).Append('"');
+            return;
+        }
+
+        if (type.IsPrimitive || type.IsEnum || value is decimal)
+        {
+            builder.Append(value);
+            return;
+        }
+
+        if (value is System.Collections.IEnumerable enumerable)
+        {
+            builder.Append('[');
+            foreach (object? item in enumerable)
+            {
+                AppendVanillaGenFingerprintValue(builder, item);
+                builder.Append(',');
+            }
+            builder.Append(']');
+            return;
+        }
+
+        builder.Append(type.Name).Append('{');
+        foreach (System.Reflection.FieldInfo field in type.GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic).OrderBy(field => field.Name, StringComparer.Ordinal))
+        {
+            if (string.Equals(field.Name, nameof(VanillaGenParams.HierarchyParents), StringComparison.Ordinal)) continue;
+            builder.Append(field.Name).Append('=');
+            AppendVanillaGenFingerprintValue(builder, field.GetValue(value));
+            builder.Append(';');
+        }
+        builder.Append('}');
     }
 
     private static void PopulateVanillaGenAnimation(VanillaAnimation animation, VanillaGenParams p, string code, AnimationKeyFrame[] keyFrames, int version)

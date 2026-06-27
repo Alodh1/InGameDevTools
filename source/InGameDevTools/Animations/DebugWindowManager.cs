@@ -21,6 +21,13 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager : IDisposable
 {
+    private static readonly System.Text.UTF8Encoding DevToolsUtf8NoBom = new(false);
+    private static DevToolsFileBackupManager? s_authoredFileBackupManager;
+    private static bool s_enableOverwriteBackups = true;
+    private static int s_overwriteBackupRetentionPerFile = 10;
+    private readonly DevToolsRecoveryManager _recoveryManager;
+    private bool _openRecoveryReviewPopup;
+
     public static bool PlayAnimationsInThirdPerson { get; set; } = false;
 
     public DebugWindowManager(ICoreClientAPI api, ParticleEffectsManager particleEffectsManager, DevToolsConfig config)
@@ -30,6 +37,8 @@ public sealed partial class DebugWindowManager : IDisposable
         _devToolsConfig = config;
         _devToolsConfig.Normalize();
         DevToolsLang.Load(api, _devToolsConfig.Language);
+        ConfigureAuthoredFileBackups(_devToolsConfig);
+        _recoveryManager = new DevToolsRecoveryManager(GetToolAuthoredAssetRoot("recovery"));
         ApplyDevToolsConfigToRuntime();
         _imguiModSystem = api.ModLoader.GetModSystem<ImGuiModSystem>();
         if (_imguiModSystem == null)
@@ -64,7 +73,9 @@ public sealed partial class DebugWindowManager : IDisposable
         RestoreExpandedEditorInputSuppression();
         RestoreWorldgenPreviewForEditorTeardown("devtools disposed");
         DisposeWorldgenPreviewRasterTexture();
+        ModelDisposeTexturePaintTexture();
         ModelDisposePreviewResources();
+        _recoveryManager.FlushPending();
         FlushDevToolsConfigSave(force: true);
         if (_inputSuppressionTickListener != -1)
         {
@@ -580,10 +591,36 @@ public sealed partial class DebugWindowManager : IDisposable
         }
     }
 
+    private static void ConfigureAuthoredFileBackups(DevToolsConfig config)
+    {
+        s_enableOverwriteBackups = config.EnableOverwriteBackups;
+        s_overwriteBackupRetentionPerFile = config.OverwriteBackupRetentionPerFile;
+        s_authoredFileBackupManager ??= new DevToolsFileBackupManager(GetToolAuthoredAssetRoot("backups"));
+        DevToolsFileBackupManager.ConfigureShared(GetToolAuthoredAssetRoot("backups"), config.EnableOverwriteBackups, config.OverwriteBackupRetentionPerFile);
+    }
+
     private static string WriteAuthoredFile(string outputPath, string text)
     {
+        return WriteAuthoredBytes(outputPath, DevToolsUtf8NoBom.GetBytes(text));
+    }
+
+    private static string WriteAuthoredBytes(string outputPath, byte[] bytes)
+    {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-        File.WriteAllText(outputPath, text);
+        if (s_enableOverwriteBackups)
+        {
+            try
+            {
+                s_authoredFileBackupManager ??= new DevToolsFileBackupManager(GetToolAuthoredAssetRoot("backups"));
+                s_authoredFileBackupManager.BackupBeforeOverwrite(outputPath, bytes, s_overwriteBackupRetentionPerFile);
+            }
+            catch
+            {
+                // Backups are safety best-effort. Do not block the user's explicit save.
+            }
+        }
+
+        File.WriteAllBytes(outputPath, bytes);
         return "";
     }
 
@@ -764,6 +801,31 @@ public sealed partial class DebugWindowManager : IDisposable
         Patches,
         EntityAi,
         Settings
+    }
+
+    private static string DevToolsTabTitle(DevToolsTab tab)
+    {
+        return tab switch
+        {
+            DevToolsTab.Animations => DevToolsLang.Get("ui.tabs.animations", "Animations"),
+            DevToolsTab.RecipeEditor => DevToolsLang.Get("ui.tabs.recipeEditor", "Recipe Editor"),
+            DevToolsTab.Particles => DevToolsLang.Get("ui.tabs.particles", "Particles"),
+            DevToolsTab.Transforms => DevToolsLang.Get("ui.tabs.transforms", "Transforms"),
+            DevToolsTab.Models => DevToolsLang.Get("ui.tabs.models", "Models"),
+            DevToolsTab.ConfigLib => DevToolsLang.Get("ui.tabs.configLib", "ConfigLib"),
+            DevToolsTab.BlockItemJson => DevToolsLang.Get("ui.tabs.blockItemJson", "Block/Item JSON"),
+            DevToolsTab.LootDrops => DevToolsLang.Get("ui.tabs.lootDrops", "Loot/Drops"),
+            DevToolsTab.Worldgen => DevToolsLang.Get("ui.tabs.worldgen", "Worldgen"),
+            DevToolsTab.Patches => DevToolsLang.Get("ui.tabs.patches", "Patches"),
+            DevToolsTab.EntityAi => DevToolsLang.Get("ui.tabs.entityAi", "Entity AI"),
+            DevToolsTab.Settings => DevToolsLang.Get("ui.tabs.settings", "Settings"),
+            _ => tab.ToString()
+        };
+    }
+
+    private static string DevToolsTabLabel(DevToolsTab tab)
+    {
+        return $"{DevToolsTabTitle(tab)}##tab";
     }
 
     private static readonly bool BlockItemJsonEditorVisible = true;
@@ -1038,11 +1100,12 @@ public sealed partial class DebugWindowManager : IDisposable
             windowFlags |= ImGuiWindowFlags.NoBringToFrontOnFocus;
         }
 
-        bool windowVisible = ImGui.Begin("Dev tools", ref _showAnimationEditor, windowFlags);
+        bool windowVisible = ImGui.Begin(DevToolsLang.Get("ui.window.devtools", "Dev tools"), ref _showAnimationEditor, windowFlags);
         if (windowVisible)
         {
             ImGui.SetWindowFontScale(1f);
             DrawDevToolsToolbar();
+            DrawRecoveryBanner();
             HandleCommandPaletteShortcut();
             DrawCommandPalette();
             ImGui.SetWindowFontScale(_devToolsUiScale);
@@ -1055,87 +1118,87 @@ public sealed partial class DebugWindowManager : IDisposable
             {
                 ImGuiTabItemFlags vanillaTabFlags = GetMainTabFlags(DevToolsTab.Animations);
                 bool vanillaTabOpen = true;
-                if (ImGui.BeginTabItem("Animations##tab", ref vanillaTabOpen, vanillaTabFlags))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.Animations), ref vanillaTabOpen, vanillaTabFlags))
                 {
                     AcceptMainTabSelection(DevToolsTab.Animations);
-                    DrawGuardedEditorTab("Animations", _animationDiagnostics, () => VanillaAnimationsTab(deltaSeconds));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.Animations), _animationDiagnostics, () => VanillaAnimationsTab(deltaSeconds));
                     ImGui.EndTabItem();
                 }
                 bool recipeTabOpen = true;
-                if (ImGui.BeginTabItem("Recipe Editor##tab", ref recipeTabOpen, GetMainTabFlags(DevToolsTab.RecipeEditor)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.RecipeEditor), ref recipeTabOpen, GetMainTabFlags(DevToolsTab.RecipeEditor)))
                 {
                     AcceptMainTabSelection(DevToolsTab.RecipeEditor);
-                    DrawGuardedEditorTab("Recipe Editor", _recipeEditor.Diagnostics, () => RecipeEditorTab(deltaSeconds, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.RecipeEditor), _recipeEditor.Diagnostics, () => RecipeEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool particlesTabOpen = true;
-                if (ImGui.BeginTabItem("Particles##tab", ref particlesTabOpen, GetMainTabFlags(DevToolsTab.Particles)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.Particles), ref particlesTabOpen, GetMainTabFlags(DevToolsTab.Particles)))
                 {
                     AcceptMainTabSelection(DevToolsTab.Particles);
-                    DrawGuardedEditorTab("Particles", _devToolsDiagnostics, () => _particleEffectsManager.DrawEditor("devtools-particles", deltaSeconds, _devToolsUiScale, _liveApplyManager, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.Particles), _devToolsDiagnostics, () => _particleEffectsManager.DrawEditor("devtools-particles", deltaSeconds, _devToolsUiScale, _liveApplyManager, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool transformsTabOpen = true;
-                if (ImGui.BeginTabItem("Transforms##tab", ref transformsTabOpen, GetMainTabFlags(DevToolsTab.Transforms)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.Transforms), ref transformsTabOpen, GetMainTabFlags(DevToolsTab.Transforms)))
                 {
                     AcceptMainTabSelection(DevToolsTab.Transforms);
-                    DrawGuardedEditorTab("Transforms", _transformDiagnostics, () => TransformsEditorTab(deltaSeconds));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.Transforms), _transformDiagnostics, () => TransformsEditorTab(deltaSeconds));
                     ImGui.EndTabItem();
                 }
                 bool modelsTabOpen = true;
-                if (ImGui.BeginTabItem("Models##tab", ref modelsTabOpen, GetMainTabFlags(DevToolsTab.Models)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.Models), ref modelsTabOpen, GetMainTabFlags(DevToolsTab.Models)))
                 {
                     AcceptMainTabSelection(DevToolsTab.Models);
-                    DrawGuardedEditorTab("Models", _modelDiagnostics, () => ModelEditorTab(deltaSeconds, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.Models), _modelDiagnostics, () => ModelEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool configLibTabOpen = true;
-                if (ImGui.BeginTabItem("ConfigLib##tab", ref configLibTabOpen, GetMainTabFlags(DevToolsTab.ConfigLib)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.ConfigLib), ref configLibTabOpen, GetMainTabFlags(DevToolsTab.ConfigLib)))
                 {
                     AcceptMainTabSelection(DevToolsTab.ConfigLib);
-                    DrawGuardedEditorTab("ConfigLib", _configLibDiagnostics, () => ConfigLibGeneratorTab(deltaSeconds, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.ConfigLib), _configLibDiagnostics, () => ConfigLibGeneratorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool blockItemJsonTabOpen = true;
-                if (BlockItemJsonEditorVisible && ImGui.BeginTabItem("Block/Item JSON##tab", ref blockItemJsonTabOpen, GetMainTabFlags(DevToolsTab.BlockItemJson)))
+                if (BlockItemJsonEditorVisible && ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.BlockItemJson), ref blockItemJsonTabOpen, GetMainTabFlags(DevToolsTab.BlockItemJson)))
                 {
                     AcceptMainTabSelection(DevToolsTab.BlockItemJson);
-                    DrawGuardedEditorTab("Block/Item JSON", _blockItemJsonDiagnostics, () => BlockItemJsonEditorTab(deltaSeconds, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.BlockItemJson), _blockItemJsonDiagnostics, () => BlockItemJsonEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool lootDropsTabOpen = true;
-                if (ImGui.BeginTabItem("Loot/Drops##tab", ref lootDropsTabOpen, GetMainTabFlags(DevToolsTab.LootDrops)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.LootDrops), ref lootDropsTabOpen, GetMainTabFlags(DevToolsTab.LootDrops)))
                 {
                     AcceptMainTabSelection(DevToolsTab.LootDrops);
-                    DrawGuardedEditorTab("Loot/Drops", _lootDropDiagnostics, () => LootDropEditorTab(deltaSeconds, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.LootDrops), _lootDropDiagnostics, () => LootDropEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool worldgenTabOpen = true;
-                if (ImGui.BeginTabItem("Worldgen##tab", ref worldgenTabOpen, GetMainTabFlags(DevToolsTab.Worldgen)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.Worldgen), ref worldgenTabOpen, GetMainTabFlags(DevToolsTab.Worldgen)))
                 {
                     AcceptMainTabSelection(DevToolsTab.Worldgen);
-                    DrawGuardedEditorTab("Worldgen", _worldgenDiagnostics, () => WorldgenEditorTab(deltaSeconds, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.Worldgen), _worldgenDiagnostics, () => WorldgenEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool patchesTabOpen = true;
-                if (ImGui.BeginTabItem("Patches##tab", ref patchesTabOpen, GetMainTabFlags(DevToolsTab.Patches)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.Patches), ref patchesTabOpen, GetMainTabFlags(DevToolsTab.Patches)))
                 {
                     AcceptMainTabSelection(DevToolsTab.Patches);
-                    DrawGuardedEditorTab("Patches", _patchCreatorDiagnostics, () => PatchCreatorTab(deltaSeconds, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.Patches), _patchCreatorDiagnostics, () => PatchCreatorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool entityAiTabOpen = true;
-                if (ImGui.BeginTabItem("Entity AI##tab", ref entityAiTabOpen, GetMainTabFlags(DevToolsTab.EntityAi)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.EntityAi), ref entityAiTabOpen, GetMainTabFlags(DevToolsTab.EntityAi)))
                 {
                     AcceptMainTabSelection(DevToolsTab.EntityAi);
-                    DrawGuardedEditorTab("Entity AI", _aiBehaviorDiagnostics, () => AiBehaviorEditorTab(deltaSeconds, _showEditorDiagnostics));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.EntityAi), _aiBehaviorDiagnostics, () => AiBehaviorEditorTab(deltaSeconds, _showEditorDiagnostics));
                     ImGui.EndTabItem();
                 }
                 bool settingsTabOpen = true;
-                if (ImGui.BeginTabItem("Settings##tab", ref settingsTabOpen, GetMainTabFlags(DevToolsTab.Settings)))
+                if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.Settings), ref settingsTabOpen, GetMainTabFlags(DevToolsTab.Settings)))
                 {
                     AcceptMainTabSelection(DevToolsTab.Settings);
-                    DrawGuardedEditorTab("Settings", _devToolsDiagnostics, () => SettingsTab(deltaSeconds));
+                    DrawGuardedEditorTab(DevToolsTabTitle(DevToolsTab.Settings), _devToolsDiagnostics, () => SettingsTab(deltaSeconds));
                     ImGui.EndTabItem();
                 }
                 ImGui.EndTabBar();
@@ -1150,6 +1213,7 @@ public sealed partial class DebugWindowManager : IDisposable
             }
             ImGui.SetWindowFontScale(1f);
             DrawSourceSavePopup();
+            DrawRecoveryReviewPopup();
         }
         ImGui.End();
         if (!_showAnimationEditor)
@@ -1162,6 +1226,7 @@ public sealed partial class DebugWindowManager : IDisposable
         DrawDevToolsGeneratorOverlays();
 
         _detachedEditorCamera?.Update(deltaSeconds, _showAnimationEditor);
+        UpdateDevToolsRecoveryAutosaves();
         FlushDevToolsConfigSave(force: false);
 
         return _showAnimationEditor ? CallbackGUIStatus.GrabMouse : CallbackGUIStatus.Closed;
@@ -1372,31 +1437,31 @@ public sealed partial class DebugWindowManager : IDisposable
         catch (Exception exception)
         {
             _api.Logger.Error("[InGameDevTools] {0} tab draw failed: {1}", editorName, exception);
-            diagnostics.Exception($"{editorName} tab draw failed", exception);
-            ImGui.TextColored(new NVector4(1f, 0.42f, 0.34f, 1f), $"{editorName} hit an error.");
-            ImGui.TextWrapped("The editor caught the error so the devtools window can stay open.");
+            diagnostics.Exception(DevToolsLang.Get("ui.common.tabDrawFailed", "{0} tab draw failed", editorName), exception);
+            ImGui.TextColored(new NVector4(1f, 0.42f, 0.34f, 1f), DevToolsLang.Get("ui.common.errorHeader", "{0} hit an error.", editorName));
+            ImGui.TextWrapped(DevToolsLang.Get("ui.common.errorBody", "The editor caught the error so the devtools window can stay open."));
             diagnostics.Draw($"{editorName.ToLowerInvariant().Replace(' ', '-')}-tab-guard", _showEditorDiagnostics);
         }
     }
 
     private void DrawDevToolsToolbar()
     {
-        if (ImGui.Button("Collapse editor##devtools-collapse"))
+        if (ImGui.Button(DevToolsLang.Label("ui.toolbar.collapseEditor", "Collapse editor", "devtools-collapse")))
         {
             _devToolsCollapsed = true;
         }
         ImGui.SameLine();
 
         ImGui.SetNextItemWidth(120f);
-        if (ImGui.SliderFloat("UI scale##devtools-global-scale", ref _devToolsUiScale, 0.75f, 1.75f, "%.2f"))
+        if (ImGui.SliderFloat(DevToolsLang.Label("ui.toolbar.uiScale", "UI scale", "devtools-global-scale"), ref _devToolsUiScale, 0.75f, 1.75f, "%.2f"))
         {
             _devToolsUiScale = Math.Clamp(_devToolsUiScale, 0.75f, 1.75f);
             _devToolsConfig.UiScale = _devToolsUiScale;
-            QueueDevToolsConfigSave("UI scale updated.");
+            QueueDevToolsConfigSave(DevToolsLang.Get("ui.toolbar.uiScale.updated", "UI scale updated."));
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Reset layout##devtools-reset-layout"))
+        if (ImGui.Button(DevToolsLang.Label("ui.toolbar.resetLayout", "Reset layout", "devtools-reset-layout")))
         {
             ResetDevToolsLayout();
         }
@@ -1407,17 +1472,17 @@ public sealed partial class DebugWindowManager : IDisposable
         if (_activeDevToolsTab == DevToolsTab.Animations)
         {
             ImGui.SameLine();
-            ImGui.Checkbox("Pop out viewport##devtools-global-popout", ref _vanillaViewportPoppedOut);
+            ImGui.Checkbox(DevToolsLang.Label("ui.toolbar.popOutViewport", "Pop out viewport", "devtools-global-popout"), ref _vanillaViewportPoppedOut);
         }
 
         ImGui.SameLine();
         bool autoApply = _liveApplyManager.AutoApply;
-        if (ImGui.Checkbox("Runtime apply##devtools-live-auto", ref autoApply))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.toolbar.runtimeApply", "Runtime apply", "devtools-live-auto"), ref autoApply))
         {
             bool enabled = autoApply && !_liveApplyManager.AutoApply;
             _liveApplyManager.AutoApply = autoApply;
             _devToolsConfig.AutoRuntimeApply = autoApply;
-            QueueDevToolsConfigSave("Runtime apply setting updated.");
+            QueueDevToolsConfigSave(DevToolsLang.Get("ui.toolbar.runtimeApply.updated", "Runtime apply setting updated."));
             if (enabled)
             {
                 ApplyDirtyLiveChangesForActiveTab(force: true);
@@ -1425,33 +1490,33 @@ public sealed partial class DebugWindowManager : IDisposable
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Automatically applies editor changes to loaded runtime objects for this session.");
+            ImGui.SetTooltip(DevToolsLang.Get("ui.toolbar.runtimeApply.tooltip", "Automatically applies editor changes to loaded runtime objects for this session."));
         }
         ImGui.SameLine();
-        if (ImGui.Checkbox("Live backups##devtools-live-backups", ref _liveApplyManager.WriteBackups))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.toolbar.liveBackups", "Live backups", "devtools-live-backups"), ref _liveApplyManager.WriteBackups))
         {
             _devToolsConfig.WriteLiveBackups = _liveApplyManager.WriteBackups;
-            QueueDevToolsConfigSave("Live backup setting updated.");
+            QueueDevToolsConfigSave(DevToolsLang.Get("ui.toolbar.liveBackups.updated", "Live backup setting updated."));
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Write original runtime state copies before the first live patch.");
+            ImGui.SetTooltip(DevToolsLang.Get("ui.toolbar.liveBackups.tooltip", "Write original runtime state copies before the first live patch."));
         }
         ImGui.SameLine();
-        if (ImGui.Button("Revert live##devtools-live-revert-all"))
+        if (ImGui.Button(DevToolsLang.Label("ui.toolbar.revertLive", "Revert live", "devtools-live-revert-all")))
         {
             _liveApplyManager.RevertAll();
             ClearLiveApplyState();
         }
         ImGui.SameLine();
-        if (ImGui.Checkbox("Diagnostics##devtools-diagnostics", ref _showEditorDiagnostics))
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.toolbar.diagnostics", "Diagnostics", "devtools-diagnostics"), ref _showEditorDiagnostics))
         {
             _devToolsConfig.ShowDiagnostics = _showEditorDiagnostics;
-            QueueDevToolsConfigSave("Diagnostics setting updated.");
+            QueueDevToolsConfigSave(DevToolsLang.Get("ui.toolbar.diagnostics.updated", "Diagnostics setting updated."));
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Show detailed editor diagnostic messages for caught exceptions and skipped previews.");
+            ImGui.SetTooltip(DevToolsLang.Get("ui.toolbar.diagnostics.tooltip", "Show detailed editor diagnostic messages for caught exceptions and skipped previews."));
         }
 
         ImGui.Separator();
@@ -1467,9 +1532,9 @@ public sealed partial class DebugWindowManager : IDisposable
             ImGuiWindowFlags.NoResize |
             ImGuiWindowFlags.NoSavedSettings;
 
-        if (ImGui.Begin("Dev tools", ref _showAnimationEditor, windowFlags))
+        if (ImGui.Begin(DevToolsLang.Get("ui.window.devtools", "Dev tools"), ref _showAnimationEditor, windowFlags))
         {
-            if (ImGui.Button("Expand editor##devtools-expand"))
+            if (ImGui.Button(DevToolsLang.Label("ui.toolbar.expandEditor", "Expand editor", "devtools-expand")))
             {
                 _devToolsCollapsed = false;
             }
@@ -1481,7 +1546,9 @@ public sealed partial class DebugWindowManager : IDisposable
 
     private string GetCollapsedDevToolsStatusText()
     {
-        return _liveApplyManager.AutoApply ? "Runtime apply on" : "Runtime apply off";
+        return _liveApplyManager.AutoApply
+            ? DevToolsLang.Get("ui.toolbar.collapsed.runtimeApplyOn", "Runtime apply on")
+            : DevToolsLang.Get("ui.toolbar.collapsed.runtimeApplyOff", "Runtime apply off");
     }
 
     private void ApplyDirtyLiveChangesForActiveTab(bool force = false)
@@ -1639,7 +1706,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
     private void DrawSourceSavePopup()
     {
-        const string popupId = "Save authored file preview";
+        string popupId = DevToolsLang.Label("ui.window.sourceSave", "Save authored file preview", "source-save-popup");
         if (_openSourceSavePopup)
         {
             ImGui.OpenPopup(popupId);
@@ -1656,8 +1723,8 @@ public sealed partial class DebugWindowManager : IDisposable
         SourceSaveRequest? request = _pendingSourceSaveRequest;
         if (request == null)
         {
-            ImGui.TextUnformatted("No authored file save is pending.");
-            if (ImGui.Button("Close"))
+            ImGui.TextUnformatted(DevToolsLang.Get("ui.sourceSave.nonePending", "No authored file save is pending."));
+            if (ImGui.Button(DevToolsLang.Get("ui.common.close", "Close")))
             {
                 ImGui.CloseCurrentPopup();
             }
@@ -1666,7 +1733,7 @@ public sealed partial class DebugWindowManager : IDisposable
             return;
         }
 
-        ImGui.TextUnformatted($"Save to {request.SourceFile}?");
+        ImGui.TextUnformatted(DevToolsLang.Get("ui.sourceSave.saveTo", "Save to {0}?", request.SourceFile));
         ImGui.Separator();
 
         string[] oldLines = SplitSourceLines(request.OldText);
@@ -1674,11 +1741,11 @@ public sealed partial class DebugWindowManager : IDisposable
         float paneWidth = Math.Max(320f, (ImGui.GetContentRegionAvail().X - 12f) * 0.5f);
         System.Numerics.Vector2 paneSize = new(paneWidth, 500f);
 
-        DrawSourceSavePane("Current file##source-save-old", oldLines, newLines, paneSize);
+        DrawSourceSavePane(DevToolsLang.Label("ui.sourceSave.currentFile", "Current file", "source-save-old"), oldLines, newLines, paneSize);
         ImGui.SameLine();
-        DrawSourceSavePane("New file##source-save-new", newLines, oldLines, paneSize);
+        DrawSourceSavePane(DevToolsLang.Label("ui.sourceSave.newFile", "New file", "source-save-new"), newLines, oldLines, paneSize);
 
-        if (ImGui.Button("Save##source-save-commit"))
+        if (ImGui.Button(DevToolsLang.Label("ui.common.save", "Save", "source-save-commit")))
         {
             string status;
             try
@@ -1687,7 +1754,7 @@ public sealed partial class DebugWindowManager : IDisposable
             }
             catch (Exception exception)
             {
-                status = $"Save failed for {request.SourceFile}: {exception.Message}";
+                status = DevToolsLang.Get("ui.sourceSave.failed", "Save failed for {0}: {1}", request.SourceFile, exception.Message);
             }
 
             _pendingSourceSaveStatus?.Invoke(status);
@@ -1696,9 +1763,9 @@ public sealed partial class DebugWindowManager : IDisposable
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Cancel##source-save-cancel"))
+        if (ImGui.Button(DevToolsLang.Label("ui.common.cancel", "Cancel", "source-save-cancel")))
         {
-            _pendingSourceSaveStatus?.Invoke($"Save canceled for {request.SourceFile}.");
+            _pendingSourceSaveStatus?.Invoke(DevToolsLang.Get("ui.sourceSave.canceled", "Save canceled for {0}.", request.SourceFile));
             ClearSourceSavePopup();
             ImGui.CloseCurrentPopup();
         }
@@ -1786,8 +1853,8 @@ public sealed partial class DebugWindowManager : IDisposable
         if (codes.Length == 0)
         {
             SetEditorFrameOverride(null);
-            ImGui.TextDisabled("No animations loaded.");
-            if (ImGui.CollapsingHeader("Add animation", ImGuiTreeNodeFlags.DefaultOpen))
+            ImGui.TextDisabled(DevToolsLang.Get("ui.animation.noneLoaded", "No animations loaded."));
+            if (ImGui.CollapsingHeader(DevToolsLang.Get("ui.animation.addAnimation", "Add animation"), ImGuiTreeNodeFlags.DefaultOpen))
             {
                 CreateAnimationGui();
             }
@@ -1819,8 +1886,8 @@ public sealed partial class DebugWindowManager : IDisposable
         _legacyAnimationLayoutBottomFraction = Math.Clamp(bottomHeight / topBottomAvailableHeight, 0.05f, 0.9f);
 
         ImGui.BeginChild("##animation-left-panel", new NVector2(leftWidth, topHeight), true);
-        ImGui.SeparatorText("Animations");
-        ImGui.InputTextWithHint("##animations-filter", "supports wildcards", ref _animationsFilter, 200);
+        ImGui.SeparatorText(DevToolsLang.Get("ui.animation.section.animations", "Animations"));
+        ImGui.InputTextWithHint("##animations-filter", DevToolsLang.Get("ui.animation.filterHint", "supports wildcards"), ref _animationsFilter, 200);
         EditorsUtils.FilterElements(_animationsFilter, AnimationsManager._instance.Animations.Keys, out IEnumerable<string> filteredEnumerable, out _);
         string[] filtered = filteredEnumerable.ToArray();
         if (filtered.Length > 0)
@@ -1832,18 +1899,18 @@ public sealed partial class DebugWindowManager : IDisposable
         }
         else
         {
-            ImGui.TextDisabled("No matching animations.");
+            ImGui.TextDisabled(DevToolsLang.Get("ui.animation.noneMatching", "No matching animations."));
         }
 
         if (_selectedAnimationIndex < 0 || _selectedAnimationIndex >= codes.Length) _selectedAnimationIndex = 0;
 
-        ImGui.SeparatorText("Buffer");
-        if (ImGui.Button("Save to buffer", new NVector2(-1, 0)))
+        ImGui.SeparatorText(DevToolsLang.Get("ui.animation.section.buffer", "Buffer"));
+        if (ImGui.Button(DevToolsLang.Get("ui.animation.saveToBuffer", "Save to buffer"), new NVector2(-1, 0)))
         {
             _animationBuffer = AnimationJson.FromAnimation(AnimationsManager._instance.Animations[codes[_selectedAnimationIndex]]);
         }
 
-        if (ImGui.Button("Load from buffer", new NVector2(-1, 0)) && _animationBuffer != null)
+        if (ImGui.Button(DevToolsLang.Get("ui.animation.loadFromBuffer", "Load from buffer"), new NVector2(-1, 0)) && _animationBuffer != null)
         {
             string animationCode = codes[_selectedAnimationIndex];
             Animation currentAnimation = AnimationsManager._instance.Animations[animationCode];
@@ -1852,40 +1919,40 @@ public sealed partial class DebugWindowManager : IDisposable
             _animationHistory.CommitEdit(animationCode, AnimationsManager._instance.Animations[animationCode]);
         }
 
-        if (ImGui.Button("Save buffer to file", new NVector2(-1, 0)))
+        if (ImGui.Button(DevToolsLang.Get("ui.animation.saveBufferToFile", "Save buffer to file"), new NVector2(-1, 0)))
         {
             if (_animationBuffer == null)
             {
-                _transformSaveStatus = "No animation buffer to save.";
+                _transformSaveStatus = DevToolsLang.Get("ui.animation.buffer.noneToSave", "No animation buffer to save.");
             }
             else
             {
                 string outputPath = GetToolAuthoredAssetPath("animations", Path.Combine("buffers", "co-animation-export.json"));
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
                 File.WriteAllText(outputPath, _animationBuffer.ToString());
-                _transformSaveStatus = $"Saved animation buffer to {outputPath}.";
+                _transformSaveStatus = DevToolsLang.Get("ui.animation.buffer.savedTo", "Saved animation buffer to {0}.", outputPath);
             }
         }
 
-        if (ImGui.Button("Load buffer from file", new NVector2(-1, 0)))
+        if (ImGui.Button(DevToolsLang.Get("ui.animation.loadBufferFromFile", "Load buffer from file"), new NVector2(-1, 0)))
         {
             string inputPath = GetToolAuthoredAssetPath("animations", Path.Combine("buffers", "co-animation-export.json"));
             if (File.Exists(inputPath))
             {
                 _animationBuffer = JsonObject.FromJson(File.ReadAllText(inputPath)).AsObject<AnimationJson>();
-                _transformSaveStatus = $"Loaded animation buffer from {inputPath}.";
+                _transformSaveStatus = DevToolsLang.Get("ui.animation.buffer.loadedFrom", "Loaded animation buffer from {0}.", inputPath);
             }
             else
             {
                 _animationBuffer = _api.LoadModConfig<AnimationJson>("co-animation-export.json");
                 _transformSaveStatus = _animationBuffer == null
-                    ? $"Animation buffer file not found at {inputPath}."
-                    : "Loaded animation buffer from legacy mod config.";
+                    ? DevToolsLang.Get("ui.animation.buffer.fileNotFound", "Animation buffer file not found at {0}.", inputPath)
+                    : DevToolsLang.Get("ui.animation.buffer.loadedLegacy", "Loaded animation buffer from legacy mod config.");
             }
         }
 
-        ImGui.SeparatorText("Preview options");
-        if (ImGui.Button("Toggle rendering offset", new NVector2(-1, 0)))
+        ImGui.SeparatorText(DevToolsLang.Get("ui.animation.section.previewOptions", "Preview options"));
+        if (ImGui.Button(DevToolsLang.Get("ui.animation.toggleRenderingOffset", "Toggle rendering offset"), new NVector2(-1, 0)))
         {
             PlayerRenderingPatches.FpHandsOffset = PlayerRenderingPatches.FpHandsOffset != PlayerRenderingPatches.DefaultFpHandsOffset
                 ? PlayerRenderingPatches.DefaultFpHandsOffset
@@ -1893,22 +1960,22 @@ public sealed partial class DebugWindowManager : IDisposable
         }
 
         bool tpAnimations = PlayAnimationsInThirdPerson;
-        ImGui.Checkbox("Third person animations", ref tpAnimations);
+        ImGui.Checkbox(DevToolsLang.Get("ui.animation.thirdPersonAnimations", "Third person animations"), ref tpAnimations);
         PlayAnimationsInThirdPerson = tpAnimations;
 
         bool disableRuntimeAnimations = AnimationPatches.DisableAllAnimations;
-        if (ImGui.Checkbox("Disable runtime animations", ref disableRuntimeAnimations))
+        if (ImGui.Checkbox(DevToolsLang.Get("ui.animation.disableRuntimeAnimations", "Disable runtime animations"), ref disableRuntimeAnimations))
         {
             AnimationPatches.DisableAllAnimations = disableRuntimeAnimations;
         }
 
         bool disableThirdPersonRuntimeAnimations = AnimationPatches.DisableThirdPersonAnimations;
-        if (ImGui.Checkbox("Disable third person runtime animations", ref disableThirdPersonRuntimeAnimations))
+        if (ImGui.Checkbox(DevToolsLang.Get("ui.animation.disableThirdPersonRuntimeAnimations", "Disable third person runtime animations"), ref disableThirdPersonRuntimeAnimations))
         {
             AnimationPatches.DisableThirdPersonAnimations = disableThirdPersonRuntimeAnimations;
         }
 
-        if (ImGui.CollapsingHeader("Add animation"))
+        if (ImGui.CollapsingHeader(DevToolsLang.Get("ui.animation.addAnimation", "Add animation")))
         {
             CreateAnimationGui();
         }
@@ -1994,14 +2061,14 @@ public sealed partial class DebugWindowManager : IDisposable
     {
         if (animation.PlayerKeyFrames.Count == 0) return;
 
-        ImGui.SeparatorText("Timeline");
-        ImGui.TextDisabled("Click timeline to scrub. Click markers to select frames; drag markers to retime.");
+        ImGui.SeparatorText(DevToolsLang.Get("ui.animation.section.timeline", "Timeline"));
+        ImGui.TextDisabled(DevToolsLang.Get("ui.animation.timelineHint", "Click timeline to scrub. Click markers to select frames; drag markers to retime."));
 
         double durationMs = GetEditorAnimationDurationMs(animation);
         double playerDurationMs = GetEditorPlayerDurationMs(animation);
         float scrubMs = (float)Math.Clamp(GetEditorFrameTimeMs(animation), 0, durationMs);
         ImGui.SetNextItemWidth(320);
-        if (ImGui.SliderFloat($"Time ms##editor-timeline-{animationCode}", ref scrubMs, 0, (float)durationMs, "%.0f"))
+        if (ImGui.SliderFloat($"{DevToolsLang.Get("ui.animation.timeMs", "Time ms")}##editor-timeline-{animationCode}", ref scrubMs, 0, (float)durationMs, "%.0f"))
         {
             ScrubEditorTimeline(animation, scrubMs);
         }
@@ -2115,38 +2182,38 @@ public sealed partial class DebugWindowManager : IDisposable
 
         EnsureEditorPlaybackState(animationCode, animation);
 
-        if (ImGui.Button("Play##editor-playback"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.play", "Play", "editor-playback")))
         {
             StartEditorPlayback(animationCode, animation);
         }
 
         ImGui.SameLine();
         if (!_editorPlaybackPlaying) ImGui.BeginDisabled();
-        if (ImGui.Button((_editorPlaybackPaused ? "Resume" : "Pause") + "##editor-playback"))
+        if (ImGui.Button((_editorPlaybackPaused ? DevToolsLang.Get("ui.animation.resume", "Resume") : DevToolsLang.Get("ui.animation.pause", "Pause")) + "##editor-playback"))
         {
             _editorPlaybackPaused = !_editorPlaybackPaused;
         }
         if (!_editorPlaybackPlaying) ImGui.EndDisabled();
 
-        if (ImGui.Button("Key <##editor-playback"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.keyPrevious", "Key <", "editor-playback")))
         {
             StepEditorKeyframe(animation, -1);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Key >##editor-playback"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.keyNext", "Key >", "editor-playback")))
         {
             StepEditorKeyframe(animation, 1);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Frame <##editor-playback"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.framePrevious", "Frame <", "editor-playback")))
         {
             StepEditorFrame(animation, -1);
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Frame >##editor-playback"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.frameNext", "Frame >", "editor-playback")))
         {
             StepEditorFrame(animation, 1);
         }
@@ -2244,11 +2311,11 @@ public sealed partial class DebugWindowManager : IDisposable
 
         if (messages.Count == 0)
         {
-            ImGui.TextColored(new NVector4(0.45f, 1.0f, 0.45f, 1f), "No validation issues found.");
+            ImGui.TextColored(new NVector4(0.45f, 1.0f, 0.45f, 1f), DevToolsLang.Get("ui.animation.noValidationIssues", "No validation issues found."));
             return;
         }
 
-        if (ImGui.Button("Copy validation report##animation-validation"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.copyValidationReport", "Copy validation report", "animation-validation")))
         {
             ImGui.SetClipboardText(string.Join(Environment.NewLine, messages.Select(message => $"{message.Severity}: {message.Text}")));
         }
@@ -2685,13 +2752,13 @@ public sealed partial class DebugWindowManager : IDisposable
 
     private void DrawTimelineActions(string animationCode, Animation animation)
     {
-        ImGui.SeparatorText("Timeline actions");
+        ImGui.SeparatorText(DevToolsLang.Get("ui.animation.timelineActions", "Timeline actions"));
         string selection = GetTimelineSelectionLabel(animation);
         ImGui.TextDisabled(selection);
 
         int trackIndex = GetTimelineTrackIndex();
         ImGui.SetNextItemWidth(150);
-        if (ImGui.Combo("Target track##timeline-actions", ref trackIndex, TimelineTrackNames, TimelineTrackNames.Length))
+        if (ImGui.Combo(DevToolsLang.Label("ui.animation.targetTrack", "Target track", "timeline-actions"), ref trackIndex, TimelineTrackNames, TimelineTrackNames.Length))
         {
             SelectTimelineTrack(trackIndex);
         }
@@ -2700,7 +2767,7 @@ public sealed partial class DebugWindowManager : IDisposable
         if (!canRetiming) ImGui.BeginDisabled();
         float selectedTimeMs = canRetiming ? (float)GetSelectedTimelineMarkerTimeMs(animation) : 0;
         ImGui.SetNextItemWidth(150);
-        if (ImGui.InputFloat("Selected time ms##timeline-actions", ref selectedTimeMs, 1, Math.Max(1, _timelineNudgeMs), "%.0f"))
+        if (ImGui.InputFloat(DevToolsLang.Label("ui.animation.selectedTimeMs", "Selected time ms", "timeline-actions"), ref selectedTimeMs, 1, Math.Max(1, _timelineNudgeMs), "%.0f"))
         {
             BeginTimelineActionEdit(animationCode, animation, $"Retiming {selection}");
             RetimingTimelineSelection(animation, selectedTimeMs);
@@ -2713,7 +2780,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
         ImGui.SameLine();
         ImGui.SetNextItemWidth(90);
-        if (ImGui.InputFloat("Nudge ms##timeline-actions", ref _timelineNudgeMs, 1, 50, "%.0f"))
+        if (ImGui.InputFloat(DevToolsLang.Label("ui.animation.nudgeMs", "Nudge ms", "timeline-actions"), ref _timelineNudgeMs, 1, 50, "%.0f"))
         {
             _timelineNudgeMs = Math.Max(1, _timelineNudgeMs);
         }
@@ -2723,7 +2790,7 @@ public sealed partial class DebugWindowManager : IDisposable
         bool canDelete = CanDeleteTimelineSelection(animation);
 
         if (!canRetiming) ImGui.BeginDisabled();
-        if (ImGui.Button("- nudge##timeline-actions"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.nudgeBackward", "- nudge", "timeline-actions")))
         {
             _animationHistory.BeginEdit(animationCode, animation, $"Nudge {selection}");
             RetimingTimelineSelection(animation, GetSelectedTimelineMarkerTimeMs(animation) - Math.Max(1, _timelineNudgeMs));
@@ -2733,7 +2800,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
         ImGui.SameLine();
         if (!canRetiming) ImGui.BeginDisabled();
-        if (ImGui.Button("+ nudge##timeline-actions"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.nudgeForward", "+ nudge", "timeline-actions")))
         {
             _animationHistory.BeginEdit(animationCode, animation, $"Nudge {selection}");
             RetimingTimelineSelection(animation, GetSelectedTimelineMarkerTimeMs(animation) + Math.Max(1, _timelineNudgeMs));
@@ -2743,7 +2810,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
         ImGui.SameLine();
         if (!canRetiming) ImGui.BeginDisabled();
-        if (ImGui.Button("Move to playhead##timeline-actions"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.moveToPlayhead", "Move to playhead", "timeline-actions")))
         {
             _animationHistory.BeginEdit(animationCode, animation, $"Move {selection} to playhead");
             RetimingTimelineSelection(animation, GetEditorFrameTimeMs(animation));
@@ -2752,7 +2819,7 @@ public sealed partial class DebugWindowManager : IDisposable
         if (!canRetiming) ImGui.EndDisabled();
 
         if (!canInsert) ImGui.BeginDisabled();
-        if (ImGui.Button("Insert marker at time##timeline-actions"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.insertMarkerAtTime", "Insert marker at time", "timeline-actions")))
         {
             _animationHistory.BeginEdit(animationCode, animation, $"Insert {selection}");
             InsertTimelineSelection(animation);
@@ -2762,7 +2829,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
         ImGui.SameLine();
         if (!canDuplicate) ImGui.BeginDisabled();
-        if (ImGui.Button("Duplicate selected marker##timeline-actions"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.duplicateSelectedMarker", "Duplicate selected marker", "timeline-actions")))
         {
             _animationHistory.BeginEdit(animationCode, animation, $"Duplicate {selection}");
             DuplicateTimelineSelection(animation);
@@ -2772,7 +2839,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
         ImGui.SameLine();
         if (!canDelete) ImGui.BeginDisabled();
-        if (ImGui.Button("Delete selected marker##timeline-actions"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.deleteSelectedMarker", "Delete selected marker", "timeline-actions")))
         {
             _animationHistory.BeginEdit(animationCode, animation, $"Delete {selection}");
             DeleteTimelineSelection(animation);
@@ -3462,7 +3529,7 @@ public sealed partial class DebugWindowManager : IDisposable
         bool canRedo = _animationHistory.RedoCount(animationCode) > 0;
 
         if (!canUndo) ImGui.BeginDisabled();
-        if (ImGui.Button("Undo##animation"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.undo", "Undo", "animation")))
         {
             CommitPendingAnimationEdit(animationCode);
             if (_animationHistory.Undo(animationCode, AnimationsManager._instance.Animations, out string status))
@@ -3478,7 +3545,7 @@ public sealed partial class DebugWindowManager : IDisposable
 
         ImGui.SameLine();
         if (!canRedo) ImGui.BeginDisabled();
-        if (ImGui.Button("Redo##animation"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.redo", "Redo", "animation")))
         {
             CommitPendingAnimationEdit(animationCode);
             if (_animationHistory.Redo(animationCode, AnimationsManager._instance.Animations, out string status))
@@ -3493,14 +3560,14 @@ public sealed partial class DebugWindowManager : IDisposable
         if (!canRedo) ImGui.EndDisabled();
 
         ImGui.SameLine();
-        if (ImGui.Button("Clear history##animation"))
+        if (ImGui.Button(DevToolsLang.Label("ui.animation.clearHistory", "Clear history", "animation")))
         {
             _animationHistory.Clear(animationCode);
-            _transformSaveStatus = "Animation edit history cleared.";
+            _transformSaveStatus = DevToolsLang.Get("ui.animation.historyCleared", "Animation edit history cleared.");
         }
 
         ImGui.SameLine();
-        ImGui.TextDisabled($"Undo: {_animationHistory.UndoCount(animationCode)}  Redo: {_animationHistory.RedoCount(animationCode)}");
+        ImGui.TextDisabled(DevToolsLang.Get("ui.animation.historyCounts", "Undo: {0}  Redo: {1}", _animationHistory.UndoCount(animationCode), _animationHistory.RedoCount(animationCode)));
     }
 
     private void HandleAnimationHistoryShortcuts(string animationCode)

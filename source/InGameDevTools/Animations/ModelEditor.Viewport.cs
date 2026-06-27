@@ -418,6 +418,8 @@ public sealed partial class DebugWindowManager
             DrawModelPrimitiveGhost(drawList, camera);
             DrawModelCreatureGhost(drawList, camera);
             DrawPlayerModelGhost(drawList, camera);
+            DrawModelClothingGhost(drawList, camera);
+            DrawWeaponGhost(drawList, camera);
 
             if (hovered && !gizmoConsumedMouse && !_modelGizmoDragging && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {
@@ -1505,7 +1507,7 @@ public sealed partial class DebugWindowManager
         }
 
         return bestElement != null &&
-            ModelTryBuildChiselPreview(bestElement, bestLocalUnits, bestFaceAxis, bestFacePositive, out preview);
+            ModelTryBuildChiselPreview(bestElement, bestLocalUnits, bestFaceAxis, bestFacePositive, ModelCurrentChiselSize(), out preview);
     }
 
     private bool ModelTryBuildCutPreview(
@@ -1577,10 +1579,12 @@ public sealed partial class DebugWindowManager
         double[] localUnits,
         int faceAxis,
         bool facePositive,
+        double cellSize,
         out ModelChiselPreview preview)
     {
         preview = default;
         if (faceAxis < 0 || faceAxis > 2) return false;
+        cellSize = Math.Clamp(cellSize, 0.0625, 8.0);
 
         double[] removeFrom = new double[3];
         double[] removeTo = new double[3];
@@ -1595,40 +1599,40 @@ public sealed partial class DebugWindowManager
 
             if (axis == faceAxis)
             {
-                if (size <= 1.0)
+                if (size <= cellSize)
                 {
                     removeFrom[axis] = min;
                     removeTo[axis] = max;
                 }
                 else if (facePositive)
                 {
-                    removeFrom[axis] = max - 1.0;
+                    removeFrom[axis] = max - cellSize;
                     removeTo[axis] = max;
                 }
                 else
                 {
                     removeFrom[axis] = min;
-                    removeTo[axis] = min + 1.0;
+                    removeTo[axis] = min + cellSize;
                 }
 
-                addFrom[axis] = facePositive ? max : min - 1.0;
-                addTo[axis] = facePositive ? max + 1.0 : min;
+                addFrom[axis] = facePositive ? max : min - cellSize;
+                addTo[axis] = facePositive ? max + cellSize : min;
                 continue;
             }
 
             double coordinate = element.From[axis] + Math.Clamp(localUnits[axis], 0.0, size);
-            if (size <= 1.0)
+            if (size <= cellSize)
             {
                 removeFrom[axis] = min;
                 removeTo[axis] = max;
             }
             else
             {
-                double start = Math.Floor(coordinate);
-                if (coordinate >= max - 0.000001) start = max - 1.0;
-                start = Math.Clamp(start, min, max - 1.0);
+                double start = Math.Floor(coordinate / cellSize) * cellSize;
+                if (coordinate >= max - 0.000001) start = max - cellSize;
+                start = Math.Clamp(start, min, max - cellSize);
                 removeFrom[axis] = start;
-                removeTo[axis] = start + 1.0;
+                removeTo[axis] = start + cellSize;
             }
 
             addFrom[axis] = removeFrom[axis];
@@ -1650,6 +1654,12 @@ public sealed partial class DebugWindowManager
             ModelChiselBoxWorldCorners(element, removeFrom, removeTo),
             ModelChiselBoxWorldCorners(element, addFrom, addTo));
         return true;
+    }
+
+    private double ModelCurrentChiselSize()
+    {
+        _modelChiselSize = Math.Clamp(_modelChiselSize, 0.0625f, 8f);
+        return _modelChiselSize;
     }
 
     private int[] ModelCutCandidateAxes(int faceAxis)

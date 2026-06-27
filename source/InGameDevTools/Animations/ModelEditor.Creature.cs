@@ -24,6 +24,7 @@ public sealed partial class DebugWindowManager
     // renderer composes element transforms (see ModelLocalElementMatrix), so chains curve naturally
     // when their joint rotations are animated.
     private const int ModelCreatureMaxElements = 300;
+    private const double ModelCreatureAutoUvMaxTileUnits = 16.0;
 
     private enum ModelCreatureArchetype
     {
@@ -35,7 +36,9 @@ public sealed partial class DebugWindowManager
         Wolf,
         Dragon,
         Mammoth,
-        Bovine
+        Bovine,
+        Stag,
+        Scorpion
     }
 
     private static readonly string[] ModelCreatureArchetypeLabels =
@@ -48,7 +51,9 @@ public sealed partial class DebugWindowManager
         "Wolf (detailed)",
         "Dragon (showcase)",
         "Mammoth (showcase)",
-        "Bovine (showcase)"
+        "Bovine (showcase)",
+        "Stag (showcase)",
+        "Scorpion (showcase)"
     ];
 
     private enum ModelCreatureWingStyle
@@ -61,6 +66,27 @@ public sealed partial class DebugWindowManager
     [
         "Feathered / limb",
         "Membrane (bat / dragon)"
+    ];
+
+    // Per-side arm tips, so a creature can be asymmetric (e.g. one blade arm, one normal hand).
+    private enum ModelCreatureArmAppendage
+    {
+        Normal,
+        Blade,
+        Claw,
+        Club,
+        Hook,
+        None
+    }
+
+    private static readonly string[] ModelCreatureArmAppendageLabels =
+    [
+        "Normal (hand / hands toggle)",
+        "Blade",
+        "Big claw",
+        "Club / mace",
+        "Hook",
+        "None (bare stump)"
     ];
 
     private sealed class ModelCreatureParams
@@ -108,6 +134,13 @@ public sealed partial class DebugWindowManager
         public float ArmSplay = 8f;
         public float ArmBend;
         public float ArmPos = 0.22f;
+
+        // Asymmetry: independent right/left arm tips (one blade, one hand, ...). Off = symmetric (unchanged).
+        public bool AsymmetricArms;
+        public int ArmAppendageRight = (int)ModelCreatureArmAppendage.Normal;
+        public int ArmAppendageLeft = (int)ModelCreatureArmAppendage.Normal;
+        public float ArmAppendageLength = 9f;   // blade / hook reach
+        public float ArmAppendageSize = 2.5f;   // blade height / claw / club size
 
         // Tail
         public int TailSegments = 4;
@@ -356,10 +389,108 @@ public sealed partial class DebugWindowManager
         public float ShellLength = 0.85f;     // fraction of body length
         public float ShellWidth = 1.2f;       // fraction of body width
 
+        // ---- Studied-creature detail (mined from Wilderlands Rustbound, Darce's Drifters and Pegasus) ----
+
+        // Branching antlers (deer / elk / moose / the shepherd & caretaker drifters): a swept main beam
+        // carrying several tines, unlike the plain tapering Horns.
+        public int AntlerPairs;
+        public int AntlerBeamSegments = 3;
+        public float AntlerBeamLength = 9f;
+        public float AntlerBeamThickness = 1.4f;
+        public int AntlerTines = 3;            // points branching off each beam
+        public float AntlerTineLength = 4f;
+        public float AntlerSpread = 30f;       // lateral splay of the whole beam (deg)
+        public float AntlerSweep = 16f;        // per-segment back-curve of the beam (deg)
+        public float AntlerTineSpread = 35f;   // fore/aft fan of the tines off the beam (deg)
+        public float AntlerForward = 0.4f;     // fore/aft anchor on the head (0..1)
+
+        // Mandibles / pincers (ants, beetles, spiders - banefly & blightworm): a lateral pair on the head
+        // front that gape sideways and hook inward, with optional inner teeth.
+        public bool Mandibles;
+        public int MandibleSegments = 2;
+        public float MandibleLength = 5f;
+        public float MandibleThickness = 1f;
+        public float MandibleGape = 18f;       // sideways open angle at the base (deg)
+        public float MandibleCurve = 22f;      // per-segment inward hook (deg)
+        public bool MandibleFangs;             // inner serrations / teeth
+
+        // Compound / extra eyes (insects, spiders, aberrations): small eyes clustered around the main pair.
+        public int ExtraEyes;                  // per side (0..8)
+        public float ExtraEyeSize = 0.6f;
+        public float ExtraEyeSpread = 1.4f;    // how far they scatter around the main eye
+
+        // Tail-tip stinger / spike mace (scorpion, wasp, blightworm, caretaker): a cluster of spikes at the tail end.
+        public bool TailStinger;
+        public int StingerCount = 3;
+        public float StingerLength = 4f;
+        public float StingerSize = 1f;
+        public float StingerSpread = 24f;      // fan (deg)
+        public float StingerCurve;             // up(+)/down(-) hook of the whole cluster (deg)
+
+        // Layered wing feathers (bird / pegasus / angel): flat feather planes trailing off the feathered-wing spar.
+        public int WingFeathers;               // feathers per wing (0 = the plain spar)
+        public float WingFeatherLength = 7f;
+        public float WingFeatherWidth = 2f;
+
+        // Scattered body spikes / quills / shards (porcupine, sea urchin, the spiked drifters, rust constructs).
+        public int BodySpikes;                 // total, scattered over the torso (seeded, reproducible)
+        public float BodySpikeLength = 4f;
+        public float BodySpikeSize = 1f;
+        public float BodySpikeSpan = 0.85f;    // fraction of the spine they cover from the front
+
+        // ---- Per-bone limb tuning: independently tweak each arm/leg bone's length, girth and angle ----
+        public bool ArmPerBone;
+        public List<float> ArmBoneLength = [];  // length multiplier per arm bone (1 = the even default)
+        public List<float> ArmBoneThick = [];   // girth multiplier per arm bone
+        public List<float> ArmBoneAngle = [];   // extra bend (deg) per arm bone
+        public bool LegPerBone;
+        public List<float> LegBoneLength = [];
+        public List<float> LegBoneThick = [];
+        public List<float> LegBoneAngle = [];
+
+        // ---- Joint gap fillers: a knuckle box at each bent chain joint to close the outer-bend gaps ----
+        public bool FillJoints;
+        public float JointFillScale = 1f;       // knuckle size relative to the joint's cross-section
+
+        // ---- Smoothing: overlapping 45-degree facet boxes round chunky volumes into octagonal prisms ----
+        public int Smoothing;                   // 0 = plain boxes, 1-2 = rounded (the seikret beak technique)
+
+        // ---- Wing membrane ridges: raised bone struts dividing the membrane into sections ----
+        public bool WingRidges;
+        public float WingRidgeSize = 1f;        // ridge thickness relative to the membrane
+
+        // ---- Targeted fine-tuning: per-element overrides keyed by the element's generated name. Lets any single
+        // part be sculpted on top of the procedural base without a dedicated parameter, and the tweaks survive
+        // regenerate / randomize as long as the named element still exists. ----
+        public Dictionary<string, ModelCreatureTweak> Tweaks = new(StringComparer.Ordinal);
+
         public ModelCreatureParams Clone()
         {
-            return (ModelCreatureParams)MemberwiseClone();
+            ModelCreatureParams clone = (ModelCreatureParams)MemberwiseClone();
+            clone.ArmBoneLength = [.. ArmBoneLength];
+            clone.ArmBoneThick = [.. ArmBoneThick];
+            clone.ArmBoneAngle = [.. ArmBoneAngle];
+            clone.LegBoneLength = [.. LegBoneLength];
+            clone.LegBoneThick = [.. LegBoneThick];
+            clone.LegBoneAngle = [.. LegBoneAngle];
+            clone.Tweaks = Tweaks.ToDictionary(entry => entry.Key, entry => entry.Value.Clone(), StringComparer.Ordinal);
+            return clone;
         }
+    }
+
+    /// <summary>A targeted override on one generated element (and its subtree): a uniform resize about its pivot,
+    /// a positional nudge, an extra rotation, or hiding it outright. Keyed by element name in
+    /// <see cref="ModelCreatureParams.Tweaks"/>, so it re-applies every rebuild.</summary>
+    private sealed class ModelCreatureTweak
+    {
+        public float SizeMul = 1f;
+        public NVector3 Offset;
+        public NVector3 Rotate;
+        public bool Hidden;
+
+        public bool IsNeutral => !Hidden && Math.Abs(SizeMul - 1f) < 1e-4f && Offset == NVector3.Zero && Rotate == NVector3.Zero;
+
+        public ModelCreatureTweak Clone() => (ModelCreatureTweak)MemberwiseClone();
     }
 
     private bool _modelCreatureWindowOpen;
@@ -370,6 +501,7 @@ public sealed partial class DebugWindowManager
     private string _modelCreaturePreviewError = "";
     private bool _modelCreaturePreviewDirty = true;
     private int _modelCreaturePreviewCount;
+    private string _modelCreatureTweakSelected = "";   // the element being fine-tuned (highlighted in the ghost)
 
     private static double ModelCreatureLerp(double a, double b, double t)
     {
@@ -633,6 +765,18 @@ public sealed partial class DebugWindowManager
                     changed |= ImGui.DragFloat("Nose size##model-creature-nose-size", ref p.NoseSize, 0.1f, 0.25f, 8f, "%.2f");
                 }
 
+                changed |= ImGui.Checkbox("Mandibles / pincers##model-creature-mandibles", ref p.Mandibles);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("A lateral pair on the head front that gape sideways and hook inward (ants/beetles/spiders - the banefly & blightworm), separate from the vertical jaw.");
+                if (p.Mandibles)
+                {
+                    changed |= ImGui.SliderInt("Mandible segments##model-creature-mandible-seg", ref p.MandibleSegments, 1, 4);
+                    changed |= ImGui.DragFloat("Mandible length##model-creature-mandible-len", ref p.MandibleLength, 0.25f, 0.5f, 32f, "%.2f");
+                    changed |= ImGui.DragFloat("Mandible thickness##model-creature-mandible-th", ref p.MandibleThickness, 0.1f, 0.25f, 8f, "%.2f");
+                    changed |= ImGui.DragFloat("Mandible gape##model-creature-mandible-gape", ref p.MandibleGape, 0.5f, -30f, 60f, "%.1f deg");
+                    changed |= ImGui.DragFloat("Mandible hook##model-creature-mandible-curve", ref p.MandibleCurve, 0.5f, -45f, 45f, "%.1f deg");
+                    changed |= ImGui.Checkbox("Mandible teeth##model-creature-mandible-fangs", ref p.MandibleFangs);
+                }
+
                 changed |= ImGui.Checkbox("Trunk / proboscis##model-creature-trunk", ref p.Trunk);
                 if (ImGui.IsItemHovered()) ImGui.SetTooltip("A long, drooping, tapering multi-segment trunk off the head front (elephant/mammoth/tapir). Each segment is a joint so it can curl.");
                 if (p.Trunk)
@@ -727,6 +871,8 @@ public sealed partial class DebugWindowManager
                     changed |= ImGui.DragFloat("Claw curve##model-creature-claw-curve", ref p.ClawCurve, 0.5f, -60f, 30f, "%.1f deg");
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Negative hooks the claws downward.");
                 }
+
+                changed |= DrawModelCreaturePerBone("leg", Math.Clamp(p.LegSegments, 1, 6), ref p.LegPerBone, p.LegBoneLength, p.LegBoneThick, p.LegBoneAngle);
             }
         }
 
@@ -753,6 +899,20 @@ public sealed partial class DebugWindowManager
                     changed |= ImGui.DragFloat("Hand width##model-creature-hand-w", ref p.HandWidth, 0.25f, 0.5f, 24f, "%.2f");
                     changed |= ImGui.DragFloat("Hand height##model-creature-hand-h", ref p.HandHeight, 0.25f, 0.25f, 16f, "%.2f");
                 }
+
+                changed |= ImGui.Checkbox("Asymmetric arms##model-creature-asym", ref p.AsymmetricArms);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Give the right and left arms different tips (e.g. one blade arm, one hand). Off = the arms mirror as usual.");
+                if (p.AsymmetricArms)
+                {
+                    ImGui.SetNextItemWidth(190f);
+                    changed |= ImGui.Combo("Right arm##model-creature-arm-app-r", ref p.ArmAppendageRight, ModelCreatureArmAppendageLabels, ModelCreatureArmAppendageLabels.Length);
+                    ImGui.SetNextItemWidth(190f);
+                    changed |= ImGui.Combo("Left arm##model-creature-arm-app-l", ref p.ArmAppendageLeft, ModelCreatureArmAppendageLabels, ModelCreatureArmAppendageLabels.Length);
+                    changed |= ImGui.DragFloat("Appendage length##model-creature-arm-app-len", ref p.ArmAppendageLength, 0.25f, 1f, 48f, "%.2f");
+                    changed |= ImGui.DragFloat("Appendage size##model-creature-arm-app-size", ref p.ArmAppendageSize, 0.1f, 0.25f, 16f, "%.2f");
+                }
+
+                changed |= DrawModelCreaturePerBone("arm", Math.Clamp(p.ArmSegments, 1, 6), ref p.ArmPerBone, p.ArmBoneLength, p.ArmBoneThick, p.ArmBoneAngle);
             }
         }
 
@@ -787,6 +947,16 @@ public sealed partial class DebugWindowManager
                 {
                     changed |= ImGui.DragFloat("Tuft size##model-creature-tail-tuft-s", ref p.TailTuftSize, 0.25f, 0.5f, 24f, "%.2f");
                 }
+                changed |= ImGui.Checkbox("Tail stinger / spikes##model-creature-stinger", ref p.TailStinger);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("A cluster of spikes at the tail tip (scorpion / wasp stinger, the blightworm & caretaker maces).");
+                if (p.TailStinger)
+                {
+                    changed |= ImGui.SliderInt("Stinger spikes##model-creature-stinger-count", ref p.StingerCount, 1, 12);
+                    changed |= ImGui.DragFloat("Stinger length##model-creature-stinger-len", ref p.StingerLength, 0.25f, 0.5f, 32f, "%.2f");
+                    changed |= ImGui.DragFloat("Stinger size##model-creature-stinger-size", ref p.StingerSize, 0.1f, 0.25f, 8f, "%.2f");
+                    changed |= ImGui.DragFloat("Stinger fan##model-creature-stinger-spread", ref p.StingerSpread, 0.5f, 0f, 80f, "%.1f deg");
+                    changed |= ImGui.DragFloat("Stinger hook##model-creature-stinger-curve", ref p.StingerCurve, 0.5f, -80f, 80f, "%.1f deg");
+                }
                 changed |= ImGui.Checkbox("Tail plume / fan##model-creature-plume", ref p.TailPlume);
                 if (ImGui.IsItemHovered()) ImGui.SetTooltip("A spray of flat feathers fanning back and up from the rear (rooster / peacock / turkey).");
                 if (p.TailPlume)
@@ -819,12 +989,28 @@ public sealed partial class DebugWindowManager
                 if (ImGui.IsItemHovered()) ImGui.SetTooltip("Vertical attach point on the body (1 = top of the back).");
                 ImGui.SetNextItemWidth(190f);
                 changed |= ImGui.Combo("Style##model-creature-wing-style", ref p.WingStyle, ModelCreatureWingStyleLabels, ModelCreatureWingStyleLabels.Length);
-                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Feathered = a tapering limb spar. Membrane = a bat/dragon wing: an arm, a fan of finger bones, and webbing between them.");
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Feathered = a tapering limb spar. Membrane = a bat/dragon wing: a leading-edge spar, a fan of finger bones with webbing, and a large membrane reaching back to the torso. The spar flaps with the wing.");
                 if ((ModelCreatureWingStyle)p.WingStyle == ModelCreatureWingStyle.Membrane)
                 {
                     changed |= ImGui.SliderInt("Fingers##model-creature-wing-fingers", ref p.WingFingers, 2, 6);
                     changed |= ImGui.DragFloat("Membrane trail##model-creature-wing-trail", ref p.WingMembraneTrail, 0.25f, 1f, 48f, "%.2f");
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("How far the webbing trails behind each finger bone.");
+                    changed |= ImGui.Checkbox("Membrane ridges##model-creature-wing-ridges", ref p.WingRidges);
+                    if (ImGui.IsItemHovered()) ImGui.SetTooltip("Raised bone struts dividing the membrane into sections, standing proud of the surface (the finger/arm ridges of a real bat/reptile wing).");
+                    if (p.WingRidges)
+                    {
+                        changed |= ImGui.DragFloat("Ridge size##model-creature-wing-ridge-size", ref p.WingRidgeSize, 0.05f, 0.2f, 3f, "x%.2f");
+                    }
+                }
+                else
+                {
+                    changed |= ImGui.SliderInt("Feathers / wing##model-creature-wing-feathers", ref p.WingFeathers, 0, 24);
+                    if (ImGui.IsItemHovered()) ImGui.SetTooltip("Lay a row of overlapping flat feathers along the spar (a proper layered bird / pegasus wing). 0 = the plain spar.");
+                    if (p.WingFeathers > 0)
+                    {
+                        changed |= ImGui.DragFloat("Feather length##model-creature-wing-feather-len", ref p.WingFeatherLength, 0.25f, 0.5f, 48f, "%.2f");
+                        changed |= ImGui.DragFloat("Feather width##model-creature-wing-feather-w", ref p.WingFeatherWidth, 0.1f, 0.25f, 16f, "%.2f");
+                    }
                 }
 
                 changed |= ImGui.SliderInt("Side fins##model-creature-fins", ref p.FinPairs, 0, 3);
@@ -880,6 +1066,23 @@ public sealed partial class DebugWindowManager
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Fore/aft anchor of a single horn pair.");
                 }
             }
+            changed |= ImGui.SliderInt("Antler pairs##model-creature-antlers", ref p.AntlerPairs, 0, 2);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Branching antlers: a swept beam carrying several tines (deer / elk / moose / the shepherd & deerhorn drifters).");
+            if (p.AntlerPairs > 0)
+            {
+                changed |= ImGui.DragFloat("Beam length##model-creature-antler-len", ref p.AntlerBeamLength, 0.25f, 1f, 48f, "%.2f");
+                changed |= ImGui.SliderInt("Tines / beam##model-creature-antler-tines", ref p.AntlerTines, 0, 8);
+                changed |= ImGui.DragFloat("Tine length##model-creature-antler-tinelen", ref p.AntlerTineLength, 0.25f, 0.5f, 24f, "%.2f");
+                changed |= ImGui.DragFloat("Antler spread##model-creature-antler-spread", ref p.AntlerSpread, 0.5f, -20f, 70f, "%.1f deg");
+                if (advanced)
+                {
+                    changed |= ImGui.SliderInt("Beam segments##model-creature-antler-seg", ref p.AntlerBeamSegments, 1, 6);
+                    changed |= ImGui.DragFloat("Beam thickness##model-creature-antler-th", ref p.AntlerBeamThickness, 0.1f, 0.25f, 8f, "%.2f");
+                    changed |= ImGui.DragFloat("Beam sweep##model-creature-antler-sweep", ref p.AntlerSweep, 0.5f, -45f, 45f, "%.1f deg");
+                    changed |= ImGui.DragFloat("Tine fan##model-creature-antler-tinefan", ref p.AntlerTineSpread, 0.5f, 0f, 80f, "%.1f deg");
+                    changed |= ImGui.SliderFloat("Antler position##model-creature-antler-fwd", ref p.AntlerForward, 0f, 1f, "%.2f");
+                }
+            }
             changed |= ImGui.Checkbox("Eyes##model-creature-eyes", ref p.Eyes);
             if (p.Eyes)
             {
@@ -893,6 +1096,13 @@ public sealed partial class DebugWindowManager
                     if (p.Pupils)
                     {
                         changed |= ImGui.DragFloat("Pupil size##model-creature-pupil-size", ref p.PupilSize, 0.05f, 0.1f, 6f, "%.2f");
+                    }
+                    changed |= ImGui.SliderInt("Extra eyes / side##model-creature-extraeyes", ref p.ExtraEyes, 0, 8);
+                    if (ImGui.IsItemHovered()) ImGui.SetTooltip("A cluster of smaller eyes around each main eye (compound / arachnid eyes - the banefly & blightworm).");
+                    if (p.ExtraEyes > 0)
+                    {
+                        changed |= ImGui.DragFloat("Extra eye size##model-creature-extraeye-size", ref p.ExtraEyeSize, 0.05f, 0.1f, 4f, "%.2f");
+                        changed |= ImGui.SliderFloat("Extra eye spread##model-creature-extraeye-spread", ref p.ExtraEyeSpread, 0.4f, 4f, "%.2f");
                     }
                 }
             }
@@ -948,20 +1158,166 @@ public sealed partial class DebugWindowManager
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Where the ridge starts and ends along the spine (0 = head end, 1 = tail end).");
                 }
             }
+
+            changed |= ImGui.SliderInt("Body spikes / quills##model-creature-bodyspikes", ref p.BodySpikes, 0, 60);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Spikes scattered all over the torso, not in a neat row (porcupine, sea urchin, the spiked drifters, rust constructs). Reproducible from the seed.");
+            if (p.BodySpikes > 0)
+            {
+                changed |= ImGui.DragFloat("Spike length##model-creature-bodyspike-len", ref p.BodySpikeLength, 0.25f, 0.25f, 32f, "%.2f");
+                changed |= ImGui.DragFloat("Spike size##model-creature-bodyspike-size", ref p.BodySpikeSize, 0.1f, 0.25f, 8f, "%.2f");
+                if (advanced)
+                {
+                    changed |= ImGui.SliderFloat("Coverage##model-creature-bodyspike-span", ref p.BodySpikeSpan, 0.05f, 1f, "%.2f");
+                    if (ImGui.IsItemHovered()) ImGui.SetTooltip("Fraction of the body length they cover from the head end.");
+                }
+            }
+        }
+
+        if (ImGui.CollapsingHeader("Mesh / smoothing##model-creature-mesh"))
+        {
+            changed |= ImGui.SliderInt("Round volumes##model-creature-smoothing", ref p.Smoothing, 0, 2);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Round the chunky body/head/limb cubes into octagonal (1) or near-round (2) prisms by overlapping a rotated facet box on each, like the hand-made seikret beak. 0 = plain boxes. Adds elements.");
+
+            changed |= ImGui.Checkbox("Fill joint gaps##model-creature-filljoints", ref p.FillJoints);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Drop a knuckle box at every bent joint to close the V-gaps where two bones meet at an angle.");
+            if (p.FillJoints)
+            {
+                changed |= ImGui.SliderFloat("Knuckle size##model-creature-filljoint-size", ref p.JointFillScale, 0.3f, 2.5f, "x%.2f");
+            }
+        }
+
+        changed |= DrawModelCreatureTweaks(p);
+
+        return changed;
+    }
+
+    /// <summary>Targeted fine-tuning: pick any element of the generated model and resize / nudge / rotate / hide
+    /// it, on top of the procedural parameters. Keyed by name, so the override sticks across regenerate and
+    /// randomize. One generic panel reaches every part, instead of a dedicated slider per feature.</summary>
+    private bool DrawModelCreatureTweaks(ModelCreatureParams p)
+    {
+        if (!ImGui.CollapsingHeader("Fine-tune (targeted)##model-creature-tweaks")) return false;
+
+        bool changed = false;
+        ImGui.TextWrapped("Sculpt any single element on top of the procedural base. Tweaks are keyed by element name and survive regenerate / randomize while the part exists.");
+
+        List<string> names = _modelCreaturePreviewRoot == null
+            ? []
+            : _modelCreaturePreviewRoot.EnumerateSubtree()
+                .Where(element => !ReferenceEquals(element, _modelCreaturePreviewRoot) && !string.IsNullOrEmpty(element.Name))
+                .Select(element => element.Name).Distinct().OrderBy(name => name, StringComparer.Ordinal).ToList();
+
+        ImGui.SetNextItemWidth(220f);
+        if (ModelFilteredCombo("Element##model-creature-tweak-pick", _modelCreatureTweakSelected, names, out string picked, allowCustom: false, filterHint: "filter element names"))
+        {
+            _modelCreatureTweakSelected = picked;
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Pick the element to fine-tune; it highlights yellow in the preview.");
+
+        if (!string.IsNullOrEmpty(_modelCreatureTweakSelected))
+        {
+            ModelCreatureTweak tweak = p.Tweaks.TryGetValue(_modelCreatureTweakSelected, out ModelCreatureTweak? existing)
+                ? existing
+                : p.Tweaks[_modelCreatureTweakSelected] = new ModelCreatureTweak();
+
+            changed |= ImGui.SliderFloat("Size##model-creature-tweak-size", ref tweak.SizeMul, 0.1f, 5f, "x%.2f");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Resize this element and its children about its joint pivot.");
+            changed |= ImGui.DragFloat3("Offset##model-creature-tweak-off", ref tweak.Offset, 0.25f, -128f, 128f, "%.2f");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Nudge this element (and subtree) in shape units (16 = 1 block).");
+            changed |= ImGui.DragFloat3("Rotate##model-creature-tweak-rot", ref tweak.Rotate, 1f, -180f, 180f, "%.1f deg");
+            changed |= ImGui.Checkbox("Hide##model-creature-tweak-hide", ref tweak.Hidden);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Remove this element and its children from the model.");
+            if (ImGui.Button("Reset element##model-creature-tweak-reset"))
+            {
+                p.Tweaks.Remove(_modelCreatureTweakSelected);
+                changed = true;
+            }
+        }
+
+        List<string> active = p.Tweaks.Where(entry => !entry.Value.IsNeutral).Select(entry => entry.Key).OrderBy(name => name, StringComparer.Ordinal).ToList();
+        if (active.Count > 0)
+        {
+            ImGui.Separator();
+            ImGui.TextDisabled($"{active.Count} active tweak(s):");
+            foreach (string name in active)
+            {
+                if (ImGui.SmallButton($"x##model-creature-tweak-del-{name}"))
+                {
+                    p.Tweaks.Remove(name);
+                    if (_modelCreatureTweakSelected == name) _modelCreatureTweakSelected = "";
+                    changed = true;
+                }
+                ImGui.SameLine();
+                if (ImGui.Selectable($"{name}  {ModelCreatureTweakSummary(p.Tweaks[name])}##model-creature-tweak-sel-{name}", _modelCreatureTweakSelected == name))
+                {
+                    _modelCreatureTweakSelected = name;
+                }
+            }
+        }
+
+        // Keep the dictionary sparse: drop neutral (unedited) tweaks except the one currently selected.
+        foreach (string key in p.Tweaks.Where(entry => entry.Key != _modelCreatureTweakSelected && entry.Value.IsNeutral).Select(entry => entry.Key).ToList())
+        {
+            p.Tweaks.Remove(key);
         }
 
         return changed;
     }
 
+    private static string ModelCreatureTweakSummary(ModelCreatureTweak tweak)
+    {
+        if (tweak.Hidden) return "(hidden)";
+        List<string> parts = [];
+        if (Math.Abs(tweak.SizeMul - 1f) > 1e-4f) parts.Add($"x{tweak.SizeMul:0.##}");
+        if (tweak.Offset != NVector3.Zero) parts.Add($"move({tweak.Offset.X:0.#},{tweak.Offset.Y:0.#},{tweak.Offset.Z:0.#})");
+        if (tweak.Rotate != NVector3.Zero) parts.Add($"rot({tweak.Rotate.X:0.#},{tweak.Rotate.Y:0.#},{tweak.Rotate.Z:0.#})");
+        return string.Join(" ", parts);
+    }
+
+    /// <summary>Per-bone limb tuning: a checkbox plus, when on, a length/girth/angle row for each bone. The
+    /// override lists are grown/trimmed to the joint count (length and girth default to x1, angle to 0).</summary>
+    private bool DrawModelCreaturePerBone(string id, int segCount, ref bool enabled, List<float> len, List<float> thick, List<float> angle)
+    {
+        bool changed = ImGui.Checkbox($"Per-bone tuning##model-creature-perbone-{id}", ref enabled);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Tweak each bone's length, girth and angle individually instead of one even taper.");
+        if (!enabled) return changed;
+
+        ModelCreatureResizeList(len, segCount, 1f);
+        ModelCreatureResizeList(thick, segCount, 1f);
+        ModelCreatureResizeList(angle, segCount, 0f);
+
+        for (int k = 0; k < segCount; k++)
+        {
+            ImGui.TextDisabled($"Bone {k + 1}");
+            float l = len[k], t = thick[k], a = angle[k];
+            ImGui.SetNextItemWidth(96f);
+            if (ImGui.DragFloat($"Len##model-creature-perbone-{id}-l{k}", ref l, 0.01f, 0.05f, 4f, "x%.2f")) { len[k] = l; changed = true; }
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(96f);
+            if (ImGui.DragFloat($"Girth##model-creature-perbone-{id}-t{k}", ref t, 0.01f, 0.05f, 4f, "x%.2f")) { thick[k] = t; changed = true; }
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(120f);
+            if (ImGui.DragFloat($"Angle##model-creature-perbone-{id}-a{k}", ref a, 0.5f, -90f, 90f, "%.1f deg")) { angle[k] = a; changed = true; }
+        }
+        return changed;
+    }
+
+    private static void ModelCreatureResizeList(List<float> list, int count, float fill)
+    {
+        while (list.Count < count) list.Add(fill);
+        if (list.Count > count) list.RemoveRange(count, list.Count - count);
+    }
+
     private void ModelApplyCreatureArchetype(ModelCreatureArchetype archetype)
     {
         ModelCreatureParams p = _modelCreatureParams;
-        // Preserve placement, texture and workflow toggles across preset swaps.
+        // Preserve placement, texture, workflow toggles and targeted tweaks across preset swaps.
         NVector3 center = p.Center;
         NVector3 rotation = p.Rotation;
         string texture = p.Texture;
         bool autoTexture = p.AutoTexture;
         int seed = p.Seed;
+        Dictionary<string, ModelCreatureTweak> tweaks = p.Tweaks;
 
         ModelCreatureParams defaults = new();
         foreach (System.Reflection.FieldInfo field in typeof(ModelCreatureParams).GetFields())
@@ -1348,6 +1704,111 @@ public sealed partial class DebugWindowManager
                 p.TailTuft = true;
                 p.TailTuftSize = 2f;
                 break;
+            case ModelCreatureArchetype.Stag:
+                // A deer / elk: slim body on long digitigrade legs, a raised head and big branching antlers
+                // (the standout feature mined from the Wilderlands shepherd/caretaker and Darce's deerhorn drifters).
+                p.SpineSegments = 4;
+                p.SpineLength = 18f;
+                p.BodyWidth = 6f;
+                p.BodyHeight = 7f;
+                p.BodyTaper = 0.85f;
+                p.NeckSegments = 2;
+                p.NeckLength = 8f;
+                p.NeckThickness = 3.5f;
+                p.NeckPitch = -42f;
+                p.HeadWidth = 4f;
+                p.HeadHeight = 4f;
+                p.HeadDepth = 6f;
+                p.Snout = true;
+                p.SnoutLength = 3.5f;
+                p.SnoutSize = 2.5f;
+                p.SnoutHeightMul = 0.8f;
+                p.Nose = true;
+                p.NoseSize = 1.2f;
+                p.Ears = 1;
+                p.EarSize = 1.6f;
+                p.EarHeight = 3.5f;
+                p.EarTaper = 0.5f;
+                p.Eyes = true;
+                p.EyeSize = 0.7f;
+                p.AntlerPairs = 1;
+                p.AntlerBeamSegments = 3;
+                p.AntlerBeamLength = 11f;
+                p.AntlerBeamThickness = 1.4f;
+                p.AntlerTines = 4;
+                p.AntlerTineLength = 5f;
+                p.AntlerSpread = 34f;
+                p.AntlerSweep = 14f;
+                p.AntlerTineSpread = 40f;
+                p.LegPairs = 2;
+                p.LegSegments = 3;
+                p.LegLength = 15f;
+                p.LegThickness = 2f;
+                p.LegTaper = 0.6f;
+                p.LegZigzag = 16f;
+                p.FrontLegPos = 0.22f;
+                p.RearLegPos = 0.82f;
+                p.Feet = true;
+                p.FootLength = 2.5f;
+                p.FootWidth = 1.8f;
+                p.Toes = 2;
+                p.ClawLength = 1.2f;
+                p.ClawSize = 0.9f;
+                p.TailSegments = 2;
+                p.TailLength = 4f;
+                p.TailThickness = 1.5f;
+                p.TailTaper = 0.4f;
+                p.TailTuft = true;
+                p.TailTuftSize = 1.5f;
+                break;
+            case ModelCreatureArchetype.Scorpion:
+                // An arthropod: a low segmented body on six legs, big front pincers (mandibles), a cluster of
+                // compound eyes, and a long segmented tail tipped with a stinger (Wilderlands banefly/blightworm).
+                p.SpineSegments = 5;
+                p.SpineLength = 16f;
+                p.BodyWidth = 6f;
+                p.BodyHeight = 3.5f;
+                p.BodyTaper = 0.7f;
+                p.NeckSegments = 1;
+                p.NeckLength = 2f;
+                p.NeckThickness = 4f;
+                p.NeckPitch = 0f;
+                p.HeadWidth = 5f;
+                p.HeadHeight = 3f;
+                p.HeadDepth = 4f;
+                p.Mandibles = true;
+                p.MandibleSegments = 3;
+                p.MandibleLength = 7f;
+                p.MandibleThickness = 1.2f;
+                p.MandibleGape = 14f;
+                p.MandibleCurve = 26f;
+                p.MandibleFangs = true;
+                p.Eyes = true;
+                p.EyeSize = 0.7f;
+                p.ExtraEyes = 4;
+                p.ExtraEyeSize = 0.4f;
+                p.ExtraEyeSpread = 1.6f;
+                p.LegPairs = 3;
+                p.LegSegments = 3;
+                p.LegLength = 9f;
+                p.LegThickness = 1.2f;
+                p.LegSplay = 24f;
+                p.LegZigzag = 22f;
+                p.FrontLegPos = 0.2f;
+                p.RearLegPos = 0.78f;
+                p.TailSegments = 7;
+                p.TailLength = 18f;
+                p.TailThickness = 2.5f;
+                p.TailTaper = 0.45f;
+                p.TailDroop = -10f;
+                p.TailBaseAngle = 30f;
+                p.TailStinger = true;
+                p.StingerCount = 3;
+                p.StingerLength = 4f;
+                p.StingerSize = 1f;
+                p.StingerSpread = 18f;
+                p.StingerCurve = -28f;
+                break;
         }
 
         p.Center = center;
@@ -1355,6 +1816,7 @@ public sealed partial class DebugWindowManager
         p.Texture = texture;
         p.AutoTexture = autoTexture;
         p.Seed = seed;
+        p.Tweaks = tweaks;
     }
 
     private void ModelRandomizeCreature(ModelCreatureParams p)
@@ -1492,6 +1954,30 @@ public sealed partial class DebugWindowManager
         p.PlumeCount = r.Next(5, 11);
         p.Shell = r.NextDouble() < 0.15;
         p.ShellHeight = Range(3f, 7f);
+
+        // Studied-creature detail flourishes.
+        p.AntlerPairs = r.NextDouble() < 0.2 ? 1 : 0;
+        p.AntlerBeamSegments = r.Next(2, 5);
+        p.AntlerBeamLength = Range(7f, 13f);
+        p.AntlerTines = r.Next(2, 6);
+        p.AntlerTineLength = Range(3f, 6f);
+        p.AntlerSpread = Range(20f, 42f);
+        p.Mandibles = r.NextDouble() < 0.2;
+        p.MandibleLength = Range(3f, 7f);
+        p.MandibleGape = Range(8f, 26f);
+        p.MandibleCurve = Range(10f, 30f);
+        p.MandibleFangs = r.NextDouble() < 0.5;
+        p.ExtraEyes = r.NextDouble() < 0.25 ? r.Next(2, 7) : 0;
+        p.ExtraEyeSize = Range(0.4f, 0.8f);
+        p.TailStinger = r.NextDouble() < 0.2;
+        p.StingerCount = r.Next(1, 5);
+        p.StingerLength = Range(3f, 6f);
+        p.StingerCurve = Range(-30f, 20f);
+        p.WingFeathers = p.WingPairs > 0 && r.NextDouble() < 0.5 ? r.Next(4, 12) : 0;
+        p.WingFeatherLength = Range(5f, 9f);
+        p.BodySpikes = r.NextDouble() < 0.2 ? r.Next(6, 24) : 0;
+        p.BodySpikeLength = Range(2f, 6f);
+        p.BodySpikeSize = Range(0.6f, 1.6f);
     }
 
     // ---- Builder -----------------------------------------------------------
@@ -1565,12 +2051,22 @@ public sealed partial class DebugWindowManager
             ModelBuildCreatureTail(p, rearVertebra);
             ModelBuildCreatureWings(p, spine);
             ModelBuildCreatureDorsalSpikes(p, spine);
+            ModelBuildCreatureBodySpikes(p, spine);
             ModelBuildCreatureBelly(p, spine, spineLen, bodyW);
             ModelBuildCreatureHump(p, spine);
             ModelBuildCreatureDewlap(p, frontVertebra);
             ModelBuildCreatureFins(p, spine);
             ModelBuildCreatureShell(p, spine, spineLen, bodyW);
             ModelBuildCreatureTailPlume(p, rearVertebra);
+
+            // Post-processes over the finished skeleton: knuckles that close angled joint gaps, then facet
+            // boxes that round the chunky volumes. Both snapshot the structural elements first so they don't
+            // recurse onto their own additions.
+            ModelCreatureFillJoints(p, group);
+            ModelCreatureApplySmoothing(p, group);
+
+            // Targeted per-element overrides on top of the procedural base (resize/move/rotate/hide named parts).
+            ModelApplyCreatureTweaks(group);
 
             ModelCreatureScaleSubtree(group, Math.Clamp((double)p.UniformScale, 0.1, 8.0));
 
@@ -1652,11 +2148,13 @@ public sealed partial class DebugWindowManager
         }
 
         ModelBuildCreatureMouth(p, head);
+        ModelBuildCreatureMandibles(p, head);
         ModelBuildCreatureNose(p, head, snout);
         ModelBuildCreatureTrunk(p, head);
         ModelBuildCreatureTusks(p, head);
         ModelBuildCreatureAntennae(p, head);
         ModelBuildCreatureCrest(p, head);
+        ModelBuildCreatureAntlers(p, head);
         ModelBuildCreatureMane(p, neckChain, head);
         ModelBuildCreatureHeadDetails(p, head);
     }
@@ -1930,6 +2428,22 @@ public sealed partial class DebugWindowManager
                     double[] pc = [ex * 0.55, ey * 0.5, side > 0 ? ez : 0.0];
                     ModelCreatureBox(eyeEl, pc, [pupil, pupil, pupil * 0.6], 0.0, 0.0, 0.0, eyeName + "Pupil");
                 }
+
+                if (p.ExtraEyes > 0)
+                {
+                    // A cluster of smaller eyes scattered around the main one (compound / arachnid eyes).
+                    int extra = Math.Clamp(p.ExtraEyes, 0, 8);
+                    double small = Math.Max(0.1, p.ExtraEyeSize);
+                    double spread = Math.Max(0.2, p.ExtraEyeSpread) * small;
+                    for (int e = 0; e < extra; e++)
+                    {
+                        double ang = extra <= 1 ? 0.0 : 2.0 * Math.PI * e / extra;
+                        double ringX = headX * p.EyeForward + Math.Cos(ang) * spread;
+                        double ringY = Math.Clamp(headY * p.EyeHeight + Math.Sin(ang) * spread, small, headY - small);
+                        double[] exAttach = [ringX, ringY, zFace];
+                        ModelCreatureChain(head, exAttach, 0.0, 0.0, 0.0, 2, side, [[small, small, small]], null, 0, $"{eyeName}Extra{e + 1}", out _);
+                    }
+                }
             }
         }
 
@@ -1943,6 +2457,132 @@ public sealed partial class DebugWindowManager
                 double[] center = [headX * p.EyeForward, headY * Math.Min(0.98, p.EyeHeight + 0.22), zc];
                 ModelCreatureBox(head, center, [bs * 1.5, bs * 0.7, headZ * 0.34], 0.0, side * -6.0, side * 9.0, side > 0 ? "browRight" : "browLeft");
             }
+        }
+    }
+
+    /// <summary>Branching antlers: a swept main beam (like a horn) carrying a fan of tines, mined from the
+    /// Wilderlands shepherd/caretaker and Darce's deerhorn drifters. Distinct from the plain tapering Horns.</summary>
+    private void ModelBuildCreatureAntlers(ModelCreatureParams p, ModelElementData head)
+    {
+        if (p.AntlerPairs <= 0) return;
+
+        int beamSegs = Math.Clamp(p.AntlerBeamSegments, 1, 6);
+        int tines = Math.Clamp(p.AntlerTines, 0, 8);
+        double headX = head.To[0] - head.From[0];
+        double headY = head.To[1] - head.From[1];
+        double headZ = head.To[2] - head.From[2];
+        double beamSeg = Math.Max(0.5, p.AntlerBeamLength) / beamSegs;
+        double baseTh = Math.Max(0.2, p.AntlerBeamThickness);
+        double tineLen = Math.Max(0.5, p.AntlerTineLength);
+
+        for (int pair = 0; pair < Math.Clamp(p.AntlerPairs, 0, 2); pair++)
+        {
+            double xfrac = p.AntlerPairs == 1 ? Math.Clamp((double)p.AntlerForward, 0.0, 1.0) : ModelCreatureLerp(0.6, 0.3, (double)pair / Math.Max(1, p.AntlerPairs - 1));
+            foreach (int side in ModelCreatureSides(2))
+            {
+                List<double[]> sizes = [];
+                List<double> bends = [];
+                for (int k = 0; k < beamSegs; k++)
+                {
+                    double t = beamSegs <= 1 ? 0.0 : (double)k / (beamSegs - 1);
+                    double th = baseTh * ModelCreatureLerp(1.0, 0.5, t);
+                    sizes.Add([th, beamSeg, th]);
+                    bends.Add(k == 0 ? 0.0 : p.AntlerSweep); // beam curves back about Z
+                }
+                // Beam grows up (+Y) off the top of the head, splayed outward (about X).
+                double[] attach = [headX * xfrac, headY, headZ * 0.5 + side * headZ * 0.32];
+                string beamName = $"antler{(side > 0 ? "Right" : "Left")}{pair + 1}";
+                ModelElementData beamFirst = ModelCreatureChain(head, attach, side * -p.AntlerSpread, 0.0, 0.0, 1, 1, sizes, bends, 2, beamName, out _);
+
+                if (tines <= 0) continue;
+                List<ModelElementData> beam = [];
+                for (ModelElementData? cur = beamFirst; cur != null; cur = cur.Children.Count > 0 ? cur.Children[0] : null)
+                {
+                    beam.Add(cur);
+                }
+                for (int ti = 0; ti < tines; ti++)
+                {
+                    double tf = tines <= 1 ? 0.5 : (double)ti / (tines - 1);
+                    int segIndex = Math.Clamp((int)Math.Round(ModelCreatureLerp(0, beam.Count - 1, tf)), 0, beam.Count - 1);
+                    ModelElementData seg = beam[segIndex];
+                    double segLen = seg.To[1] - seg.From[1];
+                    double tl = tineLen * ModelCreatureLerp(1.1, 0.6, tf);
+                    // A point branching up off the beam, fanned fore/aft (about Z) so the rack spreads.
+                    double fan = (tf - 0.5) * 2.0 * p.AntlerTineSpread;
+                    double[] tineAttach = [ModelCreatureCenterRel(seg, 0), segLen * 0.65, ModelCreatureCenterRel(seg, 2)];
+                    ModelCreatureChain(seg, tineAttach, side * -10.0, 0.0, fan, 1, 1, [[baseTh * 0.7, tl, baseTh * 0.7]], null, 2, $"{beamName}Tine{ti + 1}", out _);
+                }
+            }
+        }
+    }
+
+    /// <summary>Lateral mandibles / pincers on the head front that gape sideways and hook inward (ant/beetle/
+    /// spider), mined from the Wilderlands banefly and blightworm. Complements the vertical Mouth/jaw.</summary>
+    private void ModelBuildCreatureMandibles(ModelCreatureParams p, ModelElementData head)
+    {
+        if (!p.Mandibles) return;
+
+        int segs = Math.Clamp(p.MandibleSegments, 1, 4);
+        double headX = head.To[0] - head.From[0];
+        double headY = head.To[1] - head.From[1];
+        double headZ = head.To[2] - head.From[2];
+        double segLen = Math.Max(0.5, p.MandibleLength) / segs;
+        double baseTh = Math.Max(0.2, p.MandibleThickness);
+
+        foreach (int side in ModelCreatureSides(2))
+        {
+            List<double[]> sizes = [];
+            List<double> bends = [];
+            for (int k = 0; k < segs; k++)
+            {
+                double t = segs <= 1 ? 0.0 : (double)k / (segs - 1);
+                double th = baseTh * ModelCreatureLerp(1.0, 0.5, t);
+                sizes.Add([segLen, th, th]);
+                bends.Add(k == 0 ? 0.0 : -side * p.MandibleCurve); // hook inward toward the midline
+            }
+            // Pair on the head's lower front (+X), splayed apart by the gape (yaw about Y).
+            double[] attach = [headX, headY * 0.18, headZ * 0.5 + side * headZ * 0.3];
+            ModelElementData mand = ModelCreatureChain(head, attach, 0.0, side * p.MandibleGape, 0.0, 0, 1, sizes, bends, 1, side > 0 ? "mandibleRight" : "mandibleLeft", out ModelElementData mandTip);
+
+            if (p.MandibleFangs)
+            {
+                // A couple of inward-facing teeth on the inner edge of the base segment.
+                double inner = side > 0 ? 0.0 : baseTh;
+                for (int f = 0; f < 2; f++)
+                {
+                    ModelCreatureBox(mand, [segLen * (0.4 + 0.4 * f), baseTh * 0.5, inner], [baseTh * 0.8, baseTh * 0.5, baseTh * 0.5], 0.0, 0.0, 0.0, $"mandible{(side > 0 ? "Right" : "Left")}Fang{f + 1}");
+                }
+                _ = mandTip;
+            }
+        }
+    }
+
+    /// <summary>Scatters spikes / quills / metal shards over the torso (porcupine, sea urchin, the spiked
+    /// drifters, rust constructs). Seeded so a given seed is reproducible; distinct from the neat Dorsal ridge.</summary>
+    private void ModelBuildCreatureBodySpikes(ModelCreatureParams p, List<ModelElementData> spine)
+    {
+        int count = Math.Clamp(p.BodySpikes, 0, 60);
+        if (count <= 0 || spine.Count == 0) return;
+
+        double length = Math.Max(0.25, p.BodySpikeLength);
+        double size = Math.Max(0.1, p.BodySpikeSize);
+        double span = Math.Clamp((double)p.BodySpikeSpan, 0.05, 1.0);
+        Random r = new(p.Seed * 31 + 7);
+
+        for (int i = 0; i < count; i++)
+        {
+            double frac = span * r.NextDouble();
+            ModelElementData vertebra = ModelCreatureVertebraForFraction(spine, frac);
+            double vx = vertebra.To[0] - vertebra.From[0];
+            double vz = vertebra.To[2] - vertebra.From[2];
+            double sl = length * (0.6 + 0.8 * r.NextDouble());
+            double sz = size * (0.6 + 0.8 * r.NextDouble());
+            // Grow up (+Y) then roll about the fore-aft (X) axis so the spike points in a random radial
+            // direction around the body (mostly the upper hemisphere), with a little fore/aft pitch.
+            double roll = ModelCreatureLerp(-145.0, 145.0, r.NextDouble());
+            double pitch = ModelCreatureLerp(-25.0, 25.0, r.NextDouble());
+            double[] attach = [ModelCreatureLerp(vx * 0.2, vx * 0.8, r.NextDouble()), ModelCreatureCenterRel(vertebra, 1), ModelCreatureLerp(vz * 0.25, vz * 0.75, r.NextDouble())];
+            ModelCreatureChain(vertebra, attach, roll, 0.0, pitch, 1, 1, [[sz, sl, sz]], null, 2, $"quill{i + 1}", out _);
         }
     }
 
@@ -1962,6 +2602,10 @@ public sealed partial class DebugWindowManager
         string tag = isArm ? "arm" : "leg";
 
         double zigzag = isArm ? p.ArmZigzag : p.LegZigzag;
+        bool perBone = isArm ? p.ArmPerBone : p.LegPerBone;
+        List<float> boneLen = isArm ? p.ArmBoneLength : p.LegBoneLength;
+        List<float> boneThick = isArm ? p.ArmBoneThick : p.LegBoneThick;
+        List<float> boneAngle = isArm ? p.ArmBoneAngle : p.LegBoneAngle;
         bool extremity = isArm ? p.Hands : p.Feet;
         double exLength = isArm ? p.HandLength : p.FootLength;
         double exWidth = isArm ? p.HandWidth : p.FootWidth;
@@ -1993,11 +2637,20 @@ public sealed partial class DebugWindowManager
                 {
                     double t = segCount <= 1 ? 0.0 : (double)k / (segCount - 1);
                     double segThick = thick * ModelCreatureLerp(1.0, taper, t);
-                    sizes.Add([segThick, limbSeg, segThick]);
+                    double segLength = limbSeg;
+                    // Per-bone tuning multiplies this bone's length/girth and adds an extra bend, so each
+                    // arm/leg segment can be sized and angled by hand instead of an even taper.
+                    if (perBone)
+                    {
+                        if (k < boneLen.Count) segLength *= Math.Max(0.05, boneLen[k]);
+                        if (k < boneThick.Count) segThick *= Math.Max(0.05, boneThick[k]);
+                    }
+                    sizes.Add([segThick, segLength, segThick]);
                     // Uniform per-joint bend plus the zigzag (which also angles the first joint) so every
                     // segment can carry a different orientation, like a hand-posed leg.
                     double uniformBend = k == 0 ? 0.0 : bend;
-                    bends.Add(uniformBend + zigzag * ModelCreatureZigzagFactor(k));
+                    double extraBend = perBone && k < boneAngle.Count ? boneAngle[k] : 0.0;
+                    bends.Add(uniformBend + zigzag * ModelCreatureZigzagFactor(k) + extraBend);
                 }
 
                 string sideTag = side > 0 ? "Right" : "Left";
@@ -2028,6 +2681,17 @@ public sealed partial class DebugWindowManager
                 // about Z so they complement the walk swing.
                 ModelCreatureChain(limbParent, attach, -side * splay, 0.0, lean, 1, -1, sizes, bends, 2, $"{tag}{sideTag}{pair + 1}", out ModelElementData limbTip);
 
+                // Asymmetry: when enabled, each arm can carry a different tip (one blade, one hand, ...).
+                ModelCreatureArmAppendage appendage = isArm && p.AsymmetricArms
+                    ? (ModelCreatureArmAppendage)Math.Clamp(side > 0 ? p.ArmAppendageRight : p.ArmAppendageLeft, 0, ModelCreatureArmAppendageLabels.Length - 1)
+                    : ModelCreatureArmAppendage.Normal;
+
+                if (appendage != ModelCreatureArmAppendage.Normal)
+                {
+                    ModelBuildCreatureArmAppendage(p, limbTip, appendage, sideTag, pair + 1);
+                    continue;
+                }
+
                 ModelElementData paw = limbTip;
                 if (extremity)
                 {
@@ -2043,6 +2707,70 @@ public sealed partial class DebugWindowManager
                 {
                     ModelBuildCreatureToes(p, paw, exTag, sideTag, pair + 1);
                 }
+            }
+        }
+    }
+
+    /// <summary>Builds an asymmetric arm tip - a blade, a big claw, a club, a hook, or nothing (a bare stump) -
+    /// at the wrist, growing forward (+X) like a held weapon. Names are "arm*" so they ride the arm region's
+    /// texture and the arm's animation.</summary>
+    private void ModelBuildCreatureArmAppendage(ModelCreatureParams p, ModelElementData limbTip,
+        ModelCreatureArmAppendage appendage, string sideTag, int index)
+    {
+        double len = Math.Max(0.5, p.ArmAppendageLength);
+        double size = Math.Max(0.25, p.ArmAppendageSize);
+        // Anchor at the wrist (lower-front of the limb tip), growing forward (+X).
+        double[] attach = [ModelCreatureCenterRel(limbTip, 0), 0.0, ModelCreatureCenterRel(limbTip, 2)];
+        string suffix = $"{sideTag}{index}";
+
+        switch (appendage)
+        {
+            case ModelCreatureArmAppendage.None:
+                return;
+
+            case ModelCreatureArmAppendage.Blade:
+            {
+                // A long flat blade tapering to a point: tall (Y), thin (Z), growing forward in three segments.
+                double thin = Math.Max(0.15, size * 0.18);
+                List<double[]> sizes = [];
+                for (int k = 0; k < 3; k++)
+                {
+                    double t = k / 2.0;
+                    sizes.Add([len / 3.0, size * ModelCreatureLerp(1.0, 0.1, t), thin]);
+                }
+                ModelCreatureChain(limbTip, attach, 0.0, 0.0, 0.0, 0, 1, sizes, null, 2, $"armBlade{suffix}", out _);
+                break;
+            }
+
+            case ModelCreatureArmAppendage.Claw:
+            {
+                // A spread of three big curved claws (a pincer/talon hand).
+                double cl = len * 0.6;
+                double cs = Math.Max(0.2, size * 0.4);
+                for (int i = 0; i < 3; i++)
+                {
+                    double frac = i / 2.0;
+                    double yaw = (frac - 0.5) * 2.0 * 26.0;
+                    ModelCreatureChain(limbTip, attach, 0.0, yaw, -22.0, 0, 1, [[cl, cs, cs], [cl * 0.7, cs * 0.7, cs * 0.7]], [0.0, -28.0], 2, $"armClaw{suffix}_{i + 1}", out _);
+                }
+                break;
+            }
+
+            case ModelCreatureArmAppendage.Club:
+            {
+                // A short wrist stub ending in a heavy ball/mace head.
+                ModelElementData stub = ModelCreatureChain(limbTip, attach, 0.0, 0.0, 0.0, 0, 1, [[len * 0.45, size * 0.5, size * 0.5]], null, 2, $"armClub{suffix}", out _);
+                double[] headCenter = [stub.To[0] - stub.From[0], ModelCreatureCenterRel(stub, 1), ModelCreatureCenterRel(stub, 2)];
+                ModelCreatureBox(stub, headCenter, [size * 1.3, size * 1.3, size * 1.3], 0.0, 0.0, 0.0, $"armClub{suffix}Head");
+                break;
+            }
+
+            case ModelCreatureArmAppendage.Hook:
+            {
+                // A curved two-segment hook.
+                double hs = Math.Max(0.2, size * 0.4);
+                ModelCreatureChain(limbTip, attach, 0.0, 0.0, -10.0, 0, 1, [[len * 0.55, hs, hs], [len * 0.5, hs * 0.8, hs * 0.8]], [0.0, -70.0], 2, $"armHook{suffix}", out _);
+                break;
             }
         }
     }
@@ -2113,6 +2841,22 @@ public sealed partial class DebugWindowManager
             double[] center = [-ts * 0.35, ModelCreatureCenterRel(tailTip, 1), ModelCreatureCenterRel(tailTip, 2)];
             ModelCreatureBox(tailTip, center, [ts, ts, ts], 0.0, 0.0, 0.0, "tailTuft");
         }
+
+        if (p.TailStinger)
+        {
+            // A cluster of spikes at the tail tip (scorpion / wasp stinger, the blightworm & caretaker maces),
+            // growing back (-X), fanned laterally and hooked up/down by the curve.
+            int stings = Math.Clamp(p.StingerCount, 1, 12);
+            double sl = Math.Max(0.5, p.StingerLength);
+            double ss = Math.Max(0.1, p.StingerSize);
+            for (int i = 0; i < stings; i++)
+            {
+                double fanFrac = stings <= 1 ? 0.5 : (double)i / (stings - 1);
+                double yaw = (fanFrac - 0.5) * 2.0 * p.StingerSpread;
+                double[] stingAttach = [0.0, ModelCreatureCenterRel(tailTip, 1), ModelCreatureCenterRel(tailTip, 2)];
+                ModelCreatureChain(tailTip, stingAttach, 0.0, yaw, p.StingerCurve, 0, -1, [[sl, ss, ss]], null, 2, $"stinger{i + 1}", out _);
+            }
+        }
     }
 
     private void ModelBuildCreatureWings(ModelCreatureParams p, List<ModelElementData> spine)
@@ -2158,41 +2902,114 @@ public sealed partial class DebugWindowManager
                     bends.Add(k == 0 ? 0.0 : side * p.WingSweep);
                 }
                 // Feathered / limb style: a single chord-tapered spar; sweep yaws each segment about Y.
-                ModelCreatureChain(vertebra, attach, -side * p.WingDihedral, 0.0, 0.0, 2, side, sizes, bends, 1, wingName, out _);
+                ModelElementData sparFirst = ModelCreatureChain(vertebra, attach, -side * p.WingDihedral, 0.0, 0.0, 2, side, sizes, bends, 1, wingName, out _);
+                if (p.WingFeathers > 0)
+                {
+                    ModelBuildCreatureWingFeathers(p, sparFirst, side, wingName);
+                }
             }
         }
     }
 
+    /// <summary>Lays a row of overlapping flat feather planes along the feathered-wing spar (the pegasus
+    /// primaries/secondaries), trailing back (-X) and fanning toward the tip. Turns the plain spar into a
+    /// proper layered wing.</summary>
+    private void ModelBuildCreatureWingFeathers(ModelCreatureParams p, ModelElementData sparFirst, int side, string wingName)
+    {
+        int feathers = Math.Clamp(p.WingFeathers, 1, 24);
+        double fl = Math.Max(0.5, p.WingFeatherLength);
+        double fw = Math.Max(0.25, p.WingFeatherWidth);
+        double thin = Math.Max(0.08, fw * 0.12);
+
+        List<ModelElementData> spar = [];
+        for (ModelElementData? cur = sparFirst; cur != null; cur = cur.Children.Count > 0 ? cur.Children[0] : null)
+        {
+            spar.Add(cur);
+        }
+
+        for (int i = 0; i < feathers; i++)
+        {
+            double t = feathers <= 1 ? 0.5 : (double)i / (feathers - 1);
+            int segIndex = Math.Clamp((int)Math.Floor(t * spar.Count), 0, spar.Count - 1);
+            ModelElementData seg = spar[segIndex];
+            double len = fl * ModelCreatureLerp(0.8, 1.15, t);   // longer primaries toward the tip
+            double yaw = side * ModelCreatureLerp(8.0, 48.0, t); // fan back toward the tip
+            // Trails back (-X) off the spar's trailing edge; the spar's lateral axis is Z.
+            double[] attach = [0.0, ModelCreatureCenterRel(seg, 1), ModelCreatureCenterRel(seg, 2)];
+            ModelCreatureChain(seg, attach, 0.0, yaw, 0.0, 0, -1, [[len, thin, fw]], null, 0, $"{wingName}Feather{i + 1}", out _);
+        }
+    }
+
     /// <summary>
-    /// Membrane (bat / dragon) wing: an arm spar growing outward, then a fan of long thin finger bones radiating
-    /// from its tip, each carrying a thin flat webbing panel that trails behind it. Approximates the hand-made
-    /// dragon wings (arm -> forearm -> fingers + interdigital membrane).
+    /// Membrane (bat / dragon) wing: a segmented leading-edge spar growing out from the torso, membrane panels
+    /// attached along each spar segment, and finger bones rooted along the spar. This keeps the wing connected
+    /// to the body while making the Wing Segments slider visibly change the structure.
+    /// The spar is named "...Spar" (NOT "...Arm"): the locomotion generator skips anything whose name contains
+    /// "arm" as a limb before it ever checks for wings, so a "...Arm" spar never gets the wing flap.
     /// </summary>
     private void ModelBuildCreatureMembraneWing(ModelCreatureParams p, ModelElementData vertebra, int side,
         double[] attach, double span, double chord, double th, string name)
     {
         int fingers = Math.Clamp(p.WingFingers, 2, 6);
+        int segments = Math.Clamp(p.WingSegments, 1, 6);
         double trail = Math.Max(1.0, p.WingMembraneTrail);
-        double armLen = span * 0.42;
         double armTh = Math.Max(0.4, th * 1.4);
+        double membraneThin = Math.Max(0.1, th * 0.4);
+        double segLen = span / segments;
 
-        // Arm spar: two segments growing outward (±Z), the leading edge of the wing.
-        List<double[]> armSizes = [[chord * 0.5, armTh, armLen * 0.55], [chord * 0.42, armTh * 0.85, armLen * 0.45]];
-        ModelCreatureChain(vertebra, attach, -side * p.WingDihedral, 0.0, 0.0, 2, side, armSizes, null, 1, $"{name}Arm", out ModelElementData armTip);
+        List<double[]> sparSizes = [];
+        List<double> sparBends = [];
+        for (int k = 0; k < segments; k++)
+        {
+            double t = segments <= 1 ? 0.0 : (double)k / (segments - 1);
+            double taper = ModelCreatureLerp(1.0, Math.Max(0.18, p.WingChordTaper), t);
+            sparSizes.Add([Math.Max(th * 1.2, chord * 0.42 * taper), armTh * ModelCreatureLerp(1.0, 0.55, t), segLen]);
+            sparBends.Add(k == 0 ? 0.0 : side * p.WingSweep);
+        }
 
-        double fingerLen = span * 0.62;
-        double[] fingerAttach = ModelCreatureDistalAttach(armTip, 2, side);
+        ModelElementData sparFirst = ModelCreatureChain(vertebra, attach, -side * p.WingDihedral, 0.0, 0.0, 2, side, sparSizes, sparBends, 1, $"{name}Spar", out _);
+
+        List<ModelElementData> spar = [];
+        for (ModelElementData? current = sparFirst; current != null && spar.Count < segments; current = current.Children.Count > 0 ? current.Children[0] : null)
+        {
+            spar.Add(current);
+        }
+
+        for (int k = 0; k < spar.Count; k++)
+        {
+            ModelElementData segment = spar[k];
+            double t = spar.Count <= 1 ? 0.0 : (double)k / (spar.Count - 1);
+            double panelTrail = Math.Max(chord * ModelCreatureLerp(1.1, 0.45, t), trail * ModelCreatureLerp(1.0, 0.35, t));
+            double panelSpan = Math.Max(0.25, segment.SizeZ + Math.Min(th, segLen * 0.18));
+            double[] panelCenter =
+            [
+                ModelCreatureCenterRel(segment, 0) - panelTrail * 0.46,
+                ModelCreatureCenterRel(segment, 1),
+                ModelCreatureCenterRel(segment, 2)
+            ];
+            ModelCreatureBox(segment, panelCenter, [panelTrail, membraneThin, panelSpan], 0.0, 0.0, 0.0, $"{name}Membrane{k + 1}");
+
+            if (p.WingRidges)
+            {
+                // A raised bone strut along this panel's leading edge, standing proud of the membrane so the
+                // sections read as separate panels (the finger/arm ridges of a real bat/reptile wing).
+                double ridgeHeight = membraneThin + Math.Max(0.15, th * 0.55) * Math.Clamp((double)p.WingRidgeSize, 0.2, 3.0);
+                double ridgeThin = Math.Max(0.12, th * 0.3);
+                double[] ridgeCenter = [ModelCreatureCenterRel(segment, 0) - panelTrail * 0.46, ModelCreatureCenterRel(segment, 1), Math.Min(ridgeThin, segment.SizeZ * 0.5)];
+                ModelCreatureBox(segment, ridgeCenter, [panelTrail, ridgeHeight, ridgeThin], 0.0, 0.0, 0.0, $"{name}Ridge{k + 1}");
+            }
+        }
+
         for (int i = 0; i < fingers; i++)
         {
             double frac = fingers == 1 ? 0.0 : (double)i / (fingers - 1);
-            double sweep = side * ModelCreatureLerp(-12.0, 62.0, frac); // fan from leading (forward) to trailing (back)
-            double fl = fingerLen * ModelCreatureLerp(1.0, 0.5, frac);
-            ModelElementData finger = ModelCreatureChain(armTip, fingerAttach, 0.0, sweep, 0.0, 2, side, [[chord * 0.16, Math.Max(0.25, th), fl]], null, 0, $"{name}Finger{i + 1}", out _);
-
-            // Webbing: a thin flat panel along the finger, trailing back (-X).
-            double fingerZ = finger.To[2] - finger.From[2];
-            double[] webCenter = [-trail * 0.5, 0.0, fingerZ * 0.5];
-            ModelCreatureBox(finger, webCenter, [trail, Math.Max(0.1, th * 0.4), fingerZ * 0.92], 0.0, 0.0, 0.0, $"{name}Web{i + 1}");
+            int anchorIndex = Math.Clamp((int)Math.Round(ModelCreatureLerp(Math.Max(0, spar.Count - 2), spar.Count - 1, frac)), 0, spar.Count - 1);
+            ModelElementData anchor = spar[anchorIndex];
+            double sweep = side * ModelCreatureLerp(-12.0, 62.0, frac);
+            double fl = span * ModelCreatureLerp(0.54, 0.24, frac);
+            double fingerTh = Math.Max(0.25, th * ModelCreatureLerp(0.95, 0.55, frac));
+            double[] fingerAttach = ModelCreatureDistalAttach(anchor, 2, side);
+            ModelCreatureChain(anchor, fingerAttach, 0.0, sweep, 0.0, 2, side, [[chord * 0.14, fingerTh, fl]], null, 0, $"{name}Finger{i + 1}", out _);
         }
     }
 
@@ -2309,6 +3126,143 @@ public sealed partial class DebugWindowManager
             // On top of the chosen vertebra (Y+), centered fore-aft and laterally; grow straight up, swept by angle about Z.
             double[] attach = [ModelCreatureCenterRel(vertebra, 0), vertebra.To[1] - vertebra.From[1], ModelCreatureCenterRel(vertebra, 2)];
             ModelCreatureChain(vertebra, attach, 0.0, 0.0, p.DorsalSpikeAngle, 1, 1, [[length, height, width]], null, 0, $"spike{i + 1}", out _);
+        }
+    }
+
+    /// <summary>Closes the gaps where chain segments meet at an angle by dropping a "knuckle" box at each bent
+    /// joint, sized to the cross-section and sitting on the shared pivot so it overlaps both bones (the way
+    /// hand modelers hide joint notches). Skips thin details (feathers, claws, membranes) and straight joints.</summary>
+    private void ModelCreatureFillJoints(ModelCreatureParams p, ModelElementData group)
+    {
+        if (!p.FillJoints) return;
+
+        double scale = Math.Clamp((double)p.JointFillScale, 0.3, 2.5);
+        int n = 0;
+        foreach (ModelElementData el in group.EnumerateSubtree().ToList())
+        {
+            ModelElementData? parent = el.Parent;
+            if (parent == null || el.RotationOrigin is not { Length: >= 3 } origin) continue;
+            if (parent.SizeX <= 0.01 || parent.SizeY <= 0.01 || parent.SizeZ <= 0.01) continue; // root / faceless
+            double minDim = Math.Min(el.SizeX, Math.Min(el.SizeY, el.SizeZ));
+            if (minDim < 0.8) continue; // skip thin detail (feathers, claws, membranes, antennae)
+            double bend = Math.Abs(el.RotationX) + Math.Abs(el.RotationY) + Math.Abs(el.RotationZ);
+            if (bend < 3.0) continue;   // a straight joint leaves no gap
+
+            // A cube sized to the bone's cross-section (its two smaller dims) at the shared pivot.
+            double[] dims = [el.SizeX, el.SizeY, el.SizeZ];
+            Array.Sort(dims);
+            double side = (dims[0] + dims[1]) * 0.5 * scale;
+            ModelCreatureBox(parent, [origin[0], origin[1], origin[2]], [side, side, side], 0.0, 0.0, 0.0, $"joint{++n}");
+        }
+    }
+
+    /// <summary>Rounds the chunky, roughly-square volumes (body, head, neck, limb bones) by adding an
+    /// overlapping facet box rotated about the long axis, turning each cube into an octagonal prism - the same
+    /// "many overlapping angled boxes" trick the hand-made seikret beak uses. Skips planes and thin rods.</summary>
+    private void ModelCreatureApplySmoothing(ModelCreatureParams p, ModelElementData group)
+    {
+        int level = Math.Clamp(p.Smoothing, 0, 2);
+        if (level <= 0) return;
+
+        // Facet angles: 45 deg makes an octagon; level 2 adds 22.5/67.5 for a near-round 16-gon.
+        double[] angles = level >= 2 ? [45.0, 22.5, 67.5] : [45.0];
+        int n = 0;
+        foreach (ModelElementData el in group.EnumerateSubtree().ToList())
+        {
+            if (el.SizeX <= 0.01 || el.SizeY <= 0.01 || el.SizeZ <= 0.01) continue;
+            double sx = el.SizeX, sy = el.SizeY, sz = el.SizeZ;
+            int longAxis = sx >= sy && sx >= sz ? 0 : sy >= sz ? 1 : 2;
+            double crossA = longAxis == 0 ? sy : sx;
+            double crossB = longAxis == 2 ? sy : sz;
+            double crossMin = Math.Min(crossA, crossB);
+            double crossMax = Math.Max(crossA, crossB);
+            if (crossMin < 1.0 || crossMax > crossMin * 2.6) continue; // too thin, or a flat plane
+
+            double[] center = [sx * 0.5, sy * 0.5, sz * 0.5];
+            foreach (double angle in angles)
+            {
+                // The rotated facet's cross-section is scaled to ~1/sqrt2 so its corners reach the original
+                // faces and its faces cut the original corners, producing the rounded silhouette.
+                double[] facet = new double[3];
+                facet[longAxis] = longAxis == 0 ? sx : longAxis == 1 ? sy : sz;
+                facet[longAxis == 0 ? 1 : 0] = crossA * 0.72;
+                facet[longAxis == 2 ? 1 : 2] = crossB * 0.72;
+                double rx = longAxis == 0 ? angle : 0.0;
+                double ry = longAxis == 1 ? angle : 0.0;
+                double rz = longAxis == 2 ? angle : 0.0;
+                ModelCreatureBox(el, center, facet, rx, ry, rz, $"{el.Name}Round{++n}");
+            }
+        }
+    }
+
+    /// <summary>Applies the targeted per-element tweaks: hides flagged elements (and their subtree), then resizes /
+    /// nudges / rotates the named elements that remain. Keyed by name so the same tweaks re-apply every rebuild.</summary>
+    private void ModelApplyCreatureTweaks(ModelElementData group)
+    {
+        Dictionary<string, ModelCreatureTweak> tweaks = _modelCreatureParams.Tweaks;
+        if (tweaks.Count == 0) return;
+
+        // Pass 1: remove hidden elements (and, with them, their subtree).
+        foreach (ModelElementData element in group.EnumerateSubtree().ToList())
+        {
+            if (ReferenceEquals(element, group)) continue;
+            if (tweaks.TryGetValue(element.Name, out ModelCreatureTweak? tw) && tw is { Hidden: true })
+            {
+                element.Parent?.Children.Remove(element);
+            }
+        }
+
+        // Pass 2: transform the surviving named elements.
+        foreach (ModelElementData element in group.EnumerateSubtree().ToList())
+        {
+            if (ReferenceEquals(element, group)) continue;
+            if (!tweaks.TryGetValue(element.Name, out ModelCreatureTweak? tw) || tw == null || tw.IsNeutral) continue;
+
+            double sizeMul = Math.Clamp((double)tw.SizeMul, 0.05, 20.0);
+            if (Math.Abs(sizeMul - 1.0) > 1e-4) ModelCreatureScaleElement(element, sizeMul);
+
+            if (tw.Offset != NVector3.Zero)
+            {
+                for (int axis = 0; axis < 3; axis++)
+                {
+                    double d = axis == 0 ? tw.Offset.X : axis == 1 ? tw.Offset.Y : tw.Offset.Z;
+                    element.From[axis] = ModelPrimitiveRound(element.From[axis] + d);
+                    element.To[axis] = ModelPrimitiveRound(element.To[axis] + d);
+                    if (element.RotationOrigin is { Length: >= 3 } origin) origin[axis] = ModelPrimitiveRound(origin[axis] + d);
+                }
+            }
+
+            if (tw.Rotate != NVector3.Zero)
+            {
+                element.RotationX = ModelPrimitiveRound(ModelWrapDegrees(element.RotationX + tw.Rotate.X));
+                element.RotationY = ModelPrimitiveRound(ModelWrapDegrees(element.RotationY + tw.Rotate.Y));
+                element.RotationZ = ModelPrimitiveRound(ModelWrapDegrees(element.RotationZ + tw.Rotate.Z));
+            }
+        }
+    }
+
+    /// <summary>Uniformly scales one element's box about its pivot and its whole subtree by the factor. Uniform
+    /// scale commutes with the joints' rotations, so a part stays attached at its pivot and just changes size.</summary>
+    private static void ModelCreatureScaleElement(ModelElementData element, double factor)
+    {
+        double[] pivot = element.RotationOrigin is { Length: >= 3 } origin
+            ? [origin[0], origin[1], origin[2]]
+            : [(element.From[0] + element.To[0]) * 0.5, (element.From[1] + element.To[1]) * 0.5, (element.From[2] + element.To[2]) * 0.5];
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            element.From[axis] = ModelPrimitiveRound(pivot[axis] + (element.From[axis] - pivot[axis]) * factor);
+            element.To[axis] = ModelPrimitiveRound(pivot[axis] + (element.To[axis] - pivot[axis]) * factor);
+        }
+        foreach (ModelElementData node in element.EnumerateSubtree())
+        {
+            if (ReferenceEquals(node, element)) continue;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                node.From[axis] = ModelPrimitiveRound(node.From[axis] * factor);
+                node.To[axis] = ModelPrimitiveRound(node.To[axis] * factor);
+                if (node.RotationOrigin is { Length: >= 3 } o) o[axis] = ModelPrimitiveRound(o[axis] * factor);
+            }
         }
     }
 
@@ -2500,9 +3454,26 @@ public sealed partial class DebugWindowManager
             for (int face = 0; face < 6; face++)
             {
                 node.Faces[face] = new ModelFaceData { Texture = code };
-                ModelAutoUvFace(node, face);
+                ModelCreatureAutoUvFace(node, face);
             }
         }
+    }
+
+    private static void ModelCreatureAutoUvFace(ModelElementData element, int faceIndex)
+    {
+        ModelFaceData? face = element.Faces[faceIndex];
+        if (face == null) return;
+
+        (double width, double height) = faceIndex switch
+        {
+            0 or 2 => (element.SizeX, element.SizeY),
+            1 or 3 => (element.SizeZ, element.SizeY),
+            _ => (element.SizeX, element.SizeZ)
+        };
+        face.Uv[0] = 0f;
+        face.Uv[1] = 0f;
+        face.Uv[2] = (float)Math.Clamp(Math.Max(0.0, width), 0.0, ModelCreatureAutoUvMaxTileUnits);
+        face.Uv[3] = (float)Math.Clamp(Math.Max(0.0, height), 0.0, ModelCreatureAutoUvMaxTileUnits);
     }
 
     /// <summary>Maps a generated element name (e.g. "spine2", "legRight1", "head") to a coarse body region.</summary>
@@ -2517,11 +3488,14 @@ public sealed partial class DebugWindowManager
             name.StartsWith("cheek", StringComparison.Ordinal) || name.StartsWith("nose", StringComparison.Ordinal) ||
             name.StartsWith("brow", StringComparison.Ordinal) || name.StartsWith("crest", StringComparison.Ordinal) ||
             name.StartsWith("trunk", StringComparison.Ordinal) || name.StartsWith("tusk", StringComparison.Ordinal) ||
-            name.StartsWith("antenna", StringComparison.Ordinal)) return "head";
+            name.StartsWith("antenna", StringComparison.Ordinal) || name.StartsWith("antler", StringComparison.Ordinal) ||
+            name.StartsWith("mandible", StringComparison.Ordinal)) return "head";
         if (name.StartsWith("leg", StringComparison.Ordinal) || name.StartsWith("foot", StringComparison.Ordinal)) return "leg";
         if (name.StartsWith("arm", StringComparison.Ordinal) || name.StartsWith("hand", StringComparison.Ordinal)) return "arm";
-        if (name.StartsWith("tail", StringComparison.Ordinal) || name.StartsWith("plume", StringComparison.Ordinal)) return "tail";
+        if (name.StartsWith("tail", StringComparison.Ordinal) || name.StartsWith("plume", StringComparison.Ordinal) ||
+            name.StartsWith("stinger", StringComparison.Ordinal)) return "tail";
         if (name.StartsWith("wing", StringComparison.Ordinal) || name.StartsWith("fin", StringComparison.Ordinal)) return "wing";
+        if (name.StartsWith("quill", StringComparison.Ordinal)) return "body";
         return "body";
     }
 
@@ -2625,14 +3599,17 @@ public sealed partial class DebugWindowManager
         }
 
         uint ghost = ImGui.ColorConvertFloat4ToU32(new NVector4(0.4f, 0.95f, 0.55f, 0.7f));
+        uint highlight = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.85f, 0.15f, 0.95f));
         foreach (ModelElementData element in _modelCreaturePreviewRoot.EnumerateSubtree())
         {
             if (element.SizeX <= 0.0001 || element.SizeY <= 0.0001 || element.SizeZ <= 0.0001) continue;
+            bool selected = !string.IsNullOrEmpty(_modelCreatureTweakSelected)
+                && string.Equals(element.Name, _modelCreatureTweakSelected, StringComparison.Ordinal);
             Matrixf matrix = ModelComputeElementMatrix(element);
             Vector3[] corners = ModelTransformBoxCorners(matrix, element);
             foreach ((int a, int b) in ModelBoxEdges)
             {
-                DrawModelViewportLine(drawList, camera, corners[a], corners[b], ghost, 1.2f);
+                DrawModelViewportLine(drawList, camera, corners[a], corners[b], selected ? highlight : ghost, selected ? 2.2f : 1.2f);
             }
         }
     }

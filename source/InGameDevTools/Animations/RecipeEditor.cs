@@ -1454,7 +1454,11 @@ public sealed partial class DebugWindowManager
                 }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-                File.WriteAllText(outputPath, SerializeToken(document.Root));
+                string writeError = WriteAuthoredFile(outputPath, SerializeToken(document.Root));
+                if (!string.IsNullOrEmpty(writeError))
+                {
+                    return $"Export failed for {document.DisplayPath}: {writeError}";
+                }
                 JObject manifest = new()
                 {
                     ["exportedAtUtc"] = DateTime.UtcNow.ToString("O"),
@@ -1470,6 +1474,70 @@ public sealed partial class DebugWindowManager
             catch (Exception exception)
             {
                 return $"Export failed for {document.DisplayPath}: {exception.Message}";
+            }
+        }
+
+        public void TrackRecovery(DevToolsRecoveryManager recoveryManager, TimeSpan delay)
+        {
+            foreach (RecipeDocument document in _documents)
+            {
+                string relativePath = Path.Combine("assets", document.Domain, document.AssetPath.Replace('/', Path.DirectorySeparatorChar));
+                string outputPath = GetToolAuthoredAssetPath("recipes", relativePath);
+                recoveryManager.TrackText(
+                    "Recipes",
+                    document.DisplayPath,
+                    document.DisplayPath,
+                    outputPath,
+                    SerializeToken(document.Root),
+                    document.Dirty,
+                    delay);
+            }
+        }
+
+        public bool TryRestoreRecovery(DevToolsRecoverySnapshot snapshot, out string status)
+        {
+            status = "";
+            try
+            {
+                if (string.IsNullOrWhiteSpace(snapshot.Text))
+                {
+                    status = "Recipe recovery failed: no JSON payload.";
+                    return false;
+                }
+
+                string documentKey = snapshot.RecoveryKey.Split("::", 2, StringSplitOptions.None).ElementAtOrDefault(1) ?? snapshot.DocumentLabel;
+                string domain = "game";
+                string assetPath = "recipes/recovered.json";
+                int separator = documentKey.IndexOf(':');
+                if (separator > 0)
+                {
+                    domain = documentKey[..separator];
+                    assetPath = documentKey[(separator + 1)..];
+                }
+
+                JToken root = ParseRecipeJson(snapshot.Text);
+                RecipeDocument? document = _documents.FirstOrDefault(candidate => candidate.DisplayPath.Equals($"{domain}:{assetPath}", StringComparison.OrdinalIgnoreCase));
+                if (document == null)
+                {
+                    document = new RecipeDocument(domain, assetPath, root, isDraft: true);
+                    AddDocument(document);
+                }
+                else
+                {
+                    document.Root = root;
+                    document.MarkDirty();
+                }
+
+                _selectedIndex = Math.Max(0, _entries.FindIndex(entry => ReferenceEquals(entry.Document, document)));
+                SyncRawBuffer(SelectedEntry);
+                RebuildVisibleEntries();
+                status = $"Restored recovered recipe draft {document.DisplayPath}.";
+                return true;
+            }
+            catch (Exception exception)
+            {
+                status = $"Recipe recovery failed: {exception.Message}";
+                return false;
             }
         }
 

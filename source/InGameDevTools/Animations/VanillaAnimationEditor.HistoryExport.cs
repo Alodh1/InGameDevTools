@@ -488,11 +488,13 @@ public sealed partial class DebugWindowManager
                 }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-                string json = document.Kind == VanillaDocumentKind.Shape
-                    ? BuildShapeExportJson(document)
-                    : BuildEntityMetadataExportJson(document);
+                string json = BuildDocumentJson(document);
 
-                File.WriteAllText(outputPath, json);
+                string writeError = WriteAuthoredFile(outputPath, json);
+                if (!string.IsNullOrEmpty(writeError))
+                {
+                    return $"Export failed for {document.DisplayPath}: {writeError}";
+                }
                 WriteManifest(outputPath, document);
                 document.MarkClean();
                 return $"Exported {document.DisplayPath} to {outputPath}.";
@@ -501,6 +503,13 @@ public sealed partial class DebugWindowManager
             {
                 return $"Export failed for {document.DisplayPath}: {exception.Message}";
             }
+        }
+
+        public static string BuildDocumentJson(VanillaAnimationDocument document)
+        {
+            return document.Kind == VanillaDocumentKind.Shape
+                ? BuildShapeExportJson(document)
+                : BuildEntityMetadataExportJson(document);
         }
 
         private static string BuildShapeExportJson(VanillaAnimationDocument document)

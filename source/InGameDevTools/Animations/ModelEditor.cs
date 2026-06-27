@@ -15,7 +15,7 @@ namespace InGameDevTools.Animations;
 public sealed partial class DebugWindowManager
 {
     private static readonly string[] ModelFaceNames = ["north", "east", "south", "west", "up", "down"];
-    private static readonly string[] ModelGeneratorToolLabels = ["None", "Prism helper", "Creature generator", "PlayerModel generator"];
+    private static readonly string[] ModelGeneratorToolLabels = ["None", "Prism helper", "Creature generator", "PlayerModel generator", "Clothing generator", "Tool / weapon generator"];
     private const int ModelBrowserMaxVisibleEntries = 600;
     private const int ModelHistoryLimit = 120;
     private const int ModelCutMaxPiecesPerElement = 512;
@@ -151,6 +151,7 @@ public sealed partial class DebugWindowManager
         public bool IsNew;
         public bool Dirty;
         public bool FromAuthoredFile;
+        public string RecoveryKey = $"model-session:{Guid.NewGuid():N}";
 
         public string DisplayPath => $"{Domain}:{AssetPath}";
 
@@ -221,6 +222,7 @@ public sealed partial class DebugWindowManager
     private float _modelSnapMoveUnits = 0.5f;
     private float _modelSnapRotateDegrees = 5f;
     private string _modelChiselTexture = "";
+    private float _modelChiselSize = 1f;
     private int _modelArrowNudgePlane;
     private int _modelWheelNudgeAxis = 2;
     private ModelShapeAssetEntry? _modelPendingOpenEntry;
@@ -560,7 +562,7 @@ public sealed partial class DebugWindowManager
         ImGui.AlignTextToFramePadding();
         ImGui.TextDisabled("Generator");
         ImGui.SameLine();
-        int tool = _modelPrimitiveWindowOpen ? 1 : _modelCreatureWindowOpen ? 2 : _playerModelWindowOpen ? 3 : 0;
+        int tool = _modelPrimitiveWindowOpen ? 1 : _modelCreatureWindowOpen ? 2 : _playerModelWindowOpen ? 3 : _clothingWindowOpen ? 4 : _weaponWindowOpen ? 5 : 0;
         ImGui.SetNextItemWidth(160f * _devToolsUiScale);
         if (ImGui.Combo(id, ref tool, ModelGeneratorToolLabels, ModelGeneratorToolLabels.Length))
         {
@@ -577,6 +579,8 @@ public sealed partial class DebugWindowManager
         bool primitiveOpen = tool == 1;
         bool creatureOpen = tool == 2;
         bool playerModelOpen = tool == 3;
+        bool clothingOpen = tool == 4;
+        bool weaponOpen = tool == 5;
         if (primitiveOpen && !_modelPrimitiveWindowOpen)
         {
             _modelPrimitivePreviewDirty = true;
@@ -589,17 +593,27 @@ public sealed partial class DebugWindowManager
         {
             _playerModelPreviewDirty = true;
         }
+        if (clothingOpen && !_clothingWindowOpen)
+        {
+            _clothingPreviewDirty = true;
+        }
+        if (weaponOpen && !_weaponWindowOpen)
+        {
+            _weaponPreviewDirty = true;
+        }
 
         _modelPrimitiveWindowOpen = primitiveOpen;
         _modelCreatureWindowOpen = creatureOpen;
         _playerModelWindowOpen = playerModelOpen;
+        _clothingWindowOpen = clothingOpen;
+        _weaponWindowOpen = weaponOpen;
     }
 
     // Floating tool window (drawn on top of the editor) rather than an inline drawer that ate a large slice
     // of the Models tab. Drawn after the main window via DrawDevToolsGeneratorOverlays.
     private void DrawModelGeneratorOverlay()
     {
-        if (!_modelPrimitiveWindowOpen && !_modelCreatureWindowOpen && !_playerModelWindowOpen) return;
+        if (!_modelPrimitiveWindowOpen && !_modelCreatureWindowOpen && !_playerModelWindowOpen && !_clothingWindowOpen && !_weaponWindowOpen) return;
 
         bool open = true;
         // The visible label switches with the active tool while the id after '###' stays fixed, so the window
@@ -608,7 +622,11 @@ public sealed partial class DebugWindowManager
             ? "Creature generator###model-generator-overlay"
             : _playerModelWindowOpen
                 ? "PlayerModel generator###model-generator-overlay"
-                : "Prism helper###model-generator-overlay";
+                : _clothingWindowOpen
+                    ? "Clothing generator###model-generator-overlay"
+                    : _weaponWindowOpen
+                        ? "Tool / weapon generator###model-generator-overlay"
+                        : "Prism helper###model-generator-overlay";
         if (BeginDevToolsFloatingTool(title, ref open, new NVector2(480f, 580f)))
         {
             DrawModelGeneratorToolPicker("##model-generator-overlay-picker");
@@ -624,6 +642,14 @@ public sealed partial class DebugWindowManager
             else if (_playerModelWindowOpen)
             {
                 DrawPlayerModelPanel();
+            }
+            else if (_clothingWindowOpen)
+            {
+                DrawClothingPanel();
+            }
+            else if (_weaponWindowOpen)
+            {
+                DrawWeaponPanel();
             }
         }
         ImGui.End();
@@ -646,16 +672,29 @@ public sealed partial class DebugWindowManager
 
         ImGui.Spacing();
         ImGui.AlignTextToFramePadding();
-        ImGui.TextDisabled("Chisel");
+        ImGui.TextDisabled("Chisel texture");
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(190f);
-        if (ModelFilteredCombo("Texture##model-chisel-texture", _modelChiselTexture, textureCodes, out string pickedTexture, allowCustom: true, filterHint: "filter texture codes"))
+        ImGui.SetNextItemWidth(220f);
+        if (ModelFilteredCombo("Place texture##model-chisel-texture", _modelChiselTexture, textureCodes, out string pickedTexture, allowCustom: true, filterHint: "filter texture codes"))
         {
             _modelChiselTexture = pickedTexture.Trim();
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Texture code used by newly added chisel microblocks.");
+            ImGui.SetTooltip("Texture code used by newly added chisel microblocks. Same-texture neighbors merge; different textures stay separate.");
+        }
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled("Size");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(88f);
+        if (ImGui.DragFloat("##model-chisel-size", ref _modelChiselSize, 0.03125f, 0.0625f, 8f, "%.4g u"))
+        {
+            _modelChiselSize = Math.Clamp(_modelChiselSize, 0.0625f, 8f);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Placed/removed chisel cell size in shape units. 1 unit = 1/16 block; smaller values allow finer model details.");
         }
     }
 
@@ -2947,6 +2986,7 @@ public sealed partial class DebugWindowManager
                 partsY,
                 partsZ,
                 desired => ModelReserveUniqueElementName(reservedNames, desired));
+            ModelAttachCutChildrenToPieces(target, pieces);
             foreach (ModelElementData piece in pieces)
             {
                 piece.Parent = target.Parent;
@@ -3007,6 +3047,7 @@ public sealed partial class DebugWindowManager
         }
 
         ModelBeginEdit();
+        ModelAttachCutChildrenToPieces(element, pieces);
         foreach (ModelElementData piece in pieces)
         {
             piece.Parent = element.Parent;
@@ -3049,10 +3090,13 @@ public sealed partial class DebugWindowManager
 
         ModelBeginEdit();
         siblings.Insert(insertIndex + 1, microblock);
-        ModelSelectElement(microblock);
+        ModelElementData merged = ModelMergeChiselSiblings(siblings, microblock);
+        ModelSelectElement(merged);
         ModelMarkChanged();
         ModelEndEdit("Chisel add microblock");
-        _modelStatus = $"Added chisel microblock {microblock.Name}.";
+        _modelStatus = ReferenceEquals(merged, microblock)
+            ? $"Added chisel microblock {microblock.Name} with texture '{texture}'."
+            : $"Added and merged chisel microblock into {merged.Name} with texture '{texture}'.";
     }
 
     private void ModelRemoveChiselMicroblock(ModelElementData element, double[] removeFrom, double[] removeTo)
@@ -3166,12 +3210,6 @@ public sealed partial class DebugWindowManager
 
         foreach (ModelElementData target in targets)
         {
-            if (target.Children.Count > 0)
-            {
-                reason = $"'{target.Name}' has children; unparent them before cutting.";
-                return false;
-            }
-
             for (int axis = 0; axis < 3; axis++)
             {
                 int parts = axis switch
@@ -3195,12 +3233,6 @@ public sealed partial class DebugWindowManager
     private static bool ModelCanCutElementAtCoordinate(ModelElementData element, int axis, double coordinate, out string reason)
     {
         reason = "";
-        if (element.Children.Count > 0)
-        {
-            reason = $"'{element.Name}' has children; unparent them before cutting.";
-            return false;
-        }
-
         if (!ModelIsCutCoordinateInside(element, axis, coordinate))
         {
             reason = $"Cut line is too close to the {ModelAxisName(axis)} edge.";
@@ -3297,6 +3329,53 @@ public sealed partial class DebugWindowManager
         return [first, second];
     }
 
+    private static void ModelAttachCutChildrenToPieces(ModelElementData source, IReadOnlyList<ModelElementData> pieces)
+    {
+        if (source.Children.Count == 0 || pieces.Count == 0) return;
+
+        List<ModelElementData> children = [.. source.Children];
+        source.Children.Clear();
+        foreach (ModelElementData child in children)
+        {
+            ModelElementData parent = ModelFindCutPieceForChild(source, child, pieces);
+            child.Parent = parent;
+            parent.Children.Add(child);
+        }
+    }
+
+    private static ModelElementData ModelFindCutPieceForChild(ModelElementData source, ModelElementData child, IReadOnlyList<ModelElementData> pieces)
+    {
+        double[] childCenter =
+        [
+            (child.From[0] + child.To[0]) * 0.5,
+            (child.From[1] + child.To[1]) * 0.5,
+            (child.From[2] + child.To[2]) * 0.5
+        ];
+        ModelElementData? piece = pieces.FirstOrDefault(candidate => ModelPointInsideBox(childCenter, candidate.From, candidate.To));
+        if (piece != null) return piece;
+
+        if (source.RotationOrigin != null)
+        {
+            piece = pieces.FirstOrDefault(candidate => ModelPointInsideBox(source.RotationOrigin, candidate.From, candidate.To));
+            if (piece != null) return piece;
+        }
+
+        return pieces[0];
+    }
+
+    private static bool ModelPointInsideBox(double[] point, double[] from, double[] to)
+    {
+        const double epsilon = 0.000001;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            double min = Math.Min(from[axis], to[axis]) - epsilon;
+            double max = Math.Max(from[axis], to[axis]) + epsilon;
+            if (point[axis] < min || point[axis] > max) return false;
+        }
+
+        return true;
+    }
+
     private static ModelElementData ModelCreateChiselMicroblock(
         ModelElementData template,
         double[] from,
@@ -3380,6 +3459,131 @@ public sealed partial class DebugWindowManager
         AddPiece(cx0, cy0, z0, cx1, cy1, cz0, "z0");
         AddPiece(cx0, cy0, cz1, cx1, cy1, z1, "z1");
         return pieces;
+    }
+
+    private static ModelElementData ModelMergeChiselSiblings(List<ModelElementData> siblings, ModelElementData preferred)
+    {
+        return ModelMergeChiselElements(siblings, preferred) ?? preferred;
+    }
+
+    private static ModelElementData? ModelMergeChiselElements(System.Collections.IList siblings, ModelElementData? preferred)
+    {
+        if (siblings.Count < 2) return preferred;
+
+        bool merged;
+        do
+        {
+            merged = false;
+            for (int leftIndex = 0; leftIndex < siblings.Count && !merged; leftIndex++)
+            {
+                if (siblings[leftIndex] is not ModelElementData left) continue;
+                for (int rightIndex = leftIndex + 1; rightIndex < siblings.Count; rightIndex++)
+                {
+                    if (siblings[rightIndex] is not ModelElementData right) continue;
+                    if (!ModelTryMergeChiselElements(left, right, out double[] mergedFrom, out double[] mergedTo, out string texture)) continue;
+
+                    ModelElementData keep = ReferenceEquals(right, preferred) ? right : left;
+                    ModelElementData drop = ReferenceEquals(keep, left) ? right : left;
+                    keep.From = mergedFrom;
+                    keep.To = mergedTo;
+                    ModelApplyContinuousUvToElement(keep, texture, replaceTexture: true);
+                    siblings.Remove(drop);
+                    if (ReferenceEquals(drop, preferred)) preferred = keep;
+                    merged = true;
+                    break;
+                }
+            }
+        }
+        while (merged);
+
+        return preferred;
+    }
+
+    private static bool ModelTryMergeChiselElements(
+        ModelElementData left,
+        ModelElementData right,
+        out double[] mergedFrom,
+        out double[] mergedTo,
+        out string texture)
+    {
+        mergedFrom = new double[3];
+        mergedTo = new double[3];
+        texture = "";
+
+        if (!ModelChiselMergeMetadataMatches(left, right)) return false;
+        texture = ModelCommonFaceTexture(left);
+        if (string.IsNullOrWhiteSpace(texture) || !string.Equals(texture, ModelCommonFaceTexture(right), StringComparison.Ordinal)) return false;
+        if (!ModelChiselFacesMergeCompatible(left, right, texture)) return false;
+
+        int mergeAxis = -1;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            bool sameSpan = Math.Abs(left.From[axis] - right.From[axis]) <= 0.000001 &&
+                Math.Abs(left.To[axis] - right.To[axis]) <= 0.000001;
+            bool touching = Math.Abs(left.To[axis] - right.From[axis]) <= 0.000001 ||
+                Math.Abs(right.To[axis] - left.From[axis]) <= 0.000001;
+            if (sameSpan) continue;
+            if (!touching || mergeAxis >= 0) return false;
+            mergeAxis = axis;
+        }
+
+        if (mergeAxis < 0) return false;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            if (axis != mergeAxis)
+            {
+                if (Math.Abs(left.From[axis] - right.From[axis]) > 0.000001 ||
+                    Math.Abs(left.To[axis] - right.To[axis]) > 0.000001)
+                {
+                    return false;
+                }
+            }
+
+            mergedFrom[axis] = ModelRoundForChisel(Math.Min(left.From[axis], right.From[axis]));
+            mergedTo[axis] = ModelRoundForChisel(Math.Max(left.To[axis], right.To[axis]));
+        }
+
+        return mergedTo[0] - mergedFrom[0] > 0.000001 &&
+            mergedTo[1] - mergedFrom[1] > 0.000001 &&
+            mergedTo[2] - mergedFrom[2] > 0.000001;
+    }
+
+    private static bool ModelChiselMergeMetadataMatches(ModelElementData left, ModelElementData right)
+    {
+        return left.Children.Count == 0 &&
+            right.Children.Count == 0 &&
+            ReferenceEquals(left.Parent, right.Parent) &&
+            ModelElementHasRenderableBox(left) &&
+            ModelElementHasRenderableBox(right) &&
+            ModelChiselTransformsMatch(left, right) &&
+            left.Shade == right.Shade &&
+            left.Visible == right.Visible &&
+            string.Equals(left.StepParentName, right.StepParentName, StringComparison.Ordinal) &&
+            JToken.DeepEquals(left.Extra, right.Extra);
+    }
+
+    private static bool ModelChiselFacesMergeCompatible(ModelElementData left, ModelElementData right, string texture)
+    {
+        for (int faceIndex = 0; faceIndex < 6; faceIndex++)
+        {
+            ModelFaceData? leftFace = left.Faces[faceIndex];
+            ModelFaceData? rightFace = right.Faces[faceIndex];
+            if (leftFace == null || rightFace == null) return false;
+            if (!leftFace.Enabled || !rightFace.Enabled) return false;
+            if (!string.Equals(leftFace.Texture, texture, StringComparison.Ordinal) ||
+                !string.Equals(rightFace.Texture, texture, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            if (Math.Abs(leftFace.Rotation - rightFace.Rotation) > 0.000001 ||
+                leftFace.Glow != rightFace.Glow ||
+                !JToken.DeepEquals(leftFace.Extra, rightFace.Extra))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static double[] ModelBuildCutBounds(double from, double to, int parts)
@@ -3692,10 +3896,14 @@ public sealed partial class DebugWindowManager
             1 or 3 => (element.SizeZ, element.SizeY),
             _ => (element.SizeX, element.SizeZ)
         };
+        // Clamp the UV span to the texture so large, scaled-up or overlapping elements stay fully textured.
+        // Auto-UV maps 1 shape unit to 1 texel; without the clamp, anything bigger than the texture samples
+        // outside the atlas and renders invisible. Small elements keep their 1:1 mapping (clamp is a no-op).
+        (int texWidth, int texHeight) = _modelDoc?.GetTextureSize(face.Texture) ?? (16, 16);
         face.Uv[0] = 0f;
         face.Uv[1] = 0f;
-        face.Uv[2] = (float)Math.Max(0.0, width);
-        face.Uv[3] = (float)Math.Max(0.0, height);
+        face.Uv[2] = (float)Math.Clamp(width, 0.0, texWidth);
+        face.Uv[3] = (float)Math.Clamp(height, 0.0, texHeight);
     }
 
     private void ModelMarkChanged()
@@ -3810,6 +4018,7 @@ public sealed partial class DebugWindowManager
         restored.SourceText = _modelDoc.SourceText;
         restored.Dirty = true;
         restored.FromAuthoredFile = _modelDoc.FromAuthoredFile;
+        restored.RecoveryKey = ModelEnsureRecoveryKey(_modelDoc);
         _modelDoc = restored;
         ModelSelectElements(ModelResolveSelectionPaths(entry.SelectionPaths), ModelResolveSelectionPath(entry.SelectionPath));
         if (_modelSelectedElement == null)

@@ -639,6 +639,299 @@ public sealed class AnimationGeneratorTests
         else Assert.True(v < 0.0, $"{env} at {r} should dip below 0, got {v}");
     }
 
+    [Fact]
+    public void GaitPhase_ManyLeggedWalkRipplesAsAMetachronalWave()
+    {
+        // A centipede (5 leg rows) walking: the rows fire in a travelling wave down the body, not one alternation.
+        double[] side0 = Enumerable.Range(0, 5).Select(r => GaitFraction("Walk", r, 5, 0)).ToArray();
+        Assert.Equal(5, side0.Distinct().Count());                          // every row at a distinct phase
+        for (int r = 1; r < 5; r++) Assert.True(side0[r] > side0[r - 1]);   // a monotonic wave, front to back
+        // The two sides are in antiphase (left/right alternate).
+        Assert.Equal(0.5, Math.Abs(GaitFraction("Walk", 0, 5, 0) - GaitFraction("Walk", 0, 5, 1)), 3);
+    }
+
+    [Fact]
+    public void GaitPhase_SixLeggedWalkKeepsTheAlternatingTripod()
+    {
+        // A 6-legged insect (3 rows) walks with the tripod gait: the middle leg opposes its neighbours.
+        Assert.Equal(0.0, GaitFraction("Walk", 0, 3, 0), 3);
+        Assert.Equal(0.5, GaitFraction("Walk", 1, 3, 0), 3);
+        Assert.Equal(0.0, GaitFraction("Walk", 2, 3, 0), 3);
+    }
+
+    [Fact]
+    public void GaitPhase_BipedBoundHopsBothFeetTogether()
+    {
+        // A bound on two legs is a hop: both feet in phase. A walk still alternates them.
+        Assert.Equal(GaitFraction("Bound", 0, 1, 0), GaitFraction("Bound", 0, 1, 1), 3);
+        Assert.Equal(0.5, Math.Abs(GaitFraction("Walk", 0, 1, 0) - GaitFraction("Walk", 0, 1, 1)), 3);
+    }
+
+    [Fact]
+    public void HeadStabilize_CountersBodyPitchAndRoll()
+    {
+        // Gaze stabilization: the head gets equal-and-opposite rotations to the body's inherited pitch/roll.
+        DebugWindowManager manager = CreateManager();
+        Shape shape = BuildNeckTailShape();
+        object document = CreateShapeDocument(shape);
+
+        object p = MakeParams(30, 12);
+        SetField(p, "BodyPitch", 6f);
+        SetField(p, "BodyRoll", 4f);
+        SetField(p, "HeadStabilize", 1f);
+        List<object> channels = InvokeBuildLocomotionChannels(manager, document, CollectNames(shape).ToList(), p);
+
+        List<object> head = channels.Where(c => (string)GetMember(c, "Element")! == "head").ToList();
+        Assert.Contains(head, c => GetMember(c, "Field")!.ToString() == "RotationZ" && Convert.ToDouble(GetMember(c, "Amplitude")) < 0);
+        Assert.Contains(head, c => GetMember(c, "Field")!.ToString() == "RotationX" && Convert.ToDouble(GetMember(c, "Amplitude")) < 0);
+    }
+
+    [Fact]
+    public void Locomotion_SkipsRoundingFacetsSoTheyRideTheParentBone()
+    {
+        // The model generator's smoothing adds facet children named "{bone}Round{n}". They must NOT get their own
+        // spine channel (that would double-bend them and shift the per-segment phase sequence).
+        DebugWindowManager manager = CreateManager();
+        ShapeElement facet = Element("spine1Round1", [0, 0, 0], [4, 4, 4], null);
+        ShapeElement spine1 = Element("spine1", [0, 0, 0], [16, 4, 4], [facet]);
+        Shape shape = new() { Elements = [spine1] };
+        object document = CreateShapeDocument(shape);
+
+        object p = MakeParams(30, 12);
+        SetField(p, "SpineBend", 10f);
+        List<object> channels = InvokeBuildLocomotionChannels(manager, document, CollectNames(shape).ToList(), p);
+
+        Assert.Contains(channels, c => (string)GetMember(c, "Element")! == "spine1");
+        Assert.DoesNotContain(channels, c => (string)GetMember(c, "Element")! == "spine1Round1");
+    }
+
+    [Fact]
+    public void Locomotion_SkipsGeneratedMembranesSoTheyRideTheWingSpar()
+    {
+        // Generated wing membranes are visual surface panels under a real spar bone. Animating both creates a
+        // second transform on the panel, which reads as a duplicate wing clipping through the animated spar.
+        DebugWindowManager manager = CreateManager();
+        ShapeElement membrane = Element("wingLeftMembrane1", [0, 0, 0], [8, 1, 8], null);
+        ShapeElement spar = Element("wingLeftSpar1", [0, 0, 0], [8, 1, 1], [membrane]);
+        ShapeElement body = Element("body", [0, 0, 0], [16, 16, 16], [spar]);
+        Shape shape = new() { Elements = [body] };
+        object document = CreateShapeDocument(shape);
+
+        object p = MakeParams(30, 12);
+        SetField(p, "WingFlap", 35f); // wings only flap when asked (a flight gait or a manual amplitude)
+        List<object> channels = InvokeBuildLocomotionChannels(manager, document, CollectNames(shape).ToList(), p);
+
+        Assert.Contains(channels, c => (string)GetMember(c, "Element")! == "wingLeftSpar1");
+        Assert.DoesNotContain(channels, c => (string)GetMember(c, "Element")! == "wingLeftMembrane1");
+    }
+
+    [Fact]
+    public void JigglePhysics_LoosePartOvershootsItsInput_RigidPartDoesNot()
+    {
+        // A floppy, bouncy spring driven near resonance overshoots its target's range (follow-through), and the
+        // physics only touches loose parts - a "body" element is left exactly as keyed.
+        object p = MakeParams(48, 48);
+        SetField(p, "JigglePhysics", true);
+        SetField(p, "Floppiness", 1f);
+        SetField(p, "JiggleBounce", 1f);
+
+        IList tail = NewChannelList();
+        tail.Add(MakeChannel("tail", "RotationZ", "Sine", 20.0, 1, 0.0, 0.0));
+        double tailPeak = MaxAbsField(InvokeBuildKeyFrames(p, tail), "tail", "RotationZ");
+        Assert.True(tailPeak > 24.0, $"the spring should overshoot the 20 deg input (got {tailPeak})");
+
+        IList body = NewChannelList();
+        body.Add(MakeChannel("body", "RotationZ", "Sine", 20.0, 1, 0.0, 0.0));
+        double bodyPeak = MaxAbsField(InvokeBuildKeyFrames(p, body), "body", "RotationZ");
+        Assert.Equal(20.0, bodyPeak, 1); // rigid: untouched
+    }
+
+    [Fact]
+    public void JigglePhysics_OffIsAByteIdenticalNoOp()
+    {
+        object on = MakeParams(48, 48);
+        object off = MakeParams(48, 48);
+        SetField(off, "JigglePhysics", false);
+
+        IList channels = NewChannelList();
+        channels.Add(MakeChannel("tail", "RotationZ", "Sine", 20.0, 1, 0.0, 0.0));
+
+        Assert.Equal(20.0, MaxAbsField(InvokeBuildKeyFrames(off, channels), "tail", "RotationZ"), 1);
+    }
+
+    [Fact]
+    public void SpeedModel_FasterMeansQuickerCadenceLongerStrideLowerDuty()
+    {
+        object baseline = MakeParams(0, 0);
+        SetField(baseline, "Gait", Gait("Walk"));
+        SetField(baseline, "Speed", 1f);
+        ApplyGaitPreset(baseline);
+
+        object fast = MakeParams(0, 0);
+        SetField(fast, "Gait", Gait("Walk"));
+        SetField(fast, "Speed", 2f);
+        ApplyGaitPreset(fast);
+
+        Assert.True(Convert.ToInt32(GetMember(fast, "Frames")) < Convert.ToInt32(GetMember(baseline, "Frames")), "faster = fewer frames per loop");
+        Assert.True(Convert.ToSingle(GetMember(fast, "LegStride")) > Convert.ToSingle(GetMember(baseline, "LegStride")), "faster = longer stride");
+        Assert.True(Convert.ToSingle(GetMember(fast, "StanceRatio")) < Convert.ToSingle(GetMember(baseline, "StanceRatio")), "faster = lower duty factor");
+    }
+
+    [Fact]
+    public void CoupledChainPhysics_LagAccumulatesTowardTheTip()
+    {
+        // Two identical sine-driven tail segments. With the hierarchy known, the child is dragged by the
+        // parent's lag, so the tip peaks LATER than the root (a real whip); without it the springs are
+        // independent and peak together.
+        IList channels = NewChannelList();
+        channels.Add(MakeChannel("tail1", "RotationZ", "Sine", 20.0, 1, 0.0, 0.0));
+        channels.Add(MakeChannel("tail2", "RotationZ", "Sine", 20.0, 1, 0.0, 0.0));
+
+        object coupled = MakeParams(60, 60);
+        SetField(coupled, "JigglePhysics", true);
+        SetField(coupled, "Floppiness", 1f);
+        SetField(coupled, "JiggleBounce", 0.3f);
+        SetField(coupled, "HierarchyParents", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["tail2"] = "tail1" });
+        Array cFrames = InvokeBuildKeyFrames(coupled, channels);
+        Assert.True(PeakFrame(cFrames, "tail2", "RotationZ") > PeakFrame(cFrames, "tail1", "RotationZ"),
+            "the coupled tip should lag behind the root");
+
+        object indep = MakeParams(60, 60);
+        SetField(indep, "JigglePhysics", true);
+        SetField(indep, "Floppiness", 1f);
+        SetField(indep, "JiggleBounce", 0.3f);
+        Array iFrames = InvokeBuildKeyFrames(indep, channels);
+        Assert.Equal(PeakFrame(iFrames, "tail1", "RotationZ"), PeakFrame(iFrames, "tail2", "RotationZ"));
+    }
+
+    [Theory]
+    [InlineData(0.0, -7.0)]
+    [InlineData(3.0, -6.0)]
+    [InlineData(-3.5, -6.0)]
+    public void FootLockIk_PlacesTheFootExactlyAtTheTarget(double fx, double fy)
+    {
+        // The closed-form 2-bone IK is exact: forward kinematics of the solved angles lands on the target.
+        (double hip, double knee) = SolveIk(fx, fy, 4.0, 4.0, -1);
+        (double x, double y) = Fk(hip, knee, 4.0, 4.0);
+        Assert.Equal(fx, x, 3);
+        Assert.Equal(fy, y, 3);
+    }
+
+    [Fact]
+    public void FootLock_PlantsTheStanceFootWithNoSlide()
+    {
+        DebugWindowManager manager = CreateManager();
+        Shape shape = BuildQuadrupedShape();
+        object document = CreateShapeDocument(shape);
+
+        object p = MakeParams(40, 12);
+        SetField(p, "FootLock", true);
+        List<object> channels = InvokeBuildLocomotionChannels(manager, document, CollectNames(shape).ToList(), p);
+
+        // Foot-lock replaces the analytic hip Stance wave with IK curve channels.
+        Assert.DoesNotContain(channels, c => GetMember(c, "Wave")!.ToString() == "Stance");
+        object hipCh = channels.First(c => (string)GetMember(c, "Element")! == "legLeftFront" && GetMember(c, "Curve") != null);
+        object kneeCh = channels.First(c => (string)GetMember(c, "Element")! == "legLeftFrontlower" && GetMember(c, "Curve") != null);
+        var hipFn = (System.Func<double, double>)GetMember(hipCh, "Curve")!;
+        var kneeFn = (System.Func<double, double>)GetMember(kneeCh, "Curve")!;
+
+        // Across the stance phase (duty ~0.62), the foot holds a constant height and sweeps monotonically back.
+        double plantedY = double.NaN, prevX = double.NaN;
+        for (double t = 0.02; t < 0.55; t += 0.05)
+        {
+            (double x, double y) = Fk(hipFn(t), kneeFn(t), 4.0, 4.0);
+            if (double.IsNaN(plantedY)) plantedY = y;
+            else Assert.Equal(plantedY, y, 2);
+            if (!double.IsNaN(prevX)) Assert.True(x < prevX + 1e-6, "the stance foot must not slide forward");
+            prevX = x;
+        }
+    }
+
+    [Fact]
+    public void GaitPreset_OnlyFlightGaitFlapsWings()
+    {
+        // The fix: a ground/water gait holds the wings still; only a flight gait turns flapping on.
+        Assert.Equal(0f, WingFlapAfterPreset("Walk"), 3);
+        Assert.Equal(0f, WingFlapAfterPreset("Swim"), 3);
+        Assert.Equal(0f, WingFlapAfterPreset("Stalk"), 3);
+        Assert.True(WingFlapAfterPreset("Fly") > 0f, "fly should flap");
+    }
+
+    [Fact]
+    public void GaitPreset_SwitchingFromFlyToGroundStopsAllFlightMotion()
+    {
+        object p = MakeParams(20, 12);
+        SetField(p, "Gait", Gait("Fly"));
+        ApplyGaitPreset(p);
+        Assert.True(Convert.ToSingle(GetMember(p, "WingFlap")) > 0f);
+        Assert.True(Convert.ToSingle(GetMember(p, "LegTuck")) > 0f);
+
+        SetField(p, "Gait", Gait("Walk"));
+        ApplyGaitPreset(p);
+        // No flight-only motion leaks onto the walk.
+        Assert.Equal(0f, Convert.ToSingle(GetMember(p, "WingFlap")), 3);
+        Assert.Equal(0f, Convert.ToSingle(GetMember(p, "LegTuck")), 3);
+        Assert.Equal(0f, Convert.ToSingle(GetMember(p, "FlightBob")), 3);
+        Assert.Equal(0f, Convert.ToSingle(GetMember(p, "WingChainLag")), 3);
+    }
+
+    [Fact]
+    public void Locomotion_WalkEmitsNoWingFlapChannel_FlyDoes()
+    {
+        DebugWindowManager manager = CreateManager();
+        Shape shape = BuildWingedShape();
+        object document = CreateShapeDocument(shape);
+        List<string> targets = CollectNames(shape).ToList();
+
+        object walk = MakeParams(30, 12);
+        SetField(walk, "Gait", Gait("Walk"));
+        ApplyGaitPreset(walk);
+        List<object> walkChannels = InvokeBuildLocomotionChannels(manager, document, targets, walk);
+        Assert.DoesNotContain(walkChannels, c => ((string)GetMember(c, "Element")!).StartsWith("wing"));
+
+        object fly = MakeParams(30, 12);
+        SetField(fly, "Gait", Gait("Fly"));
+        ApplyGaitPreset(fly);
+        List<object> flyChannels = InvokeBuildLocomotionChannels(manager, document, targets, fly);
+        Assert.Contains(flyChannels, c => ((string)GetMember(c, "Element")!).StartsWith("wing"));
+    }
+
+    private static float WingFlapAfterPreset(string gait)
+    {
+        object p = MakeParams(20, 12);
+        SetField(p, "Gait", Gait(gait));
+        ApplyGaitPreset(p);
+        return Convert.ToSingle(GetMember(p, "WingFlap"));
+    }
+
+    private static int PeakFrame(Array keyFrames, string element, string field)
+    {
+        int peak = 0;
+        double max = double.MinValue;
+        foreach (object kf in keyFrames)
+        {
+            var elements = (IDictionary)GetMember(kf, "Elements")!;
+            if (!elements.Contains(element)) continue;
+            object? v = GetMember(elements[element]!, field);
+            if (v == null) continue;
+            double value = Convert.ToDouble(v);
+            if (value > max) { max = value; peak = Convert.ToInt32(GetMember(kf, "Frame")); }
+        }
+        return peak;
+    }
+
+    private static (double hip, double knee) SolveIk(double fx, double fy, double l1, double l2, int kneeSign)
+    {
+        object r = ManagerType.GetMethod("SolveVanillaLegIk", StaticFlags)!.Invoke(null, [fx, fy, l1, l2, kneeSign])!;
+        return ((double, double))r;
+    }
+
+    private static (double x, double y) Fk(double hip, double knee, double l1, double l2)
+    {
+        object r = ManagerType.GetMethod("ForwardKinematicsLeg", StaticFlags)!.Invoke(null, [hip, knee, l1, l2])!;
+        return ((double, double))r;
+    }
+
     private static double HipStanceAmplitude(List<object> channels)
     {
         object hip = channels.First(c => GetMember(c, "Wave")!.ToString() == "Stance");
