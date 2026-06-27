@@ -470,6 +470,7 @@ public sealed partial class DebugWindowManager
         parsed.SourceText = _modelDoc.SourceText;
         parsed.Dirty = true;
         parsed.FromAuthoredFile = _modelDoc.FromAuthoredFile;
+        parsed.RecoveryKey = ModelEnsureRecoveryKey(_modelDoc);
         _modelDoc = parsed;
         ModelSelectElement(parsed.Roots.FirstOrDefault());
         _modelReparentSource = null;
