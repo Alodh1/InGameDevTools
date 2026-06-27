@@ -28,6 +28,8 @@ public struct ParticleEffectsPacket
 public class ParticleEffectsManager
 {
     public const string ParticleEffectsFileName = "particle-effects.json";
+    public const string CustomEffectsFileName = "ingamedevtools-custom-particles.json";
+    private const string CustomSourceKindLabel = "Custom effect";
 
     public ParticleEffectsManager(ICoreAPI api)
     {
@@ -55,6 +57,7 @@ public class ParticleEffectsManager
         LoadNamedParticleEffectAssets(_api);
         LoadRuntimeParticleAssets(_api);
         LoadEmbeddedParticleAssets(_api);
+        LoadCustomParticleEffects(_api);
 
         if (_verboseParticleScanLog)
         {
@@ -564,6 +567,7 @@ public class ParticleEffectsManager
         ImGui.BeginChild($"##particles-browser-{id}", new System.Numerics.Vector2(leftWidth, available.Y), true);
         ImGui.SeparatorText("Particle sources");
         DrawParticleScanControls(id);
+        DrawParticleCreateControls(id, selectedFamily, selectedVariant);
         ImGuiLayoutHelper.DrawDomainCombo($"Domain##particle-domain-filter-{id}", ref _particleDomainFilter, families.Select(family => family.Domain));
         ImGui.InputTextWithHint($"##particle-filter-{id}", "filter blocks/items", ref _particleFilter, 240);
         ImGui.BeginChild($"##particle-effects-list-{id}", new System.Numerics.Vector2(0, Math.Max(80f, ImGui.GetContentRegionAvail().Y * 0.55f)), true);
@@ -617,6 +621,7 @@ public class ParticleEffectsManager
         ImGui.BeginChild($"##particles-properties-{id}", new System.Numerics.Vector2(rightWidth, available.Y), true, ImGuiWindowFlags.HorizontalScrollbar);
         ImGui.SeparatorText("Values");
         DrawParticleEditScopeControls(id, selectedFamily, selectedVariant);
+        DrawCustomEffectControls(id, selectedFamily);
         DrawParticleResetControls(id, selectedFamily, selectedVariant, _selectedParticleEmitterIndex, liveApplyManager);
         DrawParticleLiveControls(id, selectedFamily, selectedVariant, _selectedParticleEmitterIndex, liveApplyManager);
         if (selectedEmitter == null)
@@ -713,6 +718,44 @@ public class ParticleEffectsManager
         ImGui.TextDisabled(groupEdit
             ? $"Editing all {family.Variants.Count} variants"
             : $"Editing only {variant.DisplayKey}");
+    }
+
+    private void DrawCustomEffectControls(string id, ParticleEffectFamily family)
+    {
+        if (!IsCustomFamily(family)) return;
+
+        ImGui.SeparatorText("Custom effect");
+        ImGui.TextDisabled($"Stored in {CustomEffectsFileName}");
+
+        if (ImGui.Button($"Save edits to library##particle-custom-save-{id}"))
+        {
+            SaveCustomParticleEffects();
+            _particleStatus = $"Saved custom effect '{family.DisplayKey}' to the library.";
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Persist the current values so they survive reloads and restarts.");
+
+        ImGui.SameLine();
+        string deletePopupId = $"##particle-custom-delete-confirm-{id}";
+        if (ImGui.Button($"Delete effect##particle-custom-delete-{id}"))
+        {
+            ImGui.OpenPopup(deletePopupId);
+        }
+
+        if (ImGui.BeginPopup(deletePopupId))
+        {
+            ImGui.Text($"Delete '{family.DisplayKey}'? This cannot be undone.");
+            if (ImGui.Button($"Delete##particle-custom-delete-yes-{id}"))
+            {
+                DeleteCustomEffect(family);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button($"Cancel##particle-custom-delete-no-{id}"))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
     }
 
     private void DrawParticleResetControls(string id, ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
@@ -1002,6 +1045,257 @@ public class ParticleEffectsManager
         ImGui.TextWrapped(_scanDiagnostics.Summary(_particleEffects.Count));
         ImGui.TextDisabled($"Added: {_scanDiagnostics.NamedConfigEffectsAdded} named, {_scanDiagnostics.RuntimeBlockEffectsAdded} block, {_scanDiagnostics.RuntimeItemEffectsAdded} item, {_scanDiagnostics.EmbeddedEffectsAdded} embedded.");
         ImGui.TextDisabled($"Failures: {_scanDiagnostics.ParseFailures} parse, {_scanDiagnostics.TextReadFailures} text.");
+    }
+
+    private void DrawParticleCreateControls(string id, ParticleEffectFamily? selectedFamily, ParticleEffectVariant? selectedVariant)
+    {
+        if (!ImGui.CollapsingHeader($"Create new effect##particle-create-{id}", ImGuiTreeNodeFlags.DefaultOpen)) return;
+        ImGui.Indent();
+
+        ImGui.TextWrapped("Author a brand-new particle effect under any domain - including domains that ship none. New effects are saved to the custom library and preview in emitter-list mode.");
+
+        ImGui.SetNextItemWidth(110);
+        ImGui.InputTextWithHint($"##particle-new-domain-{id}", "domain", ref _newEffectDomain, 128);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint($"##particle-new-code-{id}", "effect code (e.g. embers)", ref _newEffectCode, 256);
+
+        bool canCreate = !string.IsNullOrWhiteSpace(_newEffectDomain) && !string.IsNullOrWhiteSpace(_newEffectCode);
+        if (!canCreate) ImGui.BeginDisabled();
+        if (ImGui.Button($"Create blank##particle-new-blank-{id}"))
+        {
+            CreateCustomEffect(_newEffectDomain, _newEffectCode, CreateVisibleDefaultParticle());
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Create a new, visible glowing-quad effect you can tune in the Values panel.");
+        if (!canCreate) ImGui.EndDisabled();
+
+        AdvancedParticleProperties? template = selectedVariant?.GetEmitter(_selectedParticleEmitterIndex)?.Properties
+            ?? selectedVariant?.EmittersWithParticles.FirstOrDefault()?.Properties;
+        bool canDuplicate = canCreate && template != null;
+        ImGui.SameLine();
+        if (!canDuplicate) ImGui.BeginDisabled();
+        if (ImGui.Button($"Duplicate selected##particle-new-dup-{id}") && template != null)
+        {
+            CreateCustomEffect(_newEffectDomain, _newEffectCode, template.Clone());
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(template != null
+                ? $"Copy the selected emitter ({selectedFamily?.DisplayKey}) into a new editable custom effect."
+                : "Select an effect with an emitter first.");
+        }
+        if (!canDuplicate) ImGui.EndDisabled();
+
+        if (!string.IsNullOrWhiteSpace(_createStatus))
+        {
+            ImGui.TextWrapped(_createStatus);
+        }
+
+        ImGui.Unindent();
+    }
+
+    private void CreateCustomEffect(string domain, string code, AdvancedParticleProperties properties)
+    {
+        string normalizedDomain = SanitizeAssetSegment(domain, "game");
+        string normalizedCode = SanitizeAssetSegment(code, "");
+        if (string.IsNullOrWhiteSpace(normalizedCode))
+        {
+            _createStatus = "Enter an effect code before creating.";
+            return;
+        }
+
+        string key = $"{normalizedDomain}:{normalizedCode}";
+        if (_particleEffects.ContainsKey(key))
+        {
+            _createStatus = $"'{key}' already exists. Pick a different domain/code (existing custom effects can be edited directly).";
+            return;
+        }
+
+        if (!AddParticleEffect(_api, key, properties, $"custom:{CustomEffectsFileName}", ParticleEffectSourceKind.Custom))
+        {
+            _createStatus = $"Could not create '{key}'.";
+            return;
+        }
+
+        SaveCustomParticleEffects();
+
+        _particleDomainFilter = "";
+        _particleFilter = "";
+        _selectedParticleFamilyKey = $"effect:{key}";
+        _selectedParticleVariantKey = key;
+        _selectedParticleEmitterIndex = 0;
+        ResetPreview(key);
+        _newEffectCode = "";
+        _createStatus = $"Created custom effect '{key}'. It is selected and ready to edit.";
+        _particleStatus = _createStatus;
+    }
+
+    private bool DeleteCustomEffect(ParticleEffectFamily family)
+    {
+        List<string> keys = family.Variants
+            .SelectMany(variant => variant.EmittersWithParticles)
+            .Where(entry => entry.SourceKind == ParticleEffectSourceKind.Custom)
+            .Select(entry => entry.Key)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (keys.Count == 0) return false;
+
+        foreach (string key in keys)
+        {
+            _particleEffects.Remove(key);
+        }
+
+        SaveCustomParticleEffects();
+        ClearPreviewReferenceModelCache();
+        _selectedParticleFamilyKey = "";
+        _selectedParticleVariantKey = "";
+        _selectedParticleEmitterIndex = 0;
+        _previewRenderer3D?.ResetParticles();
+        _createStatus = $"Deleted custom effect '{family.DisplayKey}'.";
+        _particleStatus = _createStatus;
+        return true;
+    }
+
+    private bool IsCustomFamily(ParticleEffectFamily family)
+    {
+        return family.Variants
+            .SelectMany(variant => variant.EmittersWithParticles)
+            .Any(entry => entry.SourceKind == ParticleEffectSourceKind.Custom);
+    }
+
+    private void LoadCustomParticleEffects(ICoreAPI api)
+    {
+        string path = GetCustomEffectsPath();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+
+        try
+        {
+            string text = File.ReadAllText(path);
+            if (!DevToolsJson.TryParseObject(text, out JObject? token, out string error) || token == null)
+            {
+                _diagnostics.Warning($"Custom particle library parse failed: {error}", text);
+                return;
+            }
+
+            int added = 0;
+            foreach ((string key, JToken? value) in token)
+            {
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                if (AddParticleEffect(api, key, value, $"custom:{CustomEffectsFileName}", ParticleEffectSourceKind.Custom))
+                {
+                    added++;
+                }
+            }
+
+            LoggerUtil.Verbose(api, this, $"Loaded {added} custom particle effect(s) from {path}.");
+        }
+        catch (Exception exception)
+        {
+            _diagnostics.Exception("Custom particle library load failed", exception);
+            LoggerUtil.Warn(api, this, $"Could not load custom particle library '{path}': {exception.Message}");
+        }
+    }
+
+    private void SaveCustomParticleEffects()
+    {
+        string path = GetCustomEffectsPath();
+        if (string.IsNullOrWhiteSpace(path)) return;
+
+        try
+        {
+            JObject root = new();
+            foreach (ParticleEffectEntry entry in _particleEffects.Values
+                .Where(entry => entry.SourceKind == ParticleEffectSourceKind.Custom)
+                .OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                root[entry.Key] = ParticlePropertiesToToken(entry.Properties);
+            }
+
+            string? directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            string text = root.ToString(Formatting.Indented);
+            DevToolsFileBackupManager.BackupSharedBeforeOverwrite(path, System.Text.Encoding.UTF8.GetBytes(text));
+            File.WriteAllText(path, text);
+        }
+        catch (Exception exception)
+        {
+            _diagnostics.Exception("Custom particle library save failed", exception);
+            _createStatus = $"Could not save custom library: {exception.Message}";
+        }
+    }
+
+    private static string GetCustomEffectsPath()
+    {
+        try
+        {
+            return Path.Combine(GamePaths.ModConfig, CustomEffectsFileName);
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static string SanitizeAssetSegment(string value, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return fallback;
+
+        string trimmed = value.Trim().ToLowerInvariant().Replace(' ', '-');
+        System.Text.StringBuilder builder = new(trimmed.Length);
+        foreach (char c in trimmed)
+        {
+            if (char.IsLetterOrDigit(c) || c is '-' or '_' or '/' or '.')
+            {
+                builder.Append(c);
+            }
+        }
+
+        string result = builder.ToString().Trim('-', '/', '.');
+        return string.IsNullOrWhiteSpace(result) ? fallback : result;
+    }
+
+    private static AdvancedParticleProperties CreateVisibleDefaultParticle()
+    {
+        AdvancedParticleProperties properties = new()
+        {
+            ParticleModel = EnumParticleModel.Quad,
+            HsvaColor =
+            [
+                NewNatFloat(30f, 12f),
+                NewNatFloat(210f, 30f),
+                NewNatFloat(255f, 0f),
+                NewNatFloat(255f, 0f)
+            ],
+            PosOffset =
+            [
+                NewNatFloat(0f, 0.1f),
+                NewNatFloat(0f, 0.1f),
+                NewNatFloat(0f, 0.1f)
+            ],
+            Velocity =
+            [
+                NewNatFloat(0f, 0.6f),
+                NewNatFloat(1.2f, 0.5f),
+                NewNatFloat(0f, 0.6f)
+            ],
+            Quantity = NewNatFloat(15f, 5f),
+            LifeLength = NewNatFloat(1.5f, 0.3f),
+            Size = NewNatFloat(0.4f, 0.1f),
+            GravityEffect = NewNatFloat(0.1f, 0f),
+            // SizeEvolve/OpacityEvolve sequence is normalized life fraction (0..1), so these fade the
+            // particle out smoothly across its whole lifetime rather than snapping to zero.
+            SizeEvolve = EvolvingNatFloat.create(EnumTransformFunction.LINEAR, -0.2f),
+            OpacityEvolve = EvolvingNatFloat.create(EnumTransformFunction.LINEAR, -255f),
+            VertexFlags = new VertexFlags(0) { GlowLevel = 128 }.All,
+            TerrainCollision = false
+        };
+
+        NormalizeParticleProperties(properties);
+        return properties;
     }
 
     private void DrawParticleLiveControls(string id, ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager)
@@ -1583,6 +1877,7 @@ public class ParticleEffectsManager
     private float _previewEmitRate = 1f;
     private float _previewIntensity = 1f;
     private float _previewTimeScale = 1f;
+    private float _previewDensity = 1f;
     private float _previewWorldOffset = 2f;
     private float _previewVelocityX;
     private float _previewVelocityY;
@@ -1608,11 +1903,15 @@ public class ParticleEffectsManager
     private int _selectedParticleEmitterIndex;
     private bool _particleVariantOnlyEdit;
     private string _particleStatus = "";
+    private string _newEffectDomain = "game";
+    private string _newEffectCode = "";
+    private string _createStatus = "";
     private readonly DevToolsEditorDiagnostics _diagnostics = new("Particles");
     private readonly Dictionary<string, ParticlePreviewPlacement> _previewPlacementCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _particleLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _particleLiveOverrideKeysByScope = new(StringComparer.OrdinalIgnoreCase);
     private DevToolsPreview3DRenderer? _previewRenderer3D;
+    private readonly PreviewParticleSystem _previewParticles = new();
     private readonly ICoreAPI _api;
     private readonly Dictionary<string, ParticleEffectEntry> _particleEffects = new(StringComparer.OrdinalIgnoreCase);
     private ParticleAssetScanDiagnostics _scanDiagnostics = new();
@@ -1628,7 +1927,8 @@ public class ParticleEffectsManager
         NamedConfig,
         EmbeddedAsset,
         RuntimeBlock,
-        RuntimeItem
+        RuntimeItem,
+        Custom
     }
 
     private enum ParticlePreviewMode
@@ -1665,6 +1965,7 @@ public class ParticleEffectsManager
             ParticleEffectSourceKind.NamedConfig => "Named config",
             ParticleEffectSourceKind.RuntimeBlock => "Loaded block",
             ParticleEffectSourceKind.RuntimeItem => "Loaded item",
+            ParticleEffectSourceKind.Custom => CustomSourceKindLabel,
             _ => "Embedded asset"
         };
 
@@ -1778,9 +2079,19 @@ public class ParticleEffectsManager
         ImGui.SameLine();
         ImGui.SetNextItemWidth(110);
         ImGui.SliderFloat($"Speed##particle-preview-{id}", ref _previewTimeScale, 0.05f, 4f, "%.2fx");
+
+        ImGui.SetNextItemWidth(110);
+        ImGui.SliderFloat($"Density##particle-preview-{id}", ref _previewDensity, 0.05f, 2f, "%.2fx");
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Scales how many particles spawn. 1.0 = the effect's full in-game spawn rate. " +
+                "In a populated world the shared particle pool and your Particle graphics setting throttle this, " +
+                "so lower it to match what you actually see in-game.");
+        }
         if (useRuntimePreview)
         {
-            ImGui.TextDisabled($"Runtime block tick uses the engine {RuntimePreviewTickIntervalSeconds:0.000}s async cadence; rate and intensity are ignored.");
+            ImGui.SameLine();
+            ImGui.TextDisabled($"Engine {RuntimePreviewTickIntervalSeconds:0.000}s async cadence; rate/intensity ignored.");
         }
 
         ImGui.SetNextItemWidth(110);
@@ -1814,6 +2125,8 @@ public class ParticleEffectsManager
             ImGui.TextDisabled("Uses Vintage Story ParticlePhysics against the current client world.");
         }
 
+        _previewParticles.GameSpeed = GetPreviewGameSpeed();
+        _previewParticles.Density = _previewDensity;
         float dt = ParticlePreviewTiming.ScaleDelta(deltaSeconds, _previewTimeScale, _previewPaused);
         if (_previewLoop && dt > 0)
         {
@@ -1837,7 +2150,17 @@ public class ParticleEffectsManager
             }
         }
 
+        _previewParticles.Update(dt);
         DrawPreviewViewport(id, key, emitters, selectedParticleProperties, dt);
+    }
+
+    // Matches the engine pools: currentGamespeed = Calendar.SpeedOfTime / 60 (normally ~1). Particle lifetime
+    // and physics are coupled to this, so the preview reads it to stay in sync with the live game.
+    private float GetPreviewGameSpeed()
+    {
+        float speedOfTime = _api.World?.Calendar?.SpeedOfTime ?? 60f;
+        if (!float.IsFinite(speedOfTime) || speedOfTime <= 0f) return 1f;
+        return speedOfTime / 60f;
     }
 
     private void DrawManualReferencePicker(string id, string key)
@@ -1953,27 +2276,37 @@ public class ParticleEffectsManager
             meshInstances.Add(new DevToolsPreviewMeshInstance(referenceModel.Mesh, identity));
         }
 
+        // Particles are simulated on the CPU but rendered as camera-facing billboards into the same offscreen
+        // framebuffer as the reference model (additive soft quads / opaque cubes), so the preview matches the
+        // in-game look. The draw-list path can't do additive blending (VSImGui rejects ImGui draw callbacks).
+        List<DevToolsPreviewBillboard> billboards = [];
+        _previewParticles.CollectBillboards(billboards);
+
         DevToolsPreview3DRenderer previewRenderer = EnsurePreviewRenderer3D();
         int textureId = previewRenderer.RenderToTexture(
             max.X - min.X,
             max.Y - min.Y,
             previewCamera,
             meshInstances,
-            deltaSeconds,
+            billboards,
             out string? skipReason);
         if (textureId > 0)
         {
             drawList.AddImage(new IntPtr(textureId), min, max, new System.Numerics.Vector2(0f, 1f), new System.Numerics.Vector2(1f, 0f));
             SaveParticleViewportScreenshotIfRequested(textureId, max.X - min.X, max.Y - min.Y, key);
         }
-        else if (!string.IsNullOrWhiteSpace(skipReason))
+        else
         {
             if (_previewScreenshotRequested)
             {
                 _previewScreenshotRequested = false;
-                _previewStatus = $"Particle viewport screenshot failed: preview skipped ({skipReason}).";
+                _previewStatus = $"Screenshot failed: preview not rendered ({skipReason}).";
             }
-            drawList.AddText(min + new System.Numerics.Vector2(12f, 90f), text, $"Preview render skipped: {skipReason}");
+
+            if (!string.IsNullOrWhiteSpace(skipReason) && !skipReason.Equals("nothing to render", StringComparison.OrdinalIgnoreCase))
+            {
+                drawList.AddText(min + new System.Numerics.Vector2(12f, 90f), text, $"Preview render skipped: {skipReason}");
+            }
         }
 
         drawList.PushClipRect(min, max, true);
@@ -2006,7 +2339,7 @@ public class ParticleEffectsManager
 
         drawList.PopClipRect();
 
-        drawList.AddText(min + new System.Numerics.Vector2(12f, 10f), text, $"{previewRenderer.ParticleCount} engine preview particles");
+        drawList.AddText(min + new System.Numerics.Vector2(12f, 10f), text, $"{_previewParticles.Count} preview particles");
         string referenceText = referenceModel == null
             ? "Reference model: none"
             : $"Reference model: {referenceModel.Label}";
@@ -2679,6 +3012,7 @@ public class ParticleEffectsManager
     {
         _previewEffectKey = key;
         _previewRenderer3D?.ResetParticles();
+        _previewParticles.Clear();
         _previewEmitAccumulator = 0;
         _previewRuntimeSeconds = 0;
         _previewStatus = "";
@@ -2755,13 +3089,12 @@ public class ParticleEffectsManager
             return EmitPreviewParticles(emitters, intensity, GetPreviewParticleOrigin(selectedVariant.ReferenceKey));
         }
 
-        DevToolsPreview3DRenderer previewRenderer = EnsurePreviewRenderer3D();
         BlockPos tickPos = GetPreviewRuntimeTickPos(clientApi);
         Vec3d worldToPreviewOffset = new(-tickPos.X, -tickPos.InternalY, -tickPos.Z);
         PreviewAsyncParticleManager previewManager = new(
             clientApi.World.BlockAccessor,
-            previewRenderer,
-            _previewTarget,
+            _previewParticles,
+            clientApi,
             worldToPreviewOffset,
             new Vec3f(_previewVelocityX, _previewVelocityY, _previewVelocityZ),
             _previewWindEnabled);
@@ -2844,13 +3177,16 @@ public class ParticleEffectsManager
 
     private int EmitPreviewParticles(IReadOnlyList<ParticleEffectEntry> emitters, float intensity, Vector3 origin)
     {
-        List<AdvancedParticleProperties> prepared = new(emitters.Count);
+        if (_api is not ICoreClientAPI clientApi) return 0;
+
+        int spawned = 0;
         for (int emitterIndex = 0; emitterIndex < emitters.Count; emitterIndex++)
         {
-            prepared.Add(PrepareEnginePreviewParticle(emitters[emitterIndex].Properties, intensity, origin));
+            AdvancedParticleProperties prepared = PrepareEnginePreviewParticle(emitters[emitterIndex].Properties, intensity, origin);
+            spawned += _previewParticles.Spawn(prepared, clientApi);
         }
 
-        return EnsurePreviewRenderer3D().SpawnParticles(prepared, _previewTarget);
+        return spawned;
     }
 
     private AdvancedParticleProperties PrepareEnginePreviewParticle(AdvancedParticleProperties particleProperties, float intensity, Vector3 origin)
@@ -3052,8 +3388,8 @@ public class ParticleEffectsManager
 
     private sealed class PreviewAsyncParticleManager(
         IBlockAccessor blockAccess,
-        DevToolsPreview3DRenderer previewRenderer,
-        Vector3 cameraPosition,
+        PreviewParticleSystem previewParticles,
+        ICoreClientAPI capi,
         Vec3d worldToPreviewOffset,
         Vec3f extraVelocity,
         bool windEnabled) : IAsyncParticleManager
@@ -3073,12 +3409,18 @@ public class ParticleEffectsManager
 
         public int ParticlesAlive(EnumParticleModel model)
         {
-            return previewRenderer.ParticleCountFor(model);
+            return previewParticles.Count;
         }
 
         public int Flush()
         {
-            return previewRenderer.SpawnParticleProviders(_captured, cameraPosition);
+            int spawned = 0;
+            foreach (IParticlePropertiesProvider provider in _captured)
+            {
+                spawned += previewParticles.Spawn(provider, capi);
+            }
+
+            return spawned;
         }
 
         private IParticlePropertiesProvider CreatePreviewProvider(IParticlePropertiesProvider particleProperties)
