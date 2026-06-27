@@ -51,11 +51,11 @@ internal sealed class DevToolsEditorDiagnostics(string editorName)
     {
         if (!HasMessage) return;
 
-        ImGui.SeparatorText("Diagnostics");
+        ImGui.SeparatorText(DevToolsLang.Get("ui.diagnostics.title", "Diagnostics"));
         ImGui.TextColored(GetColor(), $"{editorName}: {_summary}");
         ImGui.TextDisabled(_updatedAt == default
-            ? "No timestamp"
-            : $"Last update: {_updatedAt:HH:mm:ss}");
+            ? DevToolsLang.Get("ui.diagnostics.noTimestamp", "No timestamp")
+            : DevToolsLang.Get("ui.diagnostics.lastUpdated", "Last update: {0:HH:mm:ss}", _updatedAt));
 
         if (!string.IsNullOrWhiteSpace(_details))
         {
@@ -65,11 +65,11 @@ internal sealed class DevToolsEditorDiagnostics(string editorName)
             }
             else
             {
-                ImGui.TextDisabled("Enable Diagnostics in the top toolbar for details.");
+                ImGui.TextDisabled(DevToolsLang.Get("ui.diagnostics.enableHint", "Enable Diagnostics in the top toolbar for details."));
             }
         }
 
-        if (ImGui.SmallButton($"Clear diagnostics##{id}"))
+        if (ImGui.SmallButton(DevToolsLang.Label("ui.diagnostics.clear", "Clear diagnostics", id)))
         {
             Clear();
         }

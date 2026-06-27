@@ -61,13 +61,13 @@ public sealed partial class DebugWindowManager
 
     private void DrawCommandPaletteButton()
     {
-        if (ImGui.Button("Command##devtools-command-palette"))
+        if (ImGui.Button(DevToolsLang.Label("ui.commandPalette.button", "Command", "devtools-command-palette")))
         {
             OpenCommandPalette();
         }
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Open global command palette (Ctrl+P).");
+            ImGui.SetTooltip(DevToolsLang.Get("ui.commandPalette.tooltip", "Open global command palette (Ctrl+P)."));
         }
     }
 
@@ -112,7 +112,7 @@ public sealed partial class DebugWindowManager
             _commandPaletteFocusSearch = false;
         }
 
-        if (ImGui.InputTextWithHint("##devtools-command-palette-filter", "Search tabs, blocks, items, entities, recipes, worldgen, patches...", ref _commandPaletteFilter, 256))
+        if (ImGui.InputTextWithHint("##devtools-command-palette-filter", DevToolsLang.Get("ui.commandPalette.searchHint", "Search tabs, blocks, items, entities, recipes, worldgen, patches..."), ref _commandPaletteFilter, 256))
         {
             _commandPaletteSelectedIndex = 0;
         }
@@ -203,24 +203,25 @@ public sealed partial class DebugWindowManager
         bool includeAssets = normalizedFilter.Length >= 2;
         List<DevToolsCommandPaletteEntry> entries = [];
 
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Animations", "Tab", "animations animation entity model", DevToolsTab.Animations, () => RequestDevToolsTab(DevToolsTab.Animations));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Recipe Editor", "Tab", "recipe recipes crafting", DevToolsTab.RecipeEditor, () => RequestDevToolsTab(DevToolsTab.RecipeEditor));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Particles", "Tab", "particle particles effects", DevToolsTab.Particles, () => RequestDevToolsTab(DevToolsTab.Particles));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Transforms", "Tab", "transform item block model placement", DevToolsTab.Transforms, () => RequestDevToolsTab(DevToolsTab.Transforms));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Models", "Tab", "model models shape shapes cube editor uv texture", DevToolsTab.Models, () => RequestDevToolsTab(DevToolsTab.Models));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open ConfigLib", "Tab", "config configlib modconfig", DevToolsTab.ConfigLib, () => RequestDevToolsTab(DevToolsTab.ConfigLib));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Block/Item JSON", "Tab", "block item json attributes source authoring", DevToolsTab.BlockItemJson, () => RequestDevToolsTab(DevToolsTab.BlockItemJson));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Loot/Drops", "Tab", "loot drops trade table", DevToolsTab.LootDrops, () => RequestDevToolsTab(DevToolsTab.LootDrops));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Worldgen", "Tab", "worldgen deposits block patches landforms strata", DevToolsTab.Worldgen, () => RequestDevToolsTab(DevToolsTab.Worldgen));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Patches", "Tab", "patches jsonpatcheslib patch creator", DevToolsTab.Patches, () => RequestDevToolsTab(DevToolsTab.Patches));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Entity AI", "Tab", "entity ai taskai behavior tasks", DevToolsTab.EntityAi, () => RequestDevToolsTab(DevToolsTab.EntityAi));
-        AddCommandPaletteEntry(entries, normalizedFilter, "Open Settings", "Tab", "settings theme font colors", DevToolsTab.Settings, () => RequestDevToolsTab(DevToolsTab.Settings));
+        string tabCategory = DevToolsLang.Get("ui.commandPalette.category.tab", "Tab");
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.animations", "Open Animations"), tabCategory, "animations animation entity model", DevToolsTab.Animations, () => RequestDevToolsTab(DevToolsTab.Animations));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.recipeEditor", "Open Recipe Editor"), tabCategory, "recipe recipes crafting", DevToolsTab.RecipeEditor, () => RequestDevToolsTab(DevToolsTab.RecipeEditor));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.particles", "Open Particles"), tabCategory, "particle particles effects", DevToolsTab.Particles, () => RequestDevToolsTab(DevToolsTab.Particles));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.transforms", "Open Transforms"), tabCategory, "transform item block model placement", DevToolsTab.Transforms, () => RequestDevToolsTab(DevToolsTab.Transforms));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.models", "Open Models"), tabCategory, "model models shape shapes cube editor uv texture", DevToolsTab.Models, () => RequestDevToolsTab(DevToolsTab.Models));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.configLib", "Open ConfigLib"), tabCategory, "config configlib modconfig", DevToolsTab.ConfigLib, () => RequestDevToolsTab(DevToolsTab.ConfigLib));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.blockItemJson", "Open Block/Item JSON"), tabCategory, "block item json attributes source authoring", DevToolsTab.BlockItemJson, () => RequestDevToolsTab(DevToolsTab.BlockItemJson));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.lootDrops", "Open Loot/Drops"), tabCategory, "loot drops trade table", DevToolsTab.LootDrops, () => RequestDevToolsTab(DevToolsTab.LootDrops));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.worldgen", "Open Worldgen"), tabCategory, "worldgen deposits block patches landforms strata", DevToolsTab.Worldgen, () => RequestDevToolsTab(DevToolsTab.Worldgen));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.patches", "Open Patches"), tabCategory, "patches jsonpatcheslib patch creator", DevToolsTab.Patches, () => RequestDevToolsTab(DevToolsTab.Patches));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.entityAi", "Open Entity AI"), tabCategory, "entity ai taskai behavior tasks", DevToolsTab.EntityAi, () => RequestDevToolsTab(DevToolsTab.EntityAi));
+        AddCommandPaletteEntry(entries, normalizedFilter, DevToolsLang.Get("ui.commandPalette.open.settings", "Open Settings"), tabCategory, "settings theme font colors", DevToolsTab.Settings, () => RequestDevToolsTab(DevToolsTab.Settings));
 
         if (!includeAssets)
         {
             _commandPaletteStatus = _commandPaletteRecentEntries.Count > 0
-                ? "Recent commands first. Type at least two characters to search assets."
-                : "Type at least two characters to search assets.";
+                ? DevToolsLang.Get("ui.commandPalette.status.recentTypeAssets", "Recent commands first. Type at least two characters to search assets.")
+                : DevToolsLang.Get("ui.commandPalette.status.typeAssets", "Type at least two characters to search assets.");
             return PrependCommandPaletteRecents(entries, normalizedFilter);
         }
 
