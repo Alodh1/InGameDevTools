@@ -183,6 +183,7 @@ public sealed partial class DebugWindowManager
         DrawSettingsFontControls(ref changed);
         DrawSettingsAccessibilityControls(ref changed);
         DrawSettingsAnimationControls(ref changed);
+        DrawSettingsSafetyBackupControls(ref changed);
         DrawSettingsAdvancedColors(ref changed);
         DrawSettingsImportExport(ref changed);
 
@@ -193,6 +194,7 @@ public sealed partial class DebugWindowManager
         {
             _devToolsConfig.ThemePreset = string.IsNullOrWhiteSpace(_devToolsConfig.ThemePreset) ? SettingsPresetCustom : _devToolsConfig.ThemePreset;
             _devToolsConfig.Normalize();
+            ConfigureAuthoredFileBackups(_devToolsConfig);
             QueueDevToolsConfigSave(languageChanged
                 ? DevToolsLang.Get("ui.settings.status.languageUpdated", "Language setting updated.")
                 : DevToolsLang.Get("ui.settings.status.updated", "Settings updated."));
@@ -496,6 +498,60 @@ public sealed partial class DebugWindowManager
             ImGui.PopID();
         }
         ImGui.EndTable();
+    }
+
+    private void DrawSettingsSafetyBackupControls(ref bool changed)
+    {
+        if (!ImGui.CollapsingHeader(DevToolsLang.Label("ui.settings.safetyBackups", "Safety backups", "settings-safety-backups"))) return;
+
+        bool recovery = _devToolsConfig.EnableRecoveryAutosave;
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.recoveryAutosave", "Recovery autosave", "settings-recovery-autosave"), ref recovery))
+        {
+            _devToolsConfig.EnableRecoveryAutosave = recovery;
+            changed = true;
+        }
+
+        int delay = _devToolsConfig.RecoveryAutosaveDelaySeconds;
+        ImGui.SetNextItemWidth(180f);
+        if (ImGui.SliderInt(DevToolsLang.Label("ui.settings.recoveryDelay", "Recovery delay seconds", "settings-recovery-delay"), ref delay, 1, 120))
+        {
+            _devToolsConfig.RecoveryAutosaveDelaySeconds = Math.Clamp(delay, 1, 120);
+            changed = true;
+        }
+
+        bool backups = _devToolsConfig.EnableOverwriteBackups;
+        if (ImGui.Checkbox(DevToolsLang.Label("ui.settings.overwriteBackups", "Overwrite backups", "settings-overwrite-backups"), ref backups))
+        {
+            _devToolsConfig.EnableOverwriteBackups = backups;
+            ConfigureAuthoredFileBackups(_devToolsConfig);
+            changed = true;
+        }
+
+        int retention = _devToolsConfig.OverwriteBackupRetentionPerFile;
+        ImGui.SetNextItemWidth(180f);
+        if (ImGui.SliderInt(DevToolsLang.Label("ui.settings.backupRetention", "Backups per file", "settings-backup-retention"), ref retention, 1, 200))
+        {
+            _devToolsConfig.OverwriteBackupRetentionPerFile = Math.Clamp(retention, 1, 200);
+            ConfigureAuthoredFileBackups(_devToolsConfig);
+            changed = true;
+        }
+
+        ImGui.TextDisabled(DevToolsLang.Get("ui.settings.safetyBackups.status", "Recovery snapshots: {0}", _recoveryManager.ListSnapshots().Count));
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.reviewRecovery", "Review recovery", "settings-review-recovery")))
+        {
+            _openRecoveryReviewPopup = true;
+        }
+        ImGui.SameLine();
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.openRecoveryFolder", "Open recovery folder", "settings-open-recovery-folder")))
+        {
+            OpenDevToolsFolder(_recoveryManager.Root);
+        }
+        ImGui.SameLine();
+        if (ImGui.Button(DevToolsLang.Label("ui.settings.openBackupsFolder", "Open backups folder", "settings-open-backups-folder")))
+        {
+            s_authoredFileBackupManager ??= new DevToolsFileBackupManager(GetToolAuthoredAssetRoot("backups"));
+            OpenDevToolsFolder(s_authoredFileBackupManager.Root);
+        }
     }
 
     private void DrawSettingsImportExport(ref bool changed)

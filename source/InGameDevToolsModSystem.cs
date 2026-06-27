@@ -257,6 +257,10 @@ public sealed class DevToolsConfig
     public bool ShowDiagnostics { get; set; }
     public bool AutoRuntimeApply { get; set; }
     public bool WriteLiveBackups { get; set; }
+    public bool EnableRecoveryAutosave { get; set; } = true;
+    public int RecoveryAutosaveDelaySeconds { get; set; } = 5;
+    public bool EnableOverwriteBackups { get; set; } = true;
+    public int OverwriteBackupRetentionPerFile { get; set; } = 10;
     public string ThemePreset { get; set; } = PresetVintageBrown;
     public string ViewportBackground { get; set; } = DevToolsViewportBackground.NameDark;
     public bool ApplyStyleGlobally { get; set; }
@@ -281,6 +285,8 @@ public sealed class DevToolsConfig
     {
         UiScale = ClampOrDefault(UiScale, 0.75f, 1.75f, 1f);
         Language = DevToolsLang.NormalizeConfiguredLanguageCode(Language);
+        RecoveryAutosaveDelaySeconds = Math.Clamp(RecoveryAutosaveDelaySeconds <= 0 ? 5 : RecoveryAutosaveDelaySeconds, 1, 120);
+        OverwriteBackupRetentionPerFile = Math.Clamp(OverwriteBackupRetentionPerFile <= 0 ? 10 : OverwriteBackupRetentionPerFile, 1, 200);
         FontSize = Math.Clamp(FontSize <= 0 ? 16 : FontSize, 12, 28);
         ThemePreset = string.IsNullOrWhiteSpace(ThemePreset) ? PresetVintageBrown : ThemePreset.Trim();
         ViewportBackground = DevToolsViewportBackground.NormalizeName(ViewportBackground);
