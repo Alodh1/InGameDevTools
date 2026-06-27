@@ -2246,7 +2246,7 @@ public sealed partial class DebugWindowManager
             return firepitPlacement;
         }
 
-        if (TryBuildTrapTransformPlacement(asset, baseAttribute, reference, transform, mesh, out TransformPreviewPlacement trapPlacement))
+        if (TryBuildTrapTransformPlacement(asset, baseAttribute, reference, transform, mesh) is { } trapPlacement)
         {
             return trapPlacement;
         }
@@ -2293,7 +2293,7 @@ public sealed partial class DebugWindowManager
 
         if (reference != null &&
             ReferenceInventoryTransformMatches(reference, attributeCode, out string configuredAttribute) &&
-            TryBuildInventoryTransformPlacement(reference, configuredAttribute, transform, mesh, out TransformPreviewPlacement inventoryPlacement))
+            TryBuildInventoryTransformPlacement(reference, configuredAttribute, transform, mesh) is { } inventoryPlacement)
         {
             return inventoryPlacement;
         }
@@ -2451,12 +2451,11 @@ public sealed partial class DebugWindowManager
         return true;
     }
 
-    private static bool TryBuildTrapTransformPlacement(TransformAssetEntry asset, string baseAttribute, Block? reference, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    private static TransformPreviewPlacement? TryBuildTrapTransformPlacement(TransformAssetEntry asset, string baseAttribute, Block? reference, ModelTransform transform, MeshData mesh)
     {
         if (!baseAttribute.Contains("trap", StringComparison.OrdinalIgnoreCase))
         {
-            placement = TransformPreviewPlacement.Empty;
-            return false;
+            return null;
         }
 
         // BlockEntityAnimalTrap.genTransformationMatrices: baitTransform * blockRotation * inTrapTransform.
@@ -2472,8 +2471,7 @@ public sealed partial class DebugWindowManager
         string baitDetail = reference?.Attributes?["baitTransform"].Exists == true
             ? $"baitTransform from {reference.Code}"
             : "no reference baitTransform";
-        placement = new(matrix, TransformPlacementPoint(matrix, new Vector3(0.5f, 0f, 0.5f)), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "animal trap bait renderer", $"{baitDetail}, default placement rotation"));
-        return true;
+        return new TransformPreviewPlacement(matrix, TransformPlacementPoint(matrix, new Vector3(0.5f, 0f, 0.5f)), true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "animal trap bait renderer", $"{baitDetail}, default placement rotation"));
     }
 
     private bool TryBuildGroundStorageTransformPlacement(TransformAssetEntry asset, string baseAttribute, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
@@ -2810,14 +2808,13 @@ public sealed partial class DebugWindowManager
         };
     }
 
-    private bool TryBuildInventoryTransformPlacement(Block reference, string configuredAttribute, ModelTransform transform, MeshData mesh, out TransformPreviewPlacement placement)
+    private TransformPreviewPlacement? TryBuildInventoryTransformPlacement(Block reference, string configuredAttribute, ModelTransform transform, MeshData mesh)
     {
         mesh.ModelTransform(transform);
         int slotIndex = Math.Clamp(_transformPreviewSlotIndex, 0, GetReferenceSlotCount(reference) - 1);
         if (!TryGetReferenceSlotCenter(reference, slotIndex, out Vector3 center))
         {
-            placement = TransformPreviewPlacement.Empty;
-            return false;
+            return null;
         }
 
         Vector3 slotRotation = ReadRotationDegrees(GetRotationByIndex(reference, slotIndex));
@@ -2831,8 +2828,7 @@ public sealed partial class DebugWindowManager
             .RotateY(blockRotation.Y * GameMath.DEG2RAD)
             .RotateZ(blockRotation.Z * GameMath.DEG2RAD);
 
-        placement = new(matrix, center, true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "inventoryTransformAttribute", $"{configuredAttribute} slot {slotIndex}"));
-        return true;
+        return new TransformPreviewPlacement(matrix, center, true, FormatPlacementStatus(TransformPreviewAccuracy.ExactRuntime, "inventoryTransformAttribute", $"{configuredAttribute} slot {slotIndex}"));
     }
 
     private static bool TryGetReferenceSlotCenter(Block reference, int index, out Vector3 center)
