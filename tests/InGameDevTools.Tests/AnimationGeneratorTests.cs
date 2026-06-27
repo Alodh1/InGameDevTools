@@ -1,4 +1,5 @@
 using InGameDevTools.Animations;
+using Newtonsoft.Json.Linq;
 using System.Collections;
 using System.Reflection;
 using System.Runtime.Serialization;
@@ -19,6 +20,7 @@ public sealed class AnimationGeneratorTests
     private static readonly Type ParamsType = ManagerType.GetNestedType("VanillaGenParams", BindingFlags.NonPublic)!;
     private static readonly Type ModeEnum = ManagerType.GetNestedType("VanillaGenMode", BindingFlags.NonPublic)!;
     private static readonly Type ActionEnum = ManagerType.GetNestedType("VanillaGenAction", BindingFlags.NonPublic)!;
+    private static readonly Type ExportServiceType = ManagerType.GetNestedType("VanillaAnimationExportService", BindingFlags.NonPublic)!;
 
     [Theory]
     [InlineData("Sine", 0.0, 0.0)]
@@ -523,6 +525,33 @@ public sealed class AnimationGeneratorTests
     }
 
     [Fact]
+    public void Export_CompletesPartialTransformGroups()
+    {
+        AnimationKeyFrameElement element = new()
+        {
+            OffsetY = 2.5,
+            RotationZ = 15,
+            StretchX = 1.25
+        };
+
+        JObject token = InvokeToVanillaElementToken(element);
+
+        Assert.Contains("offsetX", token.Properties().Select(property => property.Name));
+        Assert.Contains("rotationX", token.Properties().Select(property => property.Name));
+        Assert.Contains("stretchY", token.Properties().Select(property => property.Name));
+        Assert.Equal(0.0, token.Value<double>("offsetX"));
+        Assert.Equal(2.5, token.Value<double>("offsetY"));
+        Assert.Equal(0.0, token.Value<double>("offsetZ"));
+        Assert.Equal(0.0, token.Value<double>("rotationX"));
+        Assert.Equal(0.0, token.Value<double>("rotationY"));
+        Assert.Equal(15.0, token.Value<double>("rotationZ"));
+        Assert.Equal(1.25, token.Value<double>("stretchX"));
+        Assert.Equal(1.0, token.Value<double>("stretchY"));
+        Assert.Equal(1.0, token.Value<double>("stretchZ"));
+        Assert.False(token.ContainsKey("originX"));
+    }
+
+    [Fact]
     public void EndHandling_AutoLoopsCyclesAndHoldsDeath()
     {
         object gait = MakeParams(30, 12);
@@ -724,6 +753,12 @@ public sealed class AnimationGeneratorTests
     {
         MethodInfo method = ManagerType.GetMethod("BuildVanillaGenKeyFrames", StaticFlags)!;
         return (Array)method.Invoke(null, [parameters, channels])!;
+    }
+
+    private static JObject InvokeToVanillaElementToken(AnimationKeyFrameElement element)
+    {
+        MethodInfo method = ExportServiceType.GetMethod("ToVanillaElementToken", StaticFlags)!;
+        return (JObject)method.Invoke(null, [element, null])!;
     }
 
     private static IList NewChannelList()

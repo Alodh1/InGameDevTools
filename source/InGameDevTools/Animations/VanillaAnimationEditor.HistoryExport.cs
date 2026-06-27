@@ -566,18 +566,23 @@ public sealed partial class DebugWindowManager
         {
             JObject token = sourceToken?.DeepClone() as JObject ?? new JObject();
             RemoveKnownAnimationElementProperties(token);
-            AddNullable(token, "offsetX", element.OffsetX);
-            AddNullable(token, "offsetY", element.OffsetY);
-            AddNullable(token, "offsetZ", element.OffsetZ);
-            AddNullable(token, "stretchX", element.StretchX);
-            AddNullable(token, "stretchY", element.StretchY);
-            AddNullable(token, "stretchZ", element.StretchZ);
-            AddNullable(token, "rotationX", element.RotationX);
-            AddNullable(token, "rotationY", element.RotationY);
-            AddNullable(token, "rotationZ", element.RotationZ);
-            AddNullable(token, "originX", element.OriginX);
-            AddNullable(token, "originY", element.OriginY);
-            AddNullable(token, "originZ", element.OriginZ);
+            (double? offsetX, double? offsetY, double? offsetZ) = CompleteNullableGroup(element.OffsetX, element.OffsetY, element.OffsetZ, 0);
+            (double? stretchX, double? stretchY, double? stretchZ) = CompleteNullableGroup(element.StretchX, element.StretchY, element.StretchZ, 1);
+            (double? rotationX, double? rotationY, double? rotationZ) = CompleteNullableGroup(element.RotationX, element.RotationY, element.RotationZ, 0);
+            (double? originX, double? originY, double? originZ) = CompleteNullableGroup(element.OriginX, element.OriginY, element.OriginZ, 0);
+
+            AddNullable(token, "offsetX", offsetX);
+            AddNullable(token, "offsetY", offsetY);
+            AddNullable(token, "offsetZ", offsetZ);
+            AddNullable(token, "stretchX", stretchX);
+            AddNullable(token, "stretchY", stretchY);
+            AddNullable(token, "stretchZ", stretchZ);
+            AddNullable(token, "rotationX", rotationX);
+            AddNullable(token, "rotationY", rotationY);
+            AddNullable(token, "rotationZ", rotationZ);
+            AddNullable(token, "originX", originX);
+            AddNullable(token, "originY", originY);
+            AddNullable(token, "originZ", originZ);
             if (element.RotShortestDistanceX) token["rotShortestDistanceX"] = true;
             if (element.RotShortestDistanceY) token["rotShortestDistanceY"] = true;
             if (element.RotShortestDistanceZ) token["rotShortestDistanceZ"] = true;
@@ -647,6 +652,16 @@ public sealed partial class DebugWindowManager
             {
                 token[property] = value.Value;
             }
+        }
+
+        private static (double? X, double? Y, double? Z) CompleteNullableGroup(double? x, double? y, double? z, double fallback)
+        {
+            if (!x.HasValue && !y.HasValue && !z.HasValue)
+            {
+                return (null, null, null);
+            }
+
+            return (x ?? fallback, y ?? fallback, z ?? fallback);
         }
 
         private static JArray? GetSourceArray(JToken? sourceToken, params string[] names)
