@@ -230,6 +230,7 @@ public sealed partial class DebugWindowManager
     private bool _modelOpenDiscardPopup;
     private ModelElementData? _modelReparentSource;
     private ModelElementData? _modelDragDropElement;
+    private ModelShapeAssetEntry? _modelDragDropShapeEntry;
     private ModelShapeAssetEntry? _modelBrowserFileActionEntry;
     private string _modelBrowserPendingFilePopup = "";
     private string _modelBrowserRenameName = "";
@@ -942,9 +943,10 @@ public sealed partial class DebugWindowManager
                     if (ImGui.IsItemHovered())
                     {
                         ImGui.SetTooltip(entry.Authored
-                            ? $"Authored: {entry.Display}"
-                            : entry.Display);
+                            ? $"Authored: {entry.Display}\nDrag onto the element tree to import it into the open shape."
+                            : $"{entry.Display}\nDrag onto the element tree to import it into the open shape.");
                     }
+                    DrawModelBrowserEntryDragSource(entry, label);
                     DrawModelBrowserEntryContextMenu(entry, shown);
                 }
                 DrawModelBrowserFileActionPopups();
@@ -972,6 +974,33 @@ public sealed partial class DebugWindowManager
         return entry.Authored ? $"{label}  A" : label;
     }
 
+    private static bool ModelShapeEntriesMatch(ModelShapeAssetEntry left, ModelShapeAssetEntry right)
+    {
+        return left.Authored == right.Authored &&
+            string.Equals(left.Domain, right.Domain, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(left.AssetPath, right.AssetPath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ModelImportSourceLabel(ModelShapeAssetEntry entry)
+    {
+        return entry.Authored ? $"{entry.Display} [authored]" : entry.Display;
+    }
+
+    private void DrawModelBrowserEntryDragSource(ModelShapeAssetEntry entry, string label)
+    {
+        if (_modelDoc == null) return;
+
+        if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left, 6f))
+        {
+            _modelDragDropShapeEntry ??= entry;
+        }
+
+        if (_modelDragDropShapeEntry != null && ModelShapeEntriesMatch(_modelDragDropShapeEntry, entry))
+        {
+            ImGui.SetTooltip($"Dragging {label}\nDrop on an element to import as a child, or at the bottom of the tree for root level.");
+        }
+    }
+
     private void DrawModelBrowserEntryContextMenu(ModelShapeAssetEntry entry, int shown)
     {
         if (!ImGui.BeginPopupContextItem($"##model-asset-menu-{shown}")) return;
@@ -986,6 +1015,12 @@ public sealed partial class DebugWindowManager
             {
                 ModelCreateAuthoredShapeCopy(entry);
             }
+            if (_modelDoc == null) ImGui.BeginDisabled();
+            if (ImGui.MenuItem("Import into open shape"))
+            {
+                ModelImportShapeIntoCurrent(entry, _modelSelectedElement);
+            }
+            if (_modelDoc == null) ImGui.EndDisabled();
             ImGui.Separator();
             if (!entry.Authored) ImGui.BeginDisabled();
             if (ImGui.MenuItem("Rename file..."))
@@ -1611,6 +1646,22 @@ public sealed partial class DebugWindowManager
 
     private void DrawModelTreeDragDrop(ModelElementData element)
     {
+        ModelShapeAssetEntry? draggedShape = _modelDragDropShapeEntry;
+        if (draggedShape != null)
+        {
+            bool hoveredShapeTarget = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+            if (!hoveredShapeTarget) return;
+
+            string shapeDropTargetName = string.IsNullOrWhiteSpace(element.Name) ? "(unnamed)" : element.Name;
+            ImGui.SetTooltip($"Drop {ModelImportSourceLabel(draggedShape)} under {shapeDropTargetName}.");
+            if (ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+            {
+                ModelImportShapeIntoCurrent(draggedShape, element);
+                _modelDragDropShapeEntry = null;
+            }
+            return;
+        }
+
         if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left, 6f))
         {
             _modelDragDropElement ??= element;
@@ -1649,12 +1700,21 @@ public sealed partial class DebugWindowManager
     {
         ImGui.Dummy(new NVector2(Math.Max(1f, ImGui.GetContentRegionAvail().X), 24f));
         bool hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
-        if (hovered)
+        if (_modelDragDropShapeEntry != null && hovered)
+        {
+            ImGui.SetTooltip($"Drop {ModelImportSourceLabel(_modelDragDropShapeEntry)} at root level.");
+        }
+        else if (hovered)
         {
             ImGui.SetTooltip("Drop here to move the element to the root.");
         }
 
-        if (_modelDragDropElement != null && hovered && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+        if (_modelDragDropShapeEntry != null && hovered && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+        {
+            ModelImportShapeIntoCurrent(_modelDragDropShapeEntry, null);
+            _modelDragDropShapeEntry = null;
+        }
+        else if (_modelDragDropElement != null && hovered && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
         {
             ModelReparentElement(_modelDragDropElement, null);
             _modelDragDropElement = null;
@@ -1666,6 +1726,10 @@ public sealed partial class DebugWindowManager
         if (_modelDragDropElement != null && !ImGui.IsMouseDown(ImGuiMouseButton.Left))
         {
             _modelDragDropElement = null;
+        }
+        if (_modelDragDropShapeEntry != null && !ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        {
+            _modelDragDropShapeEntry = null;
         }
     }
 
@@ -2731,6 +2795,298 @@ public sealed partial class DebugWindowManager
         doc.FromAuthoredFile = entry.Authored;
         ModelSetDocument(doc);
         _modelStatus = entry.Authored ? $"Opened authored copy of {entry.Display}." : $"Opened {entry.Display}.";
+    }
+
+    private void ModelImportShapeIntoCurrent(ModelShapeAssetEntry entry, ModelElementData? parent)
+    {
+        if (_modelDoc == null)
+        {
+            _modelStatus = "Open or create a shape before importing another model.";
+            return;
+        }
+
+        if (!ModelTryLoadShapeEntryDocument(entry, out ModelDocumentData? sourceDoc, out string error) || sourceDoc == null)
+        {
+            _modelStatus = $"Could not import {entry.Display}: {error}";
+            return;
+        }
+
+        if (sourceDoc.Roots.Count == 0)
+        {
+            _modelStatus = $"Could not import {entry.Display}: source shape has no elements.";
+            return;
+        }
+
+        try
+        {
+            ModelBeginEdit();
+            ModelElementData group = ModelBuildImportedShapeGroup(
+                _modelDoc,
+                sourceDoc,
+                entry.AssetPath,
+                out int importedElements,
+                out int addedTextures,
+                out int renamedTextures);
+
+            group.Parent = parent;
+            (parent?.Children ?? _modelDoc.Roots).Add(group);
+            ModelSelectElement(group);
+            if (string.IsNullOrWhiteSpace(_modelSelectedTextureCode))
+            {
+                _modelSelectedTextureCode = _modelDoc.Textures.FirstOrDefault()?.Code ?? "";
+            }
+
+            ModelMarkChanged();
+            ModelEndEdit("Import shape");
+
+            string target = parent == null
+                ? "at root level"
+                : $"under {parent.Name}";
+            string textureSummary = addedTextures == 0
+                ? "No texture slots were added."
+                : $"{addedTextures} texture slot(s) were added{(renamedTextures > 0 ? $"; {renamedTextures} conflicting code(s) were renamed" : "")}.";
+            _modelStatus = $"Imported {importedElements} element(s) from {entry.Display} as {group.Name} {target}. {textureSummary}";
+        }
+        catch (Exception exception)
+        {
+            ModelCancelEdit();
+            _modelDiagnostics.Exception($"Could not import {entry.Display}", exception);
+            _modelStatus = $"Could not import {entry.Display}: {exception.Message}";
+        }
+    }
+
+    private bool ModelTryLoadShapeEntryDocument(ModelShapeAssetEntry entry, out ModelDocumentData? doc, out string error)
+    {
+        doc = null;
+        error = "";
+        try
+        {
+            string text = entry.Asset.ToText();
+            if (!ModelTryParseDocument(text, entry.Domain, entry.AssetPath, isNew: false, out doc, out error) || doc == null)
+            {
+                if (string.IsNullOrWhiteSpace(error)) error = "invalid shape JSON.";
+                return false;
+            }
+
+            doc.FromAuthoredFile = entry.Authored;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+    }
+
+    private static ModelElementData ModelBuildImportedShapeGroup(
+        ModelDocumentData targetDoc,
+        ModelDocumentData sourceDoc,
+        string sourceAssetPath,
+        out int importedElements,
+        out int addedTextures,
+        out int renamedTextures)
+    {
+        Dictionary<string, string> textureMap = ModelMergeImportedTextures(targetDoc, sourceDoc, out addedTextures, out renamedTextures);
+        HashSet<string> reservedNames = new(targetDoc.EnumerateElements().Select(element => element.Name), StringComparer.OrdinalIgnoreCase);
+        string groupName = ModelReserveUniqueElementName(reservedNames, ModelImportGroupBaseName(sourceAssetPath));
+
+        ModelElementData group = new()
+        {
+            Name = groupName,
+            From = [0.0, 0.0, 0.0],
+            To = [0.0, 0.0, 0.0],
+            RotationOrigin = [0.0, 0.0, 0.0]
+        };
+
+        importedElements = 0;
+        foreach (ModelElementData root in sourceDoc.Roots)
+        {
+            ModelElementData clone = root.CloneSubtree();
+            clone.Parent = group;
+            importedElements += ModelPrepareImportedElementSubtree(clone, textureMap, reservedNames);
+            group.Children.Add(clone);
+        }
+
+        ModelCenterImportedGroupPivot(group);
+        return group;
+    }
+
+    private static string ModelImportGroupBaseName(string sourceAssetPath)
+    {
+        string normalized = sourceAssetPath.Replace('\\', '/').Trim('/');
+        if (normalized.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized["shapes/".Length..].Trim('/');
+        }
+
+        string fileName = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "imported-model";
+        string baseName = ModelSanitizeFileName(Path.GetFileNameWithoutExtension(fileName));
+        return string.IsNullOrWhiteSpace(baseName) ? "imported-model" : baseName;
+    }
+
+    private static int ModelPrepareImportedElementSubtree(
+        ModelElementData element,
+        IReadOnlyDictionary<string, string> textureMap,
+        HashSet<string> reservedNames)
+    {
+        int count = 0;
+        foreach (ModelElementData node in element.EnumerateSubtree())
+        {
+            node.Name = ModelReserveUniqueElementName(reservedNames, node.Name);
+            foreach (ModelFaceData? face in node.Faces)
+            {
+                if (face == null || string.IsNullOrWhiteSpace(face.Texture)) continue;
+                if (textureMap.TryGetValue(face.Texture, out string? mappedTexture))
+                {
+                    face.Texture = mappedTexture;
+                }
+            }
+            count++;
+        }
+
+        return count;
+    }
+
+    private static void ModelCenterImportedGroupPivot(ModelElementData group)
+    {
+        if (!ModelTryGetGroupLocalBounds(group, out DevToolsPreviewBounds bounds)) return;
+
+        var center = bounds.Center;
+        double[] centerUnits =
+        [
+            Math.Round(center.X * ModelUnitsPerBlock, 6),
+            Math.Round(center.Y * ModelUnitsPerBlock, 6),
+            Math.Round(center.Z * ModelUnitsPerBlock, 6)
+        ];
+        group.From = (double[])centerUnits.Clone();
+        group.To = (double[])centerUnits.Clone();
+        group.RotationOrigin = centerUnits;
+    }
+
+    private static Dictionary<string, string> ModelMergeImportedTextures(
+        ModelDocumentData targetDoc,
+        ModelDocumentData sourceDoc,
+        out int addedTextures,
+        out int renamedTextures)
+    {
+        addedTextures = 0;
+        renamedTextures = 0;
+        Dictionary<string, string> textureMap = new(StringComparer.Ordinal);
+        HashSet<string> reservedCodes = ModelCollectUsedTextureCodes(targetDoc);
+
+        foreach (string sourceCode in ModelSourceTextureCodes(sourceDoc))
+        {
+            string sourcePath = sourceDoc.Textures.FirstOrDefault(texture => string.Equals(texture.Code, sourceCode, StringComparison.Ordinal))?.Path ?? "";
+            int[] sourceSize = ModelEffectiveTextureSize(sourceDoc, sourceCode);
+            ModelTextureEntry? targetTexture = targetDoc.Textures.FirstOrDefault(texture => string.Equals(texture.Code, sourceCode, StringComparison.Ordinal));
+
+            if (targetTexture != null && ModelImportTextureCompatible(targetDoc, targetTexture, sourcePath, sourceSize))
+            {
+                textureMap[sourceCode] = sourceCode;
+                continue;
+            }
+
+            string targetCode;
+            if (!reservedCodes.Contains(sourceCode))
+            {
+                targetCode = sourceCode;
+                reservedCodes.Add(targetCode);
+            }
+            else
+            {
+                targetCode = ModelReserveUniqueTextureCode(reservedCodes, sourceCode);
+                renamedTextures++;
+            }
+
+            targetDoc.Textures.Add(new ModelTextureEntry { Code = targetCode, Path = sourcePath });
+            ModelApplyImportedTextureSize(targetDoc, targetCode, sourceSize);
+            textureMap[sourceCode] = targetCode;
+            addedTextures++;
+        }
+
+        return textureMap;
+    }
+
+    private static HashSet<string> ModelCollectUsedTextureCodes(ModelDocumentData doc)
+    {
+        HashSet<string> codes = new(StringComparer.Ordinal);
+        foreach (ModelTextureEntry texture in doc.Textures)
+        {
+            if (!string.IsNullOrWhiteSpace(texture.Code)) codes.Add(texture.Code);
+        }
+        foreach (string code in doc.TextureSizes.Keys)
+        {
+            if (!string.IsNullOrWhiteSpace(code)) codes.Add(code);
+        }
+        foreach (ModelElementData element in doc.EnumerateElements())
+        {
+            foreach (ModelFaceData? face in element.Faces)
+            {
+                if (face != null && !string.IsNullOrWhiteSpace(face.Texture)) codes.Add(face.Texture);
+            }
+        }
+
+        return codes;
+    }
+
+    private static IEnumerable<string> ModelSourceTextureCodes(ModelDocumentData doc)
+    {
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        foreach (ModelTextureEntry texture in doc.Textures)
+        {
+            if (!string.IsNullOrWhiteSpace(texture.Code) && seen.Add(texture.Code)) yield return texture.Code;
+        }
+        foreach (string code in doc.TextureSizes.Keys)
+        {
+            if (!string.IsNullOrWhiteSpace(code) && seen.Add(code)) yield return code;
+        }
+    }
+
+    private static bool ModelImportTextureCompatible(ModelDocumentData targetDoc, ModelTextureEntry targetTexture, string sourcePath, int[] sourceSize)
+    {
+        return string.Equals(targetTexture.Path.Trim(), sourcePath.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            ModelTextureSizeEquals(ModelEffectiveTextureSize(targetDoc, targetTexture.Code), sourceSize);
+    }
+
+    private static int[] ModelEffectiveTextureSize(ModelDocumentData doc, string code)
+    {
+        if (doc.TextureSizes.TryGetValue(code, out int[]? size) && size.Length >= 2 && size[0] > 0 && size[1] > 0)
+        {
+            return [size[0], size[1]];
+        }
+
+        return [Math.Max(1, doc.TextureWidth), Math.Max(1, doc.TextureHeight)];
+    }
+
+    private static void ModelApplyImportedTextureSize(ModelDocumentData targetDoc, string targetCode, int[] sourceSize)
+    {
+        int width = sourceSize.Length >= 1 ? Math.Max(1, sourceSize[0]) : Math.Max(1, targetDoc.TextureWidth);
+        int height = sourceSize.Length >= 2 ? Math.Max(1, sourceSize[1]) : Math.Max(1, targetDoc.TextureHeight);
+        if (width != Math.Max(1, targetDoc.TextureWidth) || height != Math.Max(1, targetDoc.TextureHeight))
+        {
+            targetDoc.TextureSizes[targetCode] = [width, height];
+        }
+    }
+
+    private static bool ModelTextureSizeEquals(int[] left, int[] right)
+    {
+        return left.Length >= 2 && right.Length >= 2 && left[0] == right[0] && left[1] == right[1];
+    }
+
+    private static string ModelReserveUniqueTextureCode(HashSet<string> reservedCodes, string desired)
+    {
+        desired = string.IsNullOrWhiteSpace(desired) ? "texture" : desired.Trim();
+        if (reservedCodes.Add(desired)) return desired;
+
+        for (int counter = 2; counter < 10000; counter++)
+        {
+            string candidate = $"{desired}{counter}";
+            if (reservedCodes.Add(candidate)) return candidate;
+        }
+
+        string fallback = $"{desired}_{Guid.NewGuid():N}"[..Math.Min(desired.Length + 9, desired.Length + 33)];
+        reservedCodes.Add(fallback);
+        return fallback;
     }
 
     private void ModelCreateNewDocument()

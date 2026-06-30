@@ -7,4 +7,5 @@
 - Fixed procedural animation previews for generated shapes so passive generated surface panels no longer double-transform, and generator slider edits can live-update the currently looping generated animation.
 - Fixed shape animation export so sparse/generated keyframes complete partial XYZ transform groups before writing JSON, preventing exported animations from crashing Vintage Story's animation interpolation.
 - Improved model-editor chisel mode with a clearer placed-texture picker and automatic merging of adjacent same-texture chisel cubes.
+- Added model-editor drag import from the Shapes browser so an existing shape can be dropped into the open model as a movable grouped sub-model, with texture-code conflicts renamed automatically.
 - Added a ConfigLib scratch-config workflow that can generate a ConfigLib patch, ModConfig default JSON, and authored C# config loader from new settings.
