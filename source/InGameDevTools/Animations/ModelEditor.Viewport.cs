@@ -58,6 +58,8 @@ public sealed partial class DebugWindowManager
     private float _modelGizmoDragStartHandleDistanceUnits;
     private int _modelGizmoDragCorner = -1;
     private DevToolsPreviewBounds _modelGizmoDragLocalBounds;
+    private ModelResizeBoundsUnits _modelGizmoDragSelectionBoundsUnits;
+    private bool _modelGizmoDragSelectionResize;
     private Vector3 _modelGizmoDragAnchorUnits;
     private ModelElementData? _modelGizmoDragGroupRotationElement;
     private ModelElementData? _modelGizmoDragGroupRotationLayer;
@@ -101,6 +103,46 @@ public sealed partial class DebugWindowManager
         double[] AddTo,
         Vector3[] RemoveCorners,
         Vector3[] AddCorners);
+
+    private readonly record struct ModelResizeBoundsUnits(
+        double MinX,
+        double MinY,
+        double MinZ,
+        double MaxX,
+        double MaxY,
+        double MaxZ)
+    {
+        public double Min(int axis) => axis switch
+        {
+            0 => MinX,
+            1 => MinY,
+            _ => MinZ
+        };
+
+        public double Max(int axis) => axis switch
+        {
+            0 => MaxX,
+            1 => MaxY,
+            _ => MaxZ
+        };
+
+        public double Size(int axis) => Max(axis) - Min(axis);
+
+        public DevToolsPreviewBounds ToBlockBounds()
+        {
+            return new DevToolsPreviewBounds(
+                new Vector3((float)(MinX / ModelUnitsPerBlock), (float)(MinY / ModelUnitsPerBlock), (float)(MinZ / ModelUnitsPerBlock)),
+                new Vector3((float)(MaxX / ModelUnitsPerBlock), (float)(MaxY / ModelUnitsPerBlock), (float)(MaxZ / ModelUnitsPerBlock)));
+        }
+
+        public Vector3 CornerUnits(int corner)
+        {
+            return new Vector3(
+                (corner == 1 || corner == 2 || corner == 5 || corner == 6) ? (float)MaxX : (float)MinX,
+                (corner == 2 || corner == 3 || corner == 6 || corner == 7) ? (float)MaxY : (float)MinY,
+                corner >= 4 ? (float)MaxZ : (float)MinZ);
+        }
+    }
 
     // Local box corner index layout: bit0 = +X, bit1 = +Y, bit2 = +Z is NOT used here;
     // corners follow the same winding as AnimationElementPicking boxes.
@@ -2049,7 +2091,8 @@ public sealed partial class DebugWindowManager
         int corner = -1,
         DevToolsPreviewBounds localBounds = default,
         Vector3 anchorUnits = default,
-        NVector2[]? localAxisScreenPerUnit = null)
+        NVector2[]? localAxisScreenPerUnit = null,
+        bool selectionResize = false)
     {
         ModelBeginEdit();
         List<ModelElementData> targets = ModelGizmoTargets(element);
@@ -2071,6 +2114,7 @@ public sealed partial class DebugWindowManager
         _modelGizmoDragCorner = corner;
         _modelGizmoDragLocalBounds = localBounds;
         _modelGizmoDragAnchorUnits = anchorUnits;
+        _modelGizmoDragSelectionResize = selectionResize;
         _modelGizmoDragGroupRotationElement = _modelGizmoTool == ModelGizmoTool.Rotate &&
             face < 0 &&
             axis >= 0 &&
@@ -2091,6 +2135,10 @@ public sealed partial class DebugWindowManager
         {
             _modelGizmoDragElements.Add(ModelCaptureGizmoDragState(target));
         }
+        if (!ModelTryGetResizeBoundsUnits(_modelGizmoDragElements, out _modelGizmoDragSelectionBoundsUnits))
+        {
+            _modelGizmoDragSelectionBoundsUnits = default;
+        }
     }
 
     private void ModelEndGizmoDrag(bool commit)
@@ -2104,6 +2152,8 @@ public sealed partial class DebugWindowManager
         _modelGizmoDragStartHandleDistanceUnits = 0f;
         _modelGizmoDragCorner = -1;
         _modelGizmoDragLocalBounds = default;
+        _modelGizmoDragSelectionBoundsUnits = default;
+        _modelGizmoDragSelectionResize = false;
         _modelGizmoDragAnchorUnits = default;
         _modelGizmoDragGroupRotationElement = null;
         _modelGizmoDragGroupRotationLayer = null;
@@ -2201,6 +2251,165 @@ public sealed partial class DebugWindowManager
                 yield return descendant;
             }
         }
+    }
+
+    private static List<ModelElementData> ModelSelectionResizeElements(IEnumerable<ModelElementData> targets)
+    {
+        List<ModelElementData> elements = [];
+        foreach (ModelElementData target in targets)
+        {
+            if (target.Children.Count > 0 && !ModelElementHasRenderableBox(target))
+            {
+                foreach (ModelElementData child in target.Children)
+                {
+                    elements.AddRange(child.EnumerateSubtree());
+                }
+            }
+            else
+            {
+                elements.Add(target);
+            }
+        }
+
+        return elements;
+    }
+
+    private static bool ModelTryGetResizeBoundsUnits(IEnumerable<ModelElementData> elements, out ModelResizeBoundsUnits bounds)
+    {
+        List<ModelElementData> candidates = elements.ToList();
+        if (ModelTryGetResizeBoundsUnitsCore(candidates.Where(ModelElementHasRenderableBox).Select(element => (element.From, element.To)), out bounds))
+        {
+            return true;
+        }
+
+        return ModelTryGetResizeBoundsUnitsCore(candidates.Select(element => (element.From, element.To)), out bounds);
+    }
+
+    private static bool ModelTryGetResizeBoundsUnits(IEnumerable<ModelGizmoDragElementState> states, out ModelResizeBoundsUnits bounds)
+    {
+        List<ModelGizmoDragElementState> candidates = states.ToList();
+        if (ModelTryGetResizeBoundsUnitsCore(candidates.Where(ModelStateHasRenderableBox).Select(state => (state.From, state.To)), out bounds))
+        {
+            return true;
+        }
+
+        return ModelTryGetResizeBoundsUnitsCore(candidates.Select(state => (state.From, state.To)), out bounds);
+    }
+
+    private static bool ModelStateHasRenderableBox(ModelGizmoDragElementState state)
+    {
+        return state.To[0] - state.From[0] > 0.0001 &&
+            state.To[1] - state.From[1] > 0.0001 &&
+            state.To[2] - state.From[2] > 0.0001 &&
+            state.Element.Faces.Any(face => face != null);
+    }
+
+    private static bool ModelTryGetResizeBoundsUnitsCore(IEnumerable<(double[] From, double[] To)> boxes, out ModelResizeBoundsUnits bounds)
+    {
+        double minX = double.PositiveInfinity;
+        double minY = double.PositiveInfinity;
+        double minZ = double.PositiveInfinity;
+        double maxX = double.NegativeInfinity;
+        double maxY = double.NegativeInfinity;
+        double maxZ = double.NegativeInfinity;
+        bool any = false;
+
+        foreach ((double[] from, double[] to) in boxes)
+        {
+            minX = Math.Min(minX, Math.Min(from[0], to[0]));
+            minY = Math.Min(minY, Math.Min(from[1], to[1]));
+            minZ = Math.Min(minZ, Math.Min(from[2], to[2]));
+            maxX = Math.Max(maxX, Math.Max(from[0], to[0]));
+            maxY = Math.Max(maxY, Math.Max(from[1], to[1]));
+            maxZ = Math.Max(maxZ, Math.Max(from[2], to[2]));
+            any = true;
+        }
+
+        bounds = any
+            ? new ModelResizeBoundsUnits(minX, minY, minZ, maxX, maxY, maxZ)
+            : default;
+        return any;
+    }
+
+    private static bool ModelApplySelectionAxisScale(
+        IEnumerable<ModelGizmoDragElementState> states,
+        ModelResizeBoundsUnits bounds,
+        int axis,
+        bool positiveFace,
+        double units)
+    {
+        if (!ModelTryGetSelectionAxisScale(bounds, axis, positiveFace, units, out Vector3 anchorUnits, out Vector3 scale))
+        {
+            return false;
+        }
+
+        foreach (ModelGizmoDragElementState state in states)
+        {
+            ModelApplyAnchoredScale(state, anchorUnits, scale);
+        }
+
+        return true;
+    }
+
+    private static void ModelApplyIndependentFaceDelta(
+        IEnumerable<ModelGizmoDragElementState> states,
+        int axis,
+        bool positiveFace,
+        double units)
+    {
+        axis = Math.Clamp(axis, 0, 2);
+        foreach (ModelGizmoDragElementState state in states)
+        {
+            if (positiveFace)
+            {
+                state.Element.To[axis] = Math.Max(state.From[axis], state.To[axis] + units);
+            }
+            else
+            {
+                state.Element.From[axis] = Math.Min(state.To[axis], state.From[axis] + units);
+            }
+        }
+    }
+
+    private static bool ModelTryGetSelectionAxisScale(
+        ModelResizeBoundsUnits bounds,
+        int axis,
+        bool positiveFace,
+        double units,
+        out Vector3 anchorUnits,
+        out Vector3 scale)
+    {
+        axis = Math.Clamp(axis, 0, 2);
+        double anchor = positiveFace ? bounds.Min(axis) : bounds.Max(axis);
+        double draggedStart = positiveFace ? bounds.Max(axis) : bounds.Min(axis);
+        double oldDistance = draggedStart - anchor;
+        if (Math.Abs(oldDistance) < 0.000001)
+        {
+            anchorUnits = Vector3.Zero;
+            scale = Vector3.One;
+            return false;
+        }
+
+        double factor = Math.Clamp((draggedStart + units - anchor) / oldDistance, 0.02, 64.0);
+        anchorUnits = new Vector3((float)bounds.MinX, (float)bounds.MinY, (float)bounds.MinZ);
+        scale = Vector3.One;
+        switch (axis)
+        {
+            case 0:
+                anchorUnits.X = (float)anchor;
+                scale.X = (float)factor;
+                break;
+            case 1:
+                anchorUnits.Y = (float)anchor;
+                scale.Y = (float)factor;
+                break;
+            default:
+                anchorUnits.Z = (float)anchor;
+                scale.Z = (float)factor;
+                break;
+        }
+
+        return true;
     }
 
     private static void ModelApplyUniformScale(ModelGizmoDragElementState state, double scale)
@@ -2478,12 +2687,29 @@ public sealed partial class DebugWindowManager
             return DrawModelGroupCornerResizeGizmo(drawList, camera, element, localBounds, hovered);
         }
 
-        DevToolsPreviewBounds groupBounds = ModelElementsWorldBounds(targets);
+        bool selectionResize = targets.Count > 1;
+        List<ModelElementData> selectionResizeElements = selectionResize ? ModelSelectionResizeElements(targets) : [];
+        ModelResizeBoundsUnits selectionBoundsUnits = default;
+        bool hasSelectionResizeBounds = selectionResize && ModelTryGetResizeBoundsUnits(selectionResizeElements, out selectionBoundsUnits);
+        DevToolsPreviewBounds selectionLocalBounds = hasSelectionResizeBounds ? selectionBoundsUnits.ToBlockBounds() : default;
         Matrixf matrix = ModelComputeElementMatrix(element);
+        Matrixf parentMatrix = ModelComputeParentChainMatrix(element);
         float halfX = (float)Math.Max(0.0, element.SizeX) / (ModelUnitsPerBlock * 2f);
         float halfY = (float)Math.Max(0.0, element.SizeY) / (ModelUnitsPerBlock * 2f);
         float halfZ = (float)Math.Max(0.0, element.SizeZ) / (ModelUnitsPerBlock * 2f);
         Vector3 centerLocal = new(halfX, halfY, halfZ);
+        DevToolsPreviewBounds groupBounds = hasSelectionResizeBounds
+            ? DevToolsPreviewBounds.Empty
+            : ModelElementsWorldBounds(targets);
+        Vector3[]? selectionCornerWorlds = null;
+        if (hasSelectionResizeBounds)
+        {
+            selectionCornerWorlds = ModelTransformBoundsCorners(parentMatrix, selectionLocalBounds);
+            foreach (Vector3 corner in selectionCornerWorlds)
+            {
+                groupBounds = groupBounds.Include(corner);
+            }
+        }
 
         // Handle order: -X, +X, -Y, +Y, -Z, +Z.
         Vector3[] handleLocals =
@@ -2503,7 +2729,23 @@ public sealed partial class DebugWindowManager
         float groupHalfX = Math.Max(groupSize.X * 0.5f, halfX);
         float groupHalfY = Math.Max(groupSize.Y * 0.5f, halfY);
         float groupHalfZ = Math.Max(groupSize.Z * 0.5f, halfZ);
-        if (targets.Count > 1)
+        if (hasSelectionResizeBounds)
+        {
+            Vector3 min = selectionLocalBounds.Min;
+            Vector3 max = selectionLocalBounds.Max;
+            centerLocal = selectionLocalBounds.Center;
+            center = ModelTransformPoint(parentMatrix, centerLocal);
+            handleLocals =
+            [
+                new Vector3(min.X, centerLocal.Y, centerLocal.Z),
+                new Vector3(max.X, centerLocal.Y, centerLocal.Z),
+                new Vector3(centerLocal.X, min.Y, centerLocal.Z),
+                new Vector3(centerLocal.X, max.Y, centerLocal.Z),
+                new Vector3(centerLocal.X, centerLocal.Y, min.Z),
+                new Vector3(centerLocal.X, centerLocal.Y, max.Z)
+            ];
+        }
+        else if (targets.Count > 1)
         {
             handleLocals =
             [
@@ -2523,7 +2765,9 @@ public sealed partial class DebugWindowManager
         for (int handle = 0; handle < 6; handle++)
         {
             Vector3 handleWorld = targets.Count > 1
-                ? center + (handleLocals[handle] - centerLocal)
+                ? hasSelectionResizeBounds
+                    ? ModelTransformPoint(parentMatrix, handleLocals[handle])
+                    : center + (handleLocals[handle] - centerLocal)
                 : ModelTransformPoint(matrix, handleLocals[handle]);
             handleVisible[handle] = camera.Project(handleWorld, out handleScreens[handle], out _);
         }
@@ -2550,11 +2794,22 @@ public sealed partial class DebugWindowManager
             {
                 int axis = hoveredHandle / 2;
                 NVector2 perUnit = ModelProjectAxisScreenPerUnit(camera, center, axes[axis]);
-                ModelBeginGizmoDrag(element, axis, hoveredHandle, perUnit, handleScreens[hoveredHandle], 1.0);
+                ModelBeginGizmoDrag(
+                    element,
+                    axis,
+                    hoveredHandle,
+                    perUnit,
+                    handleScreens[hoveredHandle],
+                    1.0,
+                    hasSelectionResizeBounds ? selectionResizeElements : null,
+                    selectionResize: hasSelectionResizeBounds);
             }
         }
 
-        if (_modelGizmoDragging && _modelGizmoDragFace >= 0 && _modelGizmoTool == ModelGizmoTool.Resize)
+        if (_modelGizmoDragging &&
+            _modelGizmoDragFace >= 0 &&
+            _modelGizmoDragFace < ModelResizeCornerHandleBase &&
+            _modelGizmoTool == ModelGizmoTool.Resize)
         {
             if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
             {
@@ -2576,20 +2831,115 @@ public sealed partial class DebugWindowManager
                 {
                     int axis = _modelGizmoDragAxis;
                     bool positiveFace = (_modelGizmoDragFace & 1) == 1;
-                    foreach (ModelGizmoDragElementState state in _modelGizmoDragElements)
+                    if (_modelGizmoDragSelectionResize)
                     {
-                        if (positiveFace)
-                        {
-                            state.Element.To[axis] = Math.Max(state.From[axis], state.To[axis] + units);
-                        }
-                        else
-                        {
-                            state.Element.From[axis] = Math.Min(state.To[axis], state.From[axis] + units);
-                        }
+                        ModelApplySelectionAxisScale(_modelGizmoDragElements, _modelGizmoDragSelectionBoundsUnits, axis, positiveFace, units);
+                    }
+                    else
+                    {
+                        ModelApplyIndependentFaceDelta(_modelGizmoDragElements, axis, positiveFace, units);
                     }
                 }
                 ModelMarkChanged();
                 hoveredHandle = _modelGizmoDragFace;
+            }
+        }
+
+        int hoveredCorner = -1;
+        NVector2[] cornerScreens = new NVector2[8];
+        bool[] cornerVisible = new bool[8];
+        if (hasSelectionResizeBounds && selectionCornerWorlds != null)
+        {
+            for (int corner = 0; corner < selectionCornerWorlds.Length; corner++)
+            {
+                cornerVisible[corner] = camera.Project(selectionCornerWorlds[corner], out cornerScreens[corner], out _);
+            }
+
+            if (hovered && !_modelGizmoDragging)
+            {
+                float best = ModelGizmoPickDistancePx;
+                for (int corner = 0; corner < cornerScreens.Length; corner++)
+                {
+                    if (!cornerVisible[corner]) continue;
+                    float distance = NVector2.Distance(mouse, cornerScreens[corner]);
+                    if (distance < best)
+                    {
+                        best = distance;
+                        hoveredCorner = corner;
+                    }
+                }
+            }
+
+            if (hoveredCorner >= 0)
+            {
+                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+                if (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && camera.Project(center, out NVector2 centerScreen, out _))
+                {
+                    Vector3[] localCorners = ModelBoundsCorners(selectionLocalBounds);
+                    Vector3 diagonalLocal = localCorners[hoveredCorner] - selectionLocalBounds.Center;
+                    if (diagonalLocal.LengthSquared > 0.000001f)
+                    {
+                        Vector3 axisWorld = ModelTransformDirection(parentMatrix, diagonalLocal);
+                        float startDistanceUnits = diagonalLocal.Length * ModelUnitsPerBlock;
+                        Vector3 anchorUnits = selectionBoundsUnits.CornerUnits(hoveredCorner ^ 6);
+                        NVector2[] localAxisScreenPerUnit =
+                        [
+                            ModelProjectAxisScreenPerUnit(camera, center, ModelTransformDirection(parentMatrix, Vector3.UnitX)),
+                            ModelProjectAxisScreenPerUnit(camera, center, ModelTransformDirection(parentMatrix, Vector3.UnitY)),
+                            ModelProjectAxisScreenPerUnit(camera, center, ModelTransformDirection(parentMatrix, Vector3.UnitZ))
+                        ];
+                        NVector2 perUnit = ModelProjectAxisScreenPerUnit(camera, center, axisWorld);
+                        ModelBeginGizmoDrag(
+                            element,
+                            -1,
+                            ModelResizeCornerHandleBase + hoveredCorner,
+                            perUnit,
+                            centerScreen,
+                            1.0,
+                            selectionResizeElements,
+                            startDistanceUnits,
+                            hoveredCorner,
+                            selectionLocalBounds,
+                            anchorUnits,
+                            localAxisScreenPerUnit,
+                            selectionResize: true);
+                    }
+                }
+            }
+        }
+
+        if (_modelGizmoDragging &&
+            _modelGizmoDragSelectionResize &&
+            _modelGizmoDragFace >= ModelResizeCornerHandleBase &&
+            _modelGizmoTool == ModelGizmoTool.Resize)
+        {
+            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            {
+                ModelEndGizmoDrag(commit: true);
+            }
+            else
+            {
+                bool bypassSnap = ImGui.IsKeyDown(ImGuiKey.LeftAlt) || ImGui.IsKeyDown(ImGuiKey.RightAlt);
+                bool uniform = ImGui.IsKeyDown(ImGuiKey.LeftShift) || ImGui.IsKeyDown(ImGuiKey.RightShift);
+                if (uniform)
+                {
+                    float units = ModelGizmoDragUnits(bypassSnap);
+                    double scaleValue = Math.Max(0.02, (_modelGizmoDragStartHandleDistanceUnits + units) / Math.Max(0.001f, _modelGizmoDragStartHandleDistanceUnits));
+                    Vector3 scale = new((float)scaleValue, (float)scaleValue, (float)scaleValue);
+                    foreach (ModelGizmoDragElementState state in _modelGizmoDragElements)
+                    {
+                        ModelApplyAnchoredScale(state, _modelGizmoDragAnchorUnits, scale);
+                    }
+                }
+                else if (ModelTryGetCornerResizeScale(ImGui.GetMousePos() - _modelGizmoDragStartMouse, bypassSnap, out Vector3 scale))
+                {
+                    foreach (ModelGizmoDragElementState state in _modelGizmoDragElements)
+                    {
+                        ModelApplyAnchoredScale(state, _modelGizmoDragAnchorUnits, scale);
+                    }
+                }
+                ModelMarkChanged();
+                hoveredCorner = _modelGizmoDragFace - ModelResizeCornerHandleBase;
             }
         }
 
@@ -2601,7 +2951,28 @@ public sealed partial class DebugWindowManager
             drawList.AddRectFilled(position - new NVector2(4.5f, 4.5f), position + new NVector2(4.5f, 4.5f), color);
         }
 
-        return hoveredHandle >= 0 || (_modelGizmoDragging && _modelGizmoTool == ModelGizmoTool.Resize);
+        if (hasSelectionResizeBounds && selectionCornerWorlds != null)
+        {
+            uint wire = ImGui.ColorConvertFloat4ToU32(new NVector4(1f, 0.82f, 0.3f, 0.55f));
+            for (int edge = 0; edge < ModelBoxEdges.Length; edge++)
+            {
+                (int a, int b) = ModelBoxEdges[edge];
+                if (cornerVisible[a] && cornerVisible[b])
+                {
+                    drawList.AddLine(cornerScreens[a], cornerScreens[b], wire, 1.1f);
+                }
+            }
+
+            for (int corner = 0; corner < cornerScreens.Length; corner++)
+            {
+                if (!cornerVisible[corner]) continue;
+                uint color = ModelGizmoCornerColor(corner == hoveredCorner);
+                NVector2 position = cornerScreens[corner];
+                drawList.AddRectFilled(position - new NVector2(4.5f, 4.5f), position + new NVector2(4.5f, 4.5f), color);
+            }
+        }
+
+        return hoveredHandle >= 0 || hoveredCorner >= 0 || (_modelGizmoDragging && _modelGizmoTool == ModelGizmoTool.Resize);
     }
 
     private bool DrawModelGroupCornerResizeGizmo(ImDrawListPtr drawList, DevToolsPreviewCamera camera, ModelElementData element, DevToolsPreviewBounds localBounds, bool hovered)

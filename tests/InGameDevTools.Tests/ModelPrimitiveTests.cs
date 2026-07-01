@@ -290,6 +290,49 @@ public sealed class ModelPrimitiveTests
     }
 
     [Fact]
+    public void SelectionResize_ScalesAdjacentCuboidsAsSingleShape()
+    {
+        object left = CreateElement("Left", [0, 0, 0], [1, 1, 1], faces: true);
+        object right = CreateElement("Right", [1, 0, 0], [2, 1, 1], faces: true);
+        SetMember(right, "RotationOrigin", new double[] { 1.5, 0.5, 0.5 });
+
+        Assert.True(ApplySelectionAxisScale([left, right], axis: 0, positiveFace: true, units: 2.0));
+
+        Assert.Equal(new double[] { 0, 0, 0 }, (double[])GetMember(left, "From"));
+        Assert.Equal(new double[] { 2, 1, 1 }, (double[])GetMember(left, "To"));
+        Assert.Equal(new double[] { 2, 0, 0 }, (double[])GetMember(right, "From"));
+        Assert.Equal(new double[] { 4, 1, 1 }, (double[])GetMember(right, "To"));
+        Assert.Equal(new double[] { 3, 0.5, 0.5 }, (double[])GetMember(right, "RotationOrigin"));
+    }
+
+    [Fact]
+    public void SelectionResize_ScalesExistingGapsProportionally()
+    {
+        object left = CreateElement("Left", [0, 0, 0], [1, 1, 1], faces: true);
+        object right = CreateElement("Right", [2, 0, 0], [3, 1, 1], faces: true);
+
+        Assert.True(ApplySelectionAxisScale([left, right], axis: 0, positiveFace: true, units: 3.0));
+
+        Assert.Equal(new double[] { 0, 0, 0 }, (double[])GetMember(left, "From"));
+        Assert.Equal(new double[] { 2, 1, 1 }, (double[])GetMember(left, "To"));
+        Assert.Equal(new double[] { 4, 0, 0 }, (double[])GetMember(right, "From"));
+        Assert.Equal(new double[] { 6, 1, 1 }, (double[])GetMember(right, "To"));
+    }
+
+    [Fact]
+    public void IndependentFaceResize_KeepsSingleElementOriginUnchanged()
+    {
+        object box = CreateElement("Box", [2, 0, 0], [4, 1, 1], faces: true);
+        SetMember(box, "RotationOrigin", new double[] { 3, 0.5, 0.5 });
+
+        ApplyIndependentFaceDelta([box], axis: 0, positiveFace: true, units: 2.0);
+
+        Assert.Equal(new double[] { 2, 0, 0 }, (double[])GetMember(box, "From"));
+        Assert.Equal(new double[] { 6, 1, 1 }, (double[])GetMember(box, "To"));
+        Assert.Equal(new double[] { 3, 0.5, 0.5 }, (double[])GetMember(box, "RotationOrigin"));
+    }
+
+    [Fact]
     public void ChiselMicroblock_UsesSelectedTextureAndContinuousUv()
     {
         object source = CreateElement("Box", [0, 0, 0], [16, 16, 16], faces: true);
@@ -641,6 +684,65 @@ public sealed class ModelPrimitiveTests
         MethodInfo create = typeof(DebugWindowManager).GetMethod("ModelCreateChiselMicroblock", StaticFlags)
             ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelCreateChiselMicroblock");
         return create.Invoke(null, [source, from, to, texture, (Func<string, string>)(name => name)])!;
+    }
+
+    private static bool ApplySelectionAxisScale(object[] elements, int axis, bool positiveFace, double units)
+    {
+        MethodInfo apply = typeof(DebugWindowManager).GetMethod("ModelApplySelectionAxisScale", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelApplySelectionAxisScale");
+        return (bool)apply.Invoke(null, [CaptureResizeStates(elements), CreateResizeBounds(elements), axis, positiveFace, units])!;
+    }
+
+    private static void ApplyIndependentFaceDelta(object[] elements, int axis, bool positiveFace, double units)
+    {
+        MethodInfo apply = typeof(DebugWindowManager).GetMethod("ModelApplyIndependentFaceDelta", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelApplyIndependentFaceDelta");
+        apply.Invoke(null, [CaptureResizeStates(elements), axis, positiveFace, units]);
+    }
+
+    private static Array CaptureResizeStates(object[] elements)
+    {
+        Type stateType = typeof(DebugWindowManager).GetNestedType("ModelGizmoDragElementState", BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(nameof(DebugWindowManager), "ModelGizmoDragElementState");
+        MethodInfo capture = typeof(DebugWindowManager).GetMethod("ModelCaptureGizmoDragState", StaticFlags)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelCaptureGizmoDragState");
+        Array states = Array.CreateInstance(stateType, elements.Length);
+        for (int index = 0; index < elements.Length; index++)
+        {
+            states.SetValue(capture.Invoke(null, [elements[index]]), index);
+        }
+
+        return states;
+    }
+
+    private static object CreateResizeBounds(object[] elements)
+    {
+        Type boundsType = typeof(DebugWindowManager).GetNestedType("ModelResizeBoundsUnits", BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(nameof(DebugWindowManager), "ModelResizeBoundsUnits");
+        double minX = double.PositiveInfinity;
+        double minY = double.PositiveInfinity;
+        double minZ = double.PositiveInfinity;
+        double maxX = double.NegativeInfinity;
+        double maxY = double.NegativeInfinity;
+        double maxZ = double.NegativeInfinity;
+        foreach (object element in elements)
+        {
+            double[] from = (double[])GetMember(element, "From");
+            double[] to = (double[])GetMember(element, "To");
+            minX = Math.Min(minX, Math.Min(from[0], to[0]));
+            minY = Math.Min(minY, Math.Min(from[1], to[1]));
+            minZ = Math.Min(minZ, Math.Min(from[2], to[2]));
+            maxX = Math.Max(maxX, Math.Max(from[0], to[0]));
+            maxY = Math.Max(maxY, Math.Max(from[1], to[1]));
+            maxZ = Math.Max(maxZ, Math.Max(from[2], to[2]));
+        }
+
+        return Activator.CreateInstance(
+            boundsType,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            args: [minX, minY, minZ, maxX, maxY, maxZ],
+            culture: null)!;
     }
 
     private static object? InvokeMergeChiselElements(IList elements, object preferred)
