@@ -131,6 +131,16 @@ public sealed partial class DebugWindowManager
             element.To[0] += dx;
             element.To[1] += dy;
             element.To[2] += dz;
+            if (element.NonCuboid?.Editable == true)
+            {
+                foreach (double[] vertex in element.NonCuboid.Vertices)
+                {
+                    if (vertex.Length < 3) continue;
+                    vertex[0] += dx;
+                    vertex[1] += dy;
+                    vertex[2] += dz;
+                }
+            }
             // The pivot is the box center of the *moved* box.
             element.RotationOrigin =
             [

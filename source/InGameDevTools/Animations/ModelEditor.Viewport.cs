@@ -356,7 +356,12 @@ public sealed partial class DebugWindowManager
             float wheel = ImGui.GetIO().MouseWheel;
             if (Math.Abs(wheel) > 0.001f)
             {
-                if (IsDevToolsCtrlDown() && ModelNudgeSelectedElements(_modelWheelNudgeAxis, wheel * ModelNudgeStep()))
+                if (IsDevToolsCtrlDown() && (ModelMeshComponentsActive()
+                    ? ModelNudgeSelectedMeshComponents(
+                        _modelWheelNudgeAxis == 0 ? wheel * ModelNudgeStep() : 0d,
+                        _modelWheelNudgeAxis == 1 ? wheel * ModelNudgeStep() : 0d,
+                        _modelWheelNudgeAxis == 2 ? wheel * ModelNudgeStep() : 0d)
+                    : ModelNudgeSelectedElements(_modelWheelNudgeAxis, wheel * ModelNudgeStep())))
                 {
                     // Ctrl+wheel is reserved for selection nudging; plain wheel stays camera zoom.
                 }
@@ -408,6 +413,7 @@ public sealed partial class DebugWindowManager
         try
         {
             DrawModelViewportGrid(drawList, camera, gridMinor, gridMajor);
+            DrawModelMeshFallbackOverlays(drawList, camera);
 
             string? renderNote = _modelPreviewSkipReason ?? skipReason;
             if (textureId <= 0 && !string.IsNullOrWhiteSpace(renderNote))
@@ -441,6 +447,10 @@ public sealed partial class DebugWindowManager
             {
                 gizmoConsumedMouse = DrawModelChiselTool(drawList, camera, hovered);
             }
+            else if (_modelGizmoTool is ModelGizmoTool.Extrude or ModelGizmoTool.Inset or ModelGizmoTool.Subdivide)
+            {
+                gizmoConsumedMouse = false;
+            }
             else if (selected != null && _modelDoc.EnumerateElements().Contains(selected))
             {
                 gizmoConsumedMouse = DrawModelGizmo(drawList, camera, selected, hovered);
@@ -465,11 +475,14 @@ public sealed partial class DebugWindowManager
 
             if (hovered && !gizmoConsumedMouse && !_modelGizmoDragging && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {
-                ModelElementData? picked = ModelPickElement(camera, ImGui.GetMousePos());
                 bool additive = IsDevToolsCtrlDown();
-                if (picked != null || !additive)
+                if (!ModelHandleMeshViewportSelection(camera, ImGui.GetMousePos(), additive))
                 {
-                    ModelSelectElement(picked, additive: additive);
+                    ModelElementData? picked = ModelPickElement(camera, ImGui.GetMousePos());
+                    if (picked != null || !additive)
+                    {
+                        ModelSelectElement(picked, additive: additive);
+                    }
                 }
             }
 
@@ -505,7 +518,7 @@ public sealed partial class DebugWindowManager
     {
         float rowHeight = Math.Max(20f, ImGui.GetFrameHeight());
         float spacingY = ImGui.GetStyle().ItemSpacing.Y;
-        int rows = _modelGizmoTool == ModelGizmoTool.Cut ? 11 : 6;
+        int rows = _modelGizmoTool == ModelGizmoTool.Cut ? 11 : ModelIsMeshLibMode ? 7 : 6;
         return new NVector2(112f, rowHeight * rows + spacingY * (rows - 1) + 10f);
     }
 
@@ -523,7 +536,8 @@ public sealed partial class DebugWindowManager
             float localY = point.Y - position.Y - 5f;
             float rowStride = Math.Max(20f, ImGui.GetFrameHeight()) + ImGui.GetStyle().ItemSpacing.Y;
             int row = (int)MathF.Floor(localY / Math.Max(1f, rowStride));
-            if (row >= 0 && row < 6)
+            int primaryRows = ModelIsMeshLibMode ? 7 : 6;
+            if (row >= 0 && row < primaryRows)
             {
                 if (_modelGizmoDragging) ModelEndGizmoDrag(commit: true);
                 _modelGizmoTool = row switch
@@ -532,8 +546,9 @@ public sealed partial class DebugWindowManager
                     1 => ModelGizmoTool.Move,
                     2 => ModelGizmoTool.Resize,
                     3 => ModelGizmoTool.Rotate,
-                    4 => ModelGizmoTool.Cut,
-                    _ => ModelGizmoTool.Chisel
+                    4 => ModelIsMeshLibMode ? ModelGizmoTool.Extrude : ModelGizmoTool.Cut,
+                    5 => ModelIsMeshLibMode ? ModelGizmoTool.Inset : ModelGizmoTool.Chisel,
+                    _ => ModelGizmoTool.Subdivide
                 };
             }
             else if (_modelGizmoTool == ModelGizmoTool.Cut && row >= 7 && row < 11)
@@ -571,8 +586,17 @@ public sealed partial class DebugWindowManager
             DrawModelViewportToolRadio(position, rowStride, 1, "Move", ModelGizmoTool.Move, "Drag the axis arrows to translate the selection (Ctrl+Shift+2).", ref hoveredOrActive);
             DrawModelViewportToolRadio(position, rowStride, 2, "Resize", ModelGizmoTool.Resize, "Drag face or corner handles to resize/deform the selection (Ctrl+Shift+3).", ref hoveredOrActive);
             DrawModelViewportToolRadio(position, rowStride, 3, "Rotate", ModelGizmoTool.Rotate, "Drag the rings to rotate around the rotation origin (Ctrl+Shift+4).", ref hoveredOrActive);
-            DrawModelViewportToolRadio(position, rowStride, 4, "Cut", ModelGizmoTool.Cut, "Hover a cuboid to preview a cut line, then click to split it (Ctrl+Shift+5).", ref hoveredOrActive);
-            DrawModelViewportToolRadio(position, rowStride, 5, "Chisel", ModelGizmoTool.Chisel, "Add or remove one microblock on the hovered face (Ctrl+Shift+6).", ref hoveredOrActive);
+            if (ModelIsMeshLibMode)
+            {
+                DrawModelViewportToolRadio(position, rowStride, 4, "Extrude", ModelGizmoTool.Extrude, "Select connected faces, set the distance in the toolbar, then Apply.", ref hoveredOrActive);
+                DrawModelViewportToolRadio(position, rowStride, 5, "Inset", ModelGizmoTool.Inset, "Select a coplanar face region, set its inset fraction, then Apply.", ref hoveredOrActive);
+                DrawModelViewportToolRadio(position, rowStride, 6, "Subdivide", ModelGizmoTool.Subdivide, "Select faces or edges and use Subdivide in the toolbar or inspector.", ref hoveredOrActive);
+            }
+            else
+            {
+                DrawModelViewportToolRadio(position, rowStride, 4, "Cut", ModelGizmoTool.Cut, "Hover a cuboid to preview a cut line, then click to split it (Ctrl+Shift+5).", ref hoveredOrActive);
+                DrawModelViewportToolRadio(position, rowStride, 5, "Chisel", ModelGizmoTool.Chisel, "Add or remove one microblock on the hovered face (Ctrl+Shift+6).", ref hoveredOrActive);
+            }
             if (_modelGizmoTool == ModelGizmoTool.Cut)
             {
                 ImGui.SetCursorScreenPos(position + new NVector2(0f, 6f * rowStride));
@@ -721,12 +745,21 @@ public sealed partial class DebugWindowManager
     {
         skipReason = null;
         Shape? shape = JsonUtil.ToObject<Shape>(json, domain);
-        return ModelBuildShapePreviewMesh(
+        string attachmentStatus = "";
+        bool attached = shape != null && ModelTryAttachMeshLibShape(shape, json, label, out attachmentStatus);
+        DevToolsPreviewMesh? preview = ModelBuildShapePreviewMesh(
             shape,
             label,
             _ => null,
             resolvedShape => new ShapeTextureSource(_api, resolvedShape, label),
             out skipReason);
+        if (!attached && json.Contains("\"noncuboid\"", StringComparison.OrdinalIgnoreCase))
+        {
+            skipReason = string.IsNullOrWhiteSpace(attachmentStatus)
+                ? skipReason
+                : preview == null ? attachmentStatus : attachmentStatus + " Cuboid elements still preview normally.";
+        }
+        return preview;
     }
 
     private DevToolsPreviewMesh? ModelBuildEntityReferencePreviewMesh(EntityProperties entityType, string label, out string? skipReason)
@@ -971,6 +1004,7 @@ public sealed partial class DebugWindowManager
     private void ModelFitCameraToMesh()
     {
         DevToolsPreviewBounds bounds = _modelPreviewMesh?.Bounds ?? DevToolsPreviewBounds.Empty;
+        if (!bounds.IsValid && _modelDoc != null) bounds = ModelElementsWorldBounds(_modelDoc.Roots);
         ModelFitCameraToBounds(bounds, 2.6f);
     }
 
@@ -1107,6 +1141,7 @@ public sealed partial class DebugWindowManager
     {
         DevToolsPreviewBounds bounds = DevToolsPreviewBounds.Empty;
         if (_modelPreviewMesh != null) bounds = bounds.Include(_modelPreviewMesh.Bounds);
+        if (_modelDoc != null) bounds = bounds.Include(ModelElementsWorldBounds(_modelDoc.Roots));
         bounds = bounds.Include(ModelReferenceTransformedBounds());
         return bounds;
     }
@@ -1247,6 +1282,7 @@ public sealed partial class DebugWindowManager
 
     private void DrawModelSelectionOverlay(ImDrawListPtr drawList, DevToolsPreviewCamera camera, ModelElementData element, bool active)
     {
+        if (DrawModelMeshSelectionOverlay(drawList, camera, element, active)) return;
         Matrixf matrix = ModelComputeElementMatrix(element);
         Vector3[] corners = ModelTryGetGroupLocalBounds(element, out DevToolsPreviewBounds localBounds)
             ? ModelTransformBoundsCorners(matrix, localBounds)
@@ -1313,9 +1349,10 @@ public sealed partial class DebugWindowManager
         {
             if (!element.Visible) return;
 
+            bool meshHit = ModelRayIntersectsMesh(element, rayOrigin, rayDirection, out float distance);
             Matrixf matrix = ModelComputeElementMatrix(element);
             Vector3[] corners = ModelTransformBoxCorners(matrix, element);
-            if (ModelRayIntersectsBox(rayOrigin, rayDirection, corners, out float distance))
+            if (meshHit || ModelRayIntersectsBox(rayOrigin, rayDirection, corners, out distance))
             {
                 bool better = distance < bestDistance - 0.001f ||
                     (Math.Abs(distance - bestDistance) <= 0.001f && depth > bestDepth);
@@ -1383,6 +1420,11 @@ public sealed partial class DebugWindowManager
     private bool DrawModelGizmo(ImDrawListPtr drawList, DevToolsPreviewCamera camera, ModelElementData element, bool hovered)
     {
         if (_modelGizmoTool == ModelGizmoTool.None || !element.Visible) return false;
+
+        if (ModelMeshComponentsActive())
+        {
+            return DrawModelMeshComponentGizmo(drawList, camera, element, hovered);
+        }
 
         return _modelGizmoTool switch
         {
@@ -1918,7 +1960,7 @@ public sealed partial class DebugWindowManager
     private static void ModelIncludeElementWorldBounds(ModelElementData element, ref DevToolsPreviewBounds bounds)
     {
         Matrixf matrix = ModelComputeElementMatrix(element);
-        if (ModelElementHasRenderableBox(element))
+        if (!ModelIncludeMeshWorldBounds(element, ref bounds) && ModelElementHasRenderableBox(element))
         {
             foreach (Vector3 corner in ModelTransformBoxCorners(matrix, element))
             {
@@ -1935,7 +1977,7 @@ public sealed partial class DebugWindowManager
     private static bool ModelTryGetGroupLocalBounds(ModelElementData element, out DevToolsPreviewBounds bounds)
     {
         bounds = DevToolsPreviewBounds.Empty;
-        if (element.Children.Count == 0 || ModelElementHasRenderableBox(element)) return false;
+        if (element.Children.Count == 0 || ModelElementHasRenderableGeometry(element)) return false;
 
         Matrixf identity = new();
         identity.Identity();
@@ -1956,7 +1998,7 @@ public sealed partial class DebugWindowManager
         matrix.Mul(parentMatrix.Values);
         matrix.Mul(ModelLocalElementMatrix(element).Values);
 
-        if (ModelElementHasRenderableBox(element))
+        if (!ModelIncludeMeshLocalBounds(element, matrix, ref bounds) && ModelElementHasRenderableBox(element))
         {
             foreach (Vector3 corner in ModelTransformBoxCorners(matrix, element))
             {
@@ -1976,6 +2018,11 @@ public sealed partial class DebugWindowManager
             element.SizeY > 0.0001 &&
             element.SizeZ > 0.0001 &&
             element.Faces.Any(face => face != null);
+    }
+
+    private static bool ModelElementHasRenderableGeometry(ModelElementData element)
+    {
+        return element.NonCuboid?.Editable == true && element.NonCuboid.Faces.Count > 0 || ModelElementHasRenderableBox(element);
     }
 
     private static Vector3 ModelBoundsSize(DevToolsPreviewBounds bounds)
@@ -2031,6 +2078,10 @@ public sealed partial class DebugWindowManager
 
     private static double[] ModelDefaultRotationOrigin(ModelElementData element)
     {
+        if (ModelTryGetMeshBounds(element, out double[] min, out double[] max))
+        {
+            return [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5, (min[2] + max[2]) * 0.5];
+        }
         return
         [
             element.From[0] + element.SizeX * 0.5,
@@ -2192,12 +2243,13 @@ public sealed partial class DebugWindowManager
             (double[]?)target.RotationOrigin?.Clone(),
             target.RotationX,
             target.RotationY,
-            target.RotationZ);
+            target.RotationZ,
+            target.NonCuboid?.Editable == true ? target.NonCuboid.Vertices.Select(vertex => (double[])vertex.Clone()).ToArray() : null);
     }
 
     private static bool ModelIsStableRotationGroup(ModelElementData element)
     {
-        return element.Children.Count > 0 && !ModelElementHasRenderableBox(element);
+        return element.Children.Count > 0 && !ModelElementHasRenderableGeometry(element);
     }
 
     private static ModelElementData ModelGetOrCreateGroupRotationLayer(ModelElementData group, int axis)
@@ -2230,7 +2282,7 @@ public sealed partial class DebugWindowManager
 
     private static bool ModelIsRotationLayerForAxis(ModelElementData element, int axis)
     {
-        if (element.Children.Count == 0 || ModelElementHasRenderableBox(element)) return false;
+        if (element.Children.Count == 0 || ModelElementHasRenderableGeometry(element)) return false;
         if (Math.Abs(element.SizeX) > 0.0001 || Math.Abs(element.SizeY) > 0.0001 || Math.Abs(element.SizeZ) > 0.0001) return false;
         if (!string.Equals(element.Name, $"Rotate{ModelAxisName(axis)}", StringComparison.OrdinalIgnoreCase)) return false;
 
@@ -2244,6 +2296,7 @@ public sealed partial class DebugWindowManager
 
     private static IEnumerable<ModelElementData> ModelGroupResizeElements(ModelElementData element)
     {
+        if (element.NonCuboid?.Editable == true) yield return element;
         foreach (ModelElementData child in element.Children)
         {
             foreach (ModelElementData descendant in child.EnumerateSubtree())
@@ -2258,7 +2311,7 @@ public sealed partial class DebugWindowManager
         List<ModelElementData> elements = [];
         foreach (ModelElementData target in targets)
         {
-            if (target.Children.Count > 0 && !ModelElementHasRenderableBox(target))
+            if (target.Children.Count > 0 && !ModelElementHasRenderableGeometry(target))
             {
                 foreach (ModelElementData child in target.Children)
                 {
@@ -2277,6 +2330,12 @@ public sealed partial class DebugWindowManager
     private static bool ModelTryGetResizeBoundsUnits(IEnumerable<ModelElementData> elements, out ModelResizeBoundsUnits bounds)
     {
         List<ModelElementData> candidates = elements.ToList();
+        List<(double[] From, double[] To)> meshBounds = [];
+        foreach (ModelElementData candidate in candidates)
+        {
+            if (ModelTryGetMeshBounds(candidate, out double[] min, out double[] max)) meshBounds.Add((min, max));
+        }
+        if (ModelTryGetResizeBoundsUnitsCore(meshBounds, out bounds)) return true;
         if (ModelTryGetResizeBoundsUnitsCore(candidates.Where(ModelElementHasRenderableBox).Select(element => (element.From, element.To)), out bounds))
         {
             return true;
@@ -2288,6 +2347,15 @@ public sealed partial class DebugWindowManager
     private static bool ModelTryGetResizeBoundsUnits(IEnumerable<ModelGizmoDragElementState> states, out ModelResizeBoundsUnits bounds)
     {
         List<ModelGizmoDragElementState> candidates = states.ToList();
+        List<(double[] From, double[] To)> meshBounds = [];
+        foreach (ModelGizmoDragElementState state in candidates)
+        {
+            if (state.MeshVertices is not { Length: > 0 }) continue;
+            double[] min = [state.MeshVertices.Min(vertex => vertex[0]), state.MeshVertices.Min(vertex => vertex[1]), state.MeshVertices.Min(vertex => vertex[2])];
+            double[] max = [state.MeshVertices.Max(vertex => vertex[0]), state.MeshVertices.Max(vertex => vertex[1]), state.MeshVertices.Max(vertex => vertex[2])];
+            meshBounds.Add((min, max));
+        }
+        if (ModelTryGetResizeBoundsUnitsCore(meshBounds, out bounds)) return true;
         if (ModelTryGetResizeBoundsUnitsCore(candidates.Where(ModelStateHasRenderableBox).Select(state => (state.From, state.To)), out bounds))
         {
             return true;
@@ -2360,6 +2428,25 @@ public sealed partial class DebugWindowManager
         axis = Math.Clamp(axis, 0, 2);
         foreach (ModelGizmoDragElementState state in states)
         {
+            if (state.MeshVertices is { Length: > 0 })
+            {
+                double min = state.MeshVertices.Min(vertex => vertex[axis]);
+                double max = state.MeshVertices.Max(vertex => vertex[axis]);
+                double anchor = positiveFace ? min : max;
+                double dragged = positiveFace ? max : min;
+                double span = dragged - anchor;
+                if (Math.Abs(span) > 0.000001)
+                {
+                    Vector3 anchorVector = Vector3.Zero;
+                    Vector3 scale = Vector3.One;
+                    double factor = Math.Clamp((dragged + units - anchor) / span, 0.02, 64.0);
+                    if (axis == 0) { anchorVector.X = (float)anchor; scale.X = (float)factor; }
+                    else if (axis == 1) { anchorVector.Y = (float)anchor; scale.Y = (float)factor; }
+                    else { anchorVector.Z = (float)anchor; scale.Z = (float)factor; }
+                    ModelApplyAnchoredScale(state, anchorVector, scale);
+                }
+                continue;
+            }
             if (positiveFace)
             {
                 state.Element.To[axis] = Math.Max(state.From[axis], state.To[axis] + units);
@@ -2423,6 +2510,13 @@ public sealed partial class DebugWindowManager
                 state.Element.RotationOrigin[axis] = state.RotationOrigin[axis] * scale;
             }
         }
+        if (state.MeshVertices != null && state.Element.NonCuboid?.Editable == true)
+        {
+            for (int index = 0; index < Math.Min(state.MeshVertices.Length, state.Element.NonCuboid.Vertices.Count); index++)
+            {
+                for (int axis = 0; axis < 3; axis++) state.Element.NonCuboid.Vertices[index][axis] = state.MeshVertices[index][axis] * scale;
+            }
+        }
     }
 
     private static Vector3 ModelCornerUnits(Vector3 cornerBlocks)
@@ -2437,6 +2531,11 @@ public sealed partial class DebugWindowManager
 
         Vector3[] corners = ModelBoundsCorners(_modelGizmoDragLocalBounds);
         Vector3 cornerUnits = ModelCornerUnits(corners[_modelGizmoDragCorner]);
+        if (_modelGizmoDragElements.Count == 1 && _modelGizmoDragElements[0].MeshVertices != null)
+        {
+            ModelElementData meshElement = _modelGizmoDragElements[0].Element;
+            cornerUnits += new Vector3((float)meshElement.From[0], (float)meshElement.From[1], (float)meshElement.From[2]);
+        }
         Vector3 deltaUnits = ModelSolveScreenDeltaToLocalUnits(mouseDelta, _modelGizmoDragLocalAxisScreenPerUnit);
         if (!bypassSnap && _modelSnapEnabled && _modelSnapMoveUnits > 0f)
         {
@@ -2588,6 +2687,13 @@ public sealed partial class DebugWindowManager
             {
                 state.Element.RotationOrigin[axis] = anchor + (state.RotationOrigin[axis] - anchor) * factor;
             }
+            if (state.MeshVertices != null && state.Element.NonCuboid?.Editable == true)
+            {
+                for (int index = 0; index < Math.Min(state.MeshVertices.Length, state.Element.NonCuboid.Vertices.Count); index++)
+                {
+                    state.Element.NonCuboid.Vertices[index][axis] = anchor + (state.MeshVertices[index][axis] - anchor) * factor;
+                }
+            }
         }
     }
 
@@ -2661,6 +2767,13 @@ public sealed partial class DebugWindowManager
                     {
                         state.Element.RotationOrigin[axis] = state.RotationOrigin[axis] + units;
                     }
+                    if (state.MeshVertices != null && state.Element.NonCuboid?.Editable == true)
+                    {
+                        for (int index = 0; index < Math.Min(state.MeshVertices.Length, state.Element.NonCuboid.Vertices.Count); index++)
+                        {
+                            state.Element.NonCuboid.Vertices[index][axis] = state.MeshVertices[index][axis] + units;
+                        }
+                    }
                 }
                 ModelMarkChanged();
                 hoveredAxis = _modelGizmoDragAxis;
@@ -2682,6 +2795,10 @@ public sealed partial class DebugWindowManager
     private bool DrawModelResizeGizmo(ImDrawListPtr drawList, DevToolsPreviewCamera camera, ModelElementData element, bool hovered)
     {
         List<ModelElementData> targets = ModelGizmoTargets(element);
+        if (targets.Count == 1 && ReferenceEquals(targets[0], element) && ModelTryGetMeshLocalBounds(element, out DevToolsPreviewBounds meshLocalBounds))
+        {
+            return DrawModelGroupCornerResizeGizmo(drawList, camera, element, meshLocalBounds, hovered);
+        }
         if (targets.Count == 1 && ReferenceEquals(targets[0], element) && ModelTryGetGroupLocalBounds(element, out DevToolsPreviewBounds localBounds))
         {
             return DrawModelGroupCornerResizeGizmo(drawList, camera, element, localBounds, hovered);
@@ -2824,7 +2941,8 @@ public sealed partial class DebugWindowManager
                     double scale = Math.Max(0.02, (_modelGizmoDragStartHandleDistanceUnits + units) / Math.Max(0.001f, _modelGizmoDragStartHandleDistanceUnits));
                     foreach (ModelGizmoDragElementState state in _modelGizmoDragElements)
                     {
-                        ModelApplyUniformScale(state, scale);
+                        if (state.MeshVertices != null) ModelApplyAnchoredScale(state, _modelGizmoDragAnchorUnits, new Vector3((float)scale, (float)scale, (float)scale));
+                        else ModelApplyUniformScale(state, scale);
                     }
                 }
                 else
@@ -2978,7 +3096,7 @@ public sealed partial class DebugWindowManager
     private bool DrawModelGroupCornerResizeGizmo(ImDrawListPtr drawList, DevToolsPreviewCamera camera, ModelElementData element, DevToolsPreviewBounds localBounds, bool hovered)
     {
         Matrixf matrix = ModelComputeElementMatrix(element);
-        Vector3 centerLocal = Vector3.Zero;
+        Vector3 centerLocal = localBounds.Center;
         Vector3 center = ModelTransformPoint(matrix, centerLocal);
         if (!camera.Project(center, out NVector2 centerScreen, out _)) return false;
 
@@ -3019,6 +3137,10 @@ public sealed partial class DebugWindowManager
                     Vector3 axisWorld = ModelTransformDirection(matrix, diagonalLocal);
                     float startDistanceUnits = diagonalLocal.Length * ModelUnitsPerBlock;
                     Vector3 anchorUnits = ModelCornerUnits(corners[hoveredCorner ^ 6]);
+                    if (element.NonCuboid?.Editable == true)
+                    {
+                        anchorUnits += new Vector3((float)element.From[0], (float)element.From[1], (float)element.From[2]);
+                    }
                     NVector2[] localAxisScreenPerUnit =
                     [
                         ModelProjectAxisScreenPerUnit(camera, center, ModelTransformDirection(matrix, Vector3.UnitX)),
@@ -3059,7 +3181,8 @@ public sealed partial class DebugWindowManager
                     double scale = Math.Max(0.02, (_modelGizmoDragStartHandleDistanceUnits + units) / Math.Max(0.001f, _modelGizmoDragStartHandleDistanceUnits));
                     foreach (ModelGizmoDragElementState state in _modelGizmoDragElements)
                     {
-                        ModelApplyUniformScale(state, scale);
+                        if (state.MeshVertices != null) ModelApplyAnchoredScale(state, _modelGizmoDragAnchorUnits, new Vector3((float)scale, (float)scale, (float)scale));
+                        else ModelApplyUniformScale(state, scale);
                     }
                 }
                 else if (ModelTryGetCornerResizeScale(ImGui.GetMousePos() - _modelGizmoDragStartMouse, bypassSnap, out Vector3 scale))
@@ -3110,7 +3233,7 @@ public sealed partial class DebugWindowManager
 
         (Vector3 axisX, Vector3 axisY, Vector3 axisZ) = ModelElementAxes(element);
         Vector3[] axes = [axisX, axisY, axisZ];
-        float maxSize = targets.Count > 1 && groupBounds.IsValid
+        float maxSize = groupBounds.IsValid
             ? Math.Max(Math.Max(groupBounds.Max.X - groupBounds.Min.X, groupBounds.Max.Y - groupBounds.Min.Y), groupBounds.Max.Z - groupBounds.Min.Z) * ModelUnitsPerBlock
             : (float)Math.Max(Math.Max(element.SizeX, element.SizeY), Math.Max(element.SizeZ, 4.0));
         float radius = Math.Clamp(maxSize / (ModelUnitsPerBlock * 2f) + 0.08f, 0.14f, 2.4f);

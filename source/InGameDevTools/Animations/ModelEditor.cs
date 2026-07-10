@@ -28,7 +28,10 @@ public sealed partial class DebugWindowManager
         Resize,
         Rotate,
         Cut,
-        Chisel
+        Chisel,
+        Extrude,
+        Inset,
+        Subdivide
     }
 
     private enum ModelCutOrientation
@@ -80,6 +83,7 @@ public sealed partial class DebugWindowManager
         public bool Shade = true;
         public string StepParentName = "";
         public ModelFaceData?[] Faces = new ModelFaceData?[6];
+        public ModelNonCuboidData? NonCuboid;
         public List<ModelElementData> Children = [];
         public ModelElementData? Parent;
         public JObject? Extra;
@@ -102,6 +106,7 @@ public sealed partial class DebugWindowManager
                 RotationZ = RotationZ,
                 Shade = Shade,
                 StepParentName = StepParentName,
+                NonCuboid = NonCuboid?.Clone(),
                 Extra = (JObject?)Extra?.DeepClone(),
                 Visible = Visible
             };
@@ -179,13 +184,22 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private sealed record ModelShapeAssetEntry(string Domain, string AssetPath, IAsset Asset, bool Authored = false)
+    private sealed record ModelShapeAssetEntry(string Domain, string AssetPath, IAsset Asset, bool Authored = false, bool MeshLib = false)
     {
         public string Display => $"{Domain}:{AssetPath}";
-        public string SearchText { get; } = $"{Domain}:{AssetPath}{(Authored ? " authored" : "")}".ToLowerInvariant();
+        public string SearchText { get; } = $"{Domain}:{AssetPath}{(Authored ? " authored" : "")}{(MeshLib ? " meshlib noncuboid" : "")}".ToLowerInvariant();
     }
 
-    private sealed record ModelHistoryEntry(string Label, string Json, int[]? SelectionPath, int SelectedFace, int[][]? SelectionPaths = null);
+    private sealed record ModelHistoryEntry(
+        string Label,
+        string Json,
+        int[]? SelectionPath,
+        int SelectedFace,
+        int[][]? SelectionPaths = null,
+        ModelMeshSelectionMode MeshSelectionMode = ModelMeshSelectionMode.Face,
+        int[]? MeshVertices = null,
+        int[][]? MeshEdges = null,
+        int[]? MeshFaces = null);
 
     private sealed record ModelGizmoDragElementState(
         ModelElementData Element,
@@ -194,7 +208,8 @@ public sealed partial class DebugWindowManager
         double[]? RotationOrigin,
         double RotationX,
         double RotationY,
-        double RotationZ);
+        double RotationZ,
+        double[][]? MeshVertices);
 
     private readonly ImGuiThreePanelLayoutState _modelLayout = new(0.21f, 0.30f);
     private readonly DevToolsEditorDiagnostics _modelDiagnostics = new("Models");
@@ -443,6 +458,8 @@ public sealed partial class DebugWindowManager
             ImGui.SetTooltip("Create a new shape document from the basic cube template.");
         }
 
+        DrawModelModePicker();
+
         ImGui.SameLine();
         bool canUndo = _modelUndoStack.Count > 0 && _modelDoc != null;
         if (!canUndo) ImGui.BeginDisabled();
@@ -484,6 +501,7 @@ public sealed partial class DebugWindowManager
         DrawModelShortcutsPopup();
 
         DrawModelSelectionToolbar();
+        DrawModelMeshToolbar();
 
         ImGui.SameLine();
         ImGui.TextDisabled("|");
@@ -838,7 +856,9 @@ public sealed partial class DebugWindowManager
         try
         {
             ImGui.SeparatorText("Keyboard");
-            ImGui.TextUnformatted("Ctrl+Shift+1..6   Select / Move / Resize / Rotate / Cut / Chisel tool");
+            ImGui.TextUnformatted(ModelIsMeshLibMode
+                ? "Ctrl+Shift+1..7   Select / Move / Resize / Rotate / Extrude / Inset / Subdivide"
+                : "Ctrl+Shift+1..6   Select / Move / Resize / Rotate / Cut / Chisel tool");
             ImGui.TextUnformatted("Ctrl+Z / Ctrl+Y   Undo / Redo");
             ImGui.TextUnformatted("Ctrl+D            Duplicate selected element");
             ImGui.TextUnformatted("Ctrl+C            Copy selected elements as JSON");
@@ -971,6 +991,7 @@ public sealed partial class DebugWindowManager
         }
 
         string label = showDomain ? $"{entry.Domain}:{path}" : path;
+        if (entry.MeshLib) label += "  M";
         return entry.Authored ? $"{label}  A" : label;
     }
 
@@ -1419,6 +1440,18 @@ public sealed partial class DebugWindowManager
             {
                 ImGui.SetTooltip("Add a new root level cube element.");
             }
+            if (ModelIsMeshLibMode)
+            {
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Add mesh...##model-tree-add-mesh")) ImGui.OpenPopup("##model-add-mesh-root-popup");
+                if (ImGui.BeginPopup("##model-add-mesh-root-popup"))
+                {
+                    if (ImGui.MenuItem("Mesh box")) ModelAddMeshElement(null, "Mesh");
+                    if (ImGui.MenuItem("Triangle")) ModelAddMeshElement(null, "Triangle");
+                    if (ImGui.MenuItem("Quad")) ModelAddMeshElement(null, "Quad");
+                    ImGui.EndPopup();
+                }
+            }
             ImGui.SameLine();
             if (ImGui.SmallButton("Add primitive##model-tree-add-primitive"))
             {
@@ -1570,6 +1603,17 @@ public sealed partial class DebugWindowManager
                 if (ImGui.MenuItem("Add child cube"))
                 {
                     ModelAddElement(element);
+                }
+                if (ModelIsMeshLibMode && ImGui.BeginMenu("Add child mesh"))
+                {
+                    if (ImGui.MenuItem("Mesh box")) ModelAddMeshElement(element, "Mesh");
+                    if (ImGui.MenuItem("Triangle")) ModelAddMeshElement(element, "Triangle");
+                    if (ImGui.MenuItem("Quad")) ModelAddMeshElement(element, "Quad");
+                    ImGui.EndMenu();
+                }
+                if (ModelIsMeshLibMode && element.NonCuboid == null && ModelElementHasRenderableBox(element) && ImGui.MenuItem("Convert cuboid to MeshLib mesh"))
+                {
+                    ModelConvertSelectedCuboidToMesh();
                 }
                 if (ImGui.MenuItem("Duplicate", "Ctrl+D"))
                 {
@@ -1777,7 +1821,14 @@ public sealed partial class DebugWindowManager
 
             DrawModelDocumentSection(_modelDoc);
             DrawModelElementSection(_modelDoc);
-            DrawModelFacesSection(_modelDoc);
+            if (_modelSelectedElement?.NonCuboid != null)
+            {
+                DrawModelMeshInspector(_modelDoc);
+            }
+            else
+            {
+                DrawModelFacesSection(_modelDoc);
+            }
         }
         finally
         {
@@ -1923,7 +1974,14 @@ public sealed partial class DebugWindowManager
         }
         if (ImGui.IsItemDeactivatedAfterEdit()) ModelEndEdit("Edit size");
 
-        DrawModelElementCutControls(element);
+        if (element.NonCuboid != null)
+        {
+            DrawModelMeshElementBoundsControls(element);
+        }
+        else
+        {
+            DrawModelElementCutControls(element);
+        }
 
         bool hasOrigin = element.RotationOrigin != null;
         if (ImGui.Checkbox("Rotation origin##model-elem-has-origin", ref hasOrigin))
@@ -1978,13 +2036,20 @@ public sealed partial class DebugWindowManager
         ImGui.SameLine();
         if (ImGui.Button("Auto UV element##model-elem-autouv"))
         {
-            ModelBeginEdit();
-            for (int face = 0; face < 6; face++)
+            if (element.NonCuboid != null)
             {
-                ModelAutoUvFace(element, face);
+                ModelAutoUvSelectedMeshFaces();
             }
-            ModelMarkChanged();
-            ModelEndEdit("Auto UV element");
+            else
+            {
+                ModelBeginEdit();
+                for (int face = 0; face < 6; face++)
+                {
+                    ModelAutoUvFace(element, face);
+                }
+                ModelMarkChanged();
+                ModelEndEdit("Auto UV element");
+            }
         }
         if (ImGui.IsItemHovered())
         {
@@ -2391,7 +2456,8 @@ public sealed partial class DebugWindowManager
         }
         else if (ImGui.IsKeyPressed(ImGuiKey.Delete) && _modelSelectedElement != null)
         {
-            ModelDeleteSelectedElements();
+            if (ModelMeshComponentsActive()) ModelDeleteSelectedMeshComponents();
+            else ModelDeleteSelectedElements();
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._1, GlKeys.Number1))
         {
@@ -2411,11 +2477,15 @@ public sealed partial class DebugWindowManager
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._5, GlKeys.Number5))
         {
-            _modelGizmoTool = ModelGizmoTool.Cut;
+            _modelGizmoTool = ModelIsMeshLibMode ? ModelGizmoTool.Extrude : ModelGizmoTool.Cut;
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._6, GlKeys.Number6))
         {
-            _modelGizmoTool = ModelGizmoTool.Chisel;
+            _modelGizmoTool = ModelIsMeshLibMode ? ModelGizmoTool.Inset : ModelGizmoTool.Chisel;
+        }
+        else if (ModelIsMeshLibMode && ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._7, GlKeys.Number7))
+        {
+            _modelGizmoTool = ModelGizmoTool.Subdivide;
         }
         else if (ModelHandleNudgeShortcuts())
         {
@@ -2439,7 +2509,9 @@ public sealed partial class DebugWindowManager
         if (IsDevToolsShortcutPressed(ImGuiKey.UpArrow, GlKeys.Up, repeat: true)) delta[verticalAxis] += step;
         if (IsDevToolsShortcutPressed(ImGuiKey.DownArrow, GlKeys.Down, repeat: true)) delta[verticalAxis] -= step;
 
-        return ModelNudgeSelectedElements(delta[0], delta[1], delta[2]);
+        return ModelMeshComponentsActive()
+            ? ModelNudgeSelectedMeshComponents(delta[0], delta[1], delta[2])
+            : ModelNudgeSelectedElements(delta[0], delta[1], delta[2]);
     }
 
     private (int HorizontalAxis, int VerticalAxis) ModelArrowNudgeAxes()
@@ -2498,6 +2570,13 @@ public sealed partial class DebugWindowManager
             {
                 element.RotationOrigin[axis] += delta[axis];
             }
+            if (element.NonCuboid?.Editable == true)
+            {
+                foreach (double[] vertex in element.NonCuboid.Vertices)
+                {
+                    if (vertex.Length > axis) vertex[axis] += delta[axis];
+                }
+            }
         }
     }
 
@@ -2531,6 +2610,7 @@ public sealed partial class DebugWindowManager
     {
         if (_modelDoc == null || element == null)
         {
+            ModelClearMeshComponentSelection();
             _modelSelectedElement = null;
             _modelSelectedElements.Clear();
             _modelSelectionOrder.Clear();
@@ -2541,6 +2621,7 @@ public sealed partial class DebugWindowManager
         if (!additive)
         {
             bool changed = !ReferenceEquals(_modelSelectedElement, element) || _modelSelectedElements.Count != 1 || !_modelSelectedElements.Contains(element);
+            if (changed) ModelClearMeshComponentSelection();
             _modelSelectedElement = element;
             _modelSelectedElements.Clear();
             _modelSelectionOrder.Clear();
@@ -2671,7 +2752,7 @@ public sealed partial class DebugWindowManager
         {
             foreach (IAsset asset in CollectToolAuthoredAssets("models", "shapes/"))
             {
-                index.Add(new ModelShapeAssetEntry(asset.Location.Domain, asset.Location.Path, asset, Authored: true));
+                index.Add(new ModelShapeAssetEntry(asset.Location.Domain, asset.Location.Path, asset, Authored: true, MeshLib: ModelAssetLooksMeshLib(asset)));
             }
 
             foreach (IAsset asset in _api.Assets.AllAssets.Values)
@@ -2685,7 +2766,7 @@ public sealed partial class DebugWindowManager
                     continue;
                 }
 
-                index.Add(new ModelShapeAssetEntry(asset.Location.Domain, path, asset));
+                index.Add(new ModelShapeAssetEntry(asset.Location.Domain, path, asset, MeshLib: ModelAssetLooksMeshLib(asset)));
             }
 
             index.Sort((left, right) =>
@@ -2941,6 +3022,13 @@ public sealed partial class DebugWindowManager
                     face.Texture = mappedTexture;
                 }
             }
+            if (node.NonCuboid?.Editable == true)
+            {
+                foreach (ModelMeshFaceData face in node.NonCuboid.Faces)
+                {
+                    if (textureMap.TryGetValue(face.Texture, out string? mappedTexture)) face.Texture = mappedTexture;
+                }
+            }
             count++;
         }
 
@@ -3024,6 +3112,13 @@ public sealed partial class DebugWindowManager
             {
                 if (face != null && !string.IsNullOrWhiteSpace(face.Texture)) codes.Add(face.Texture);
             }
+            if (element.NonCuboid?.Editable == true)
+            {
+                foreach (ModelMeshFaceData face in element.NonCuboid.Faces)
+                {
+                    if (!string.IsNullOrWhiteSpace(face.Texture)) codes.Add(face.Texture);
+                }
+            }
         }
 
         return codes;
@@ -3039,6 +3134,14 @@ public sealed partial class DebugWindowManager
         foreach (string code in doc.TextureSizes.Keys)
         {
             if (!string.IsNullOrWhiteSpace(code) && seen.Add(code)) yield return code;
+        }
+        foreach (ModelElementData element in doc.EnumerateElements())
+        {
+            if (element.NonCuboid?.Editable != true) continue;
+            foreach (ModelMeshFaceData face in element.NonCuboid.Faces)
+            {
+                if (!string.IsNullOrWhiteSpace(face.Texture) && seen.Add(face.Texture)) yield return face.Texture;
+            }
         }
     }
 
@@ -3091,6 +3194,30 @@ public sealed partial class DebugWindowManager
 
     private void ModelCreateNewDocument()
     {
+        if (ModelIsMeshLibMode)
+        {
+            ModelDocumentData meshDoc = new()
+            {
+                IsNew = true,
+                Domain = "game",
+                AssetPath = "shapes/block/new-meshlib-shape.json",
+                SourceText = ""
+            };
+            meshDoc.Textures.Add(new ModelTextureEntry { Code = "all", Path = "" });
+            ModelElementData meshElement = new()
+            {
+                Name = "Mesh1",
+                From = [0d, 0d, 0d],
+                To = [16d, 16d, 16d],
+                RotationOrigin = [8d, 8d, 8d],
+                NonCuboid = ModelCreateBoxMesh([0d, 0d, 0d], [16d, 16d, 16d], "all")
+            };
+            meshDoc.Roots.Add(meshElement);
+            ModelSetDocument(meshDoc);
+            _modelStatus = "Created new MeshLib shape document.";
+            return;
+        }
+
         ModelDocumentData? doc = null;
         try
         {
@@ -3141,6 +3268,8 @@ public sealed partial class DebugWindowManager
     private void ModelSetDocument(ModelDocumentData doc)
     {
         _modelDoc = doc;
+        if (ModelDocumentContainsNonCuboid(doc)) _modelEditorMode = ModelEditorMode.MeshLib;
+        ModelClearMeshComponentSelection();
         ModelSelectElement(doc.Roots.FirstOrDefault());
         _modelSelectedTextureCode = doc.Textures.FirstOrDefault()?.Code ?? "";
         _modelUndoStack.Clear();
@@ -4094,6 +4223,18 @@ public sealed partial class DebugWindowManager
 
     private void ModelMirrorElementSubtree(ModelElementData element, int axis)
     {
+        if (element.NonCuboid?.Editable == true)
+        {
+            foreach (double[] vertex in element.NonCuboid.Vertices)
+            {
+                if (vertex.Length > axis) vertex[axis] = -vertex[axis];
+            }
+            foreach (ModelMeshFaceData face in element.NonCuboid.Faces)
+            {
+                Array.Reverse(face.Vertices);
+                face.Uv?.Reverse();
+            }
+        }
         double oldFrom = element.From[axis];
         double oldTo = element.To[axis];
         element.From[axis] = -oldTo;
@@ -4191,6 +4332,7 @@ public sealed partial class DebugWindowManager
             double sizeX = element.SizeX;
             double sizeY = element.SizeY;
             double sizeZ = element.SizeZ;
+            double[] previousFrom = (double[])element.From.Clone();
             bool hadOrigin = element.RotationOrigin != null;
 
             element.From[0] = ModelRoundForReparent(newFrom.X);
@@ -4199,6 +4341,19 @@ public sealed partial class DebugWindowManager
             element.To[0] = ModelRoundForReparent(newFrom.X + sizeX);
             element.To[1] = ModelRoundForReparent(newFrom.Y + sizeY);
             element.To[2] = ModelRoundForReparent(newFrom.Z + sizeZ);
+            if (element.NonCuboid?.Editable == true)
+            {
+                double dx = element.From[0] - previousFrom[0];
+                double dy = element.From[1] - previousFrom[1];
+                double dz = element.From[2] - previousFrom[2];
+                foreach (double[] vertex in element.NonCuboid.Vertices)
+                {
+                    if (vertex.Length < 3) continue;
+                    vertex[0] = ModelRoundForReparent(vertex[0] + dx);
+                    vertex[1] = ModelRoundForReparent(vertex[1] + dy);
+                    vertex[2] = ModelRoundForReparent(vertex[2] + dz);
+                }
+            }
             element.RotationX = ModelWrapDegrees(euler.X);
             element.RotationY = ModelWrapDegrees(euler.Y);
             element.RotationZ = ModelWrapDegrees(euler.Z);
@@ -4305,7 +4460,7 @@ public sealed partial class DebugWindowManager
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
             if (!string.Equals(current, _modelPendingEditSnapshot, StringComparison.Ordinal))
             {
-                _modelUndoStack.Add(new ModelHistoryEntry(label, _modelPendingEditSnapshot, ModelGetSelectionPath(), _modelSelectedFace, ModelGetSelectionPaths()));
+                _modelUndoStack.Add(ModelCaptureHistoryEntry(label, _modelPendingEditSnapshot));
                 if (_modelUndoStack.Count > ModelHistoryLimit)
                 {
                     _modelUndoStack.RemoveAt(0);
@@ -4332,7 +4487,7 @@ public sealed partial class DebugWindowManager
         try
         {
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
-            _modelRedoStack.Add(new ModelHistoryEntry(entry.Label, current, ModelGetSelectionPath(), _modelSelectedFace, ModelGetSelectionPaths()));
+            _modelRedoStack.Add(ModelCaptureHistoryEntry(entry.Label, current));
             ModelRestoreFromHistory(entry);
             _modelStatus = $"Undid: {entry.Label}.";
         }
@@ -4351,7 +4506,7 @@ public sealed partial class DebugWindowManager
         try
         {
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
-            _modelUndoStack.Add(new ModelHistoryEntry(entry.Label, current, ModelGetSelectionPath(), _modelSelectedFace, ModelGetSelectionPaths()));
+            _modelUndoStack.Add(ModelCaptureHistoryEntry(entry.Label, current));
             ModelRestoreFromHistory(entry);
             _modelStatus = $"Redid: {entry.Label}.";
         }
@@ -4382,11 +4537,43 @@ public sealed partial class DebugWindowManager
             ModelSelectElement(restored.Roots.FirstOrDefault());
         }
         _modelSelectedFace = entry.SelectedFace;
+        _modelMeshSelectionMode = entry.MeshSelectionMode;
+        ModelClearMeshComponentSelection();
+        if (entry.MeshVertices != null)
+        {
+            foreach (int vertex in entry.MeshVertices) _modelMeshSelectedVertices.Add(vertex);
+            _modelMeshVertexSelectionOrder.AddRange(entry.MeshVertices);
+            _modelMeshActiveVertex = entry.MeshVertices.LastOrDefault(-1);
+        }
+        if (entry.MeshEdges != null)
+        {
+            foreach (int[] edge in entry.MeshEdges) if (edge.Length >= 2) _modelMeshSelectedEdges.Add(ModelMeshEdge.Create(edge[0], edge[1]));
+            _modelMeshActiveEdge = _modelMeshSelectedEdges.Count > 0 ? _modelMeshSelectedEdges.Last() : null;
+        }
+        if (entry.MeshFaces != null)
+        {
+            foreach (int face in entry.MeshFaces) _modelMeshSelectedFaces.Add(face);
+            _modelMeshActiveFace = entry.MeshFaces.LastOrDefault(-1);
+        }
         _modelPreviewDirty = true;
         _modelJsonBufferStale = true;
         _modelLiveDirty = true;
         _modelLiveChangedAtMs = _api.World?.ElapsedMilliseconds ?? 0;
         _modelReparentSource = null;
+    }
+
+    private ModelHistoryEntry ModelCaptureHistoryEntry(string label, string json)
+    {
+        return new ModelHistoryEntry(
+            label,
+            json,
+            ModelGetSelectionPath(),
+            _modelSelectedFace,
+            ModelGetSelectionPaths(),
+            _modelMeshSelectionMode,
+            [.. _modelMeshSelectedVertices.Order()],
+            _modelMeshSelectedEdges.OrderBy(edge => edge.A).ThenBy(edge => edge.B).Select(edge => new[] { edge.A, edge.B }).ToArray(),
+            [.. _modelMeshSelectedFaces.Order()]);
     }
 
     private int[]? ModelGetSelectionPath()

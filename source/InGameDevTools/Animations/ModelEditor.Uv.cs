@@ -37,6 +37,9 @@ public sealed partial class DebugWindowManager
     private int _modelUvSnapIndex = 2;
     private ModelUvDragMode _modelUvDragMode = ModelUvDragMode.None;
     private ModelFaceData? _modelUvDragFace;
+    private ModelMeshFaceData? _modelUvDragMeshFace;
+    private int _modelUvDragMeshCorner = -1;
+    private List<float[]> _modelUvDragMeshStartUv = [];
     private NVector2 _modelUvDragStartMouse;
     private float[] _modelUvDragStartUv = new float[4];
     private readonly Random _modelUvRandom = new();
@@ -165,6 +168,13 @@ public sealed partial class DebugWindowManager
                         if (face != null && string.Equals(face.Texture, oldCode, StringComparison.Ordinal))
                         {
                             face.Texture = selectedTexture.Code;
+                        }
+                    }
+                    if (element.NonCuboid?.Editable == true)
+                    {
+                        foreach (ModelMeshFaceData face in element.NonCuboid.Faces)
+                        {
+                            if (string.Equals(face.Texture, oldCode, StringComparison.Ordinal)) face.Texture = selectedTexture.Code;
                         }
                     }
                 }
@@ -947,6 +957,97 @@ public sealed partial class DebugWindowManager
                 _modelUvDragStartUv = (float[])hoveredFace.Uv.Clone();
             }
         }
+
+        DrawModelMeshUvFaces(doc, drawList, origin, textureCode, hovered, mouse, snapStep, bypassSnap);
+    }
+
+    private void DrawModelMeshUvFaces(
+        ModelDocumentData doc,
+        ImDrawListPtr drawList,
+        NVector2 origin,
+        string textureCode,
+        bool hovered,
+        NVector2 mouse,
+        float snapStep,
+        bool bypassSnap)
+    {
+        if (_modelUvDragMeshFace != null)
+        {
+            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            {
+                _modelUvDragMeshFace = null;
+                _modelUvDragMeshCorner = -1;
+                _modelUvDragMeshStartUv.Clear();
+                ModelEndEdit("Edit mesh UV");
+            }
+            else
+            {
+                NVector2 delta = (mouse - _modelUvDragStartMouse) / _modelUvZoom;
+                delta.X = ModelSnapUv(delta.X, snapStep, bypassSnap);
+                delta.Y = ModelSnapUv(delta.Y, snapStep, bypassSnap);
+                for (int corner = 0; corner < Math.Min(_modelUvDragMeshFace.Uv?.Count ?? 0, _modelUvDragMeshStartUv.Count); corner++)
+                {
+                    if (_modelUvDragMeshCorner >= 0 && corner != _modelUvDragMeshCorner) continue;
+                    _modelUvDragMeshFace.Uv![corner][0] = _modelUvDragMeshStartUv[corner][0] + delta.X;
+                    _modelUvDragMeshFace.Uv[corner][1] = _modelUvDragMeshStartUv[corner][1] + delta.Y;
+                }
+                ModelMarkChanged();
+            }
+        }
+
+        (ModelElementData Element, ModelMeshFaceData Face, int FaceIndex, int Corner)? hit = null;
+        foreach (ModelElementData element in doc.EnumerateElements())
+        {
+            ModelNonCuboidData? mesh = element.NonCuboid;
+            if (!element.Visible || mesh?.Editable != true) continue;
+            for (int faceIndex = 0; faceIndex < mesh.Faces.Count; faceIndex++)
+            {
+                ModelMeshFaceData face = mesh.Faces[faceIndex];
+                if (!string.Equals(face.Texture, textureCode, StringComparison.Ordinal) || face.Uv == null || face.Uv.Count != face.Vertices.Length || face.Uv.Count is not (3 or 4)) continue;
+                NVector2[] points = face.Uv.Select(value => origin + new NVector2(value[0] * _modelUvZoom, value[1] * _modelUvZoom)).ToArray();
+                bool selected = ReferenceEquals(element, _modelSelectedElement) && _modelMeshSelectedFaces.Contains(faceIndex);
+                uint color = ImGui.ColorConvertFloat4ToU32(selected ? new NVector4(1f, 0.82f, 0.3f, 0.95f) : new NVector4(0.45f, 0.9f, 0.72f, 0.76f));
+                uint fill = ImGui.ColorConvertFloat4ToU32(selected ? new NVector4(1f, 0.82f, 0.3f, 0.12f) : new NVector4(0.3f, 0.8f, 0.65f, 0.06f));
+                if (points.Length == 3) drawList.AddTriangleFilled(points[0], points[1], points[2], fill);
+                else drawList.AddQuadFilled(points[0], points[1], points[2], points[3], fill);
+                for (int corner = 0; corner < points.Length; corner++)
+                {
+                    drawList.AddLine(points[corner], points[(corner + 1) % points.Length], color, selected ? 2.2f : 1.2f);
+                    if (selected) drawList.AddCircleFilled(points[corner], 4f, color, 12);
+                }
+                if (!hovered || hit != null || _modelUvDragMeshFace != null) continue;
+                int hoveredCorner = -1;
+                for (int corner = 0; corner < points.Length; corner++) if (NVector2.Distance(mouse, points[corner]) <= 7f) { hoveredCorner = corner; break; }
+                bool inside = ModelPointInsideUvPolygon(mouse, points);
+                if (hoveredCorner >= 0 || inside) hit = (element, face, faceIndex, hoveredCorner);
+            }
+        }
+
+        if (hit != null && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            (ModelElementData element, ModelMeshFaceData face, int faceIndex, int corner) = hit.Value;
+            ModelSelectElement(element);
+            _modelMeshSelectionMode = ModelMeshSelectionMode.Face;
+            ModelSetMeshFaceSelection(faceIndex, IsDevToolsCtrlDown());
+            ModelBeginEdit();
+            _modelUvDragMeshFace = face;
+            _modelUvDragMeshCorner = corner;
+            _modelUvDragStartMouse = mouse;
+            _modelUvDragMeshStartUv = face.Uv!.Select(value => (float[])value.Clone()).ToList();
+        }
+    }
+
+    private static bool ModelPointInsideUvPolygon(NVector2 point, IReadOnlyList<NVector2> polygon)
+    {
+        bool inside = false;
+        for (int i = 0, j = polygon.Count - 1; i < polygon.Count; j = i++)
+        {
+            NVector2 a = polygon[i], b = polygon[j];
+            if ((a.Y > point.Y) == (b.Y > point.Y)) continue;
+            float x = (b.X - a.X) * (point.Y - a.Y) / Math.Max(0.000001f, b.Y - a.Y) + a.X;
+            if (point.X < x) inside = !inside;
+        }
+        return inside;
     }
 
     private void DrawModelTexturePaintCursorAndInput(

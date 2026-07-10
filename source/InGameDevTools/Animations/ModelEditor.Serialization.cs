@@ -31,7 +31,7 @@ public sealed partial class DebugWindowManager
     private static readonly HashSet<string> ModelKnownElementKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "name", "from", "to", "rotationOrigin", "rotationX", "rotationY", "rotationZ",
-        "shade", "stepParentName", "faces", "children"
+        "shade", "stepParentName", "faces", "children", "noncuboid"
     };
 
     private static readonly HashSet<string> ModelKnownFaceKeys = new(StringComparer.OrdinalIgnoreCase)
@@ -145,6 +145,12 @@ public sealed partial class DebugWindowManager
                 if (faceIndex < 0 || faceProperty.Value is not JObject faceJson) continue;
                 element.Faces[faceIndex] = ModelParseFace(faceJson);
             }
+        }
+
+        if (ModelFindProperty(json, "noncuboid")?.Value is JToken nonCuboid)
+        {
+            ModelTryParseNonCuboid(nonCuboid, out ModelNonCuboidData parsed);
+            element.NonCuboid = parsed;
         }
 
         if (ModelFindProperty(json, "children")?.Value is JArray children)
@@ -308,7 +314,7 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        return root.ToString(indented ? Formatting.Indented : Formatting.None);
+        return JsonConvert.SerializeObject(root, indented ? Formatting.Indented : Formatting.None);
     }
 
     private static JObject ModelSerializeElement(ModelElementData element, bool includeInvisible)
@@ -338,6 +344,11 @@ public sealed partial class DebugWindowManager
             faces[ModelFaceNames[faceIndex]] = ModelSerializeFace(face);
         }
         if (faces.Count > 0) json["faces"] = faces;
+
+        if (element.NonCuboid != null)
+        {
+            json["noncuboid"] = ModelSerializeNonCuboid(element.NonCuboid);
+        }
 
         if (element.Children.Count > 0)
         {
@@ -601,6 +612,13 @@ public sealed partial class DebugWindowManager
                 return;
             }
 
+            string meshAnimationWarning = "";
+            if (newText.Contains("\"noncuboid\"", StringComparison.OrdinalIgnoreCase) &&
+                !ModelTryAttachMeshLibShape(shape, newText, $"{domain}:{assetPath}", out string meshStatus))
+            {
+                meshAnimationWarning = $" {meshStatus}";
+            }
+
             CommitPendingVanillaHistory();
             _vanillaIndex.SetShapeDocument(_api, shape, domain, assetPath, $"{domain}:{assetPath}", TryParseJsonObject(newText));
             RequestVanillaAnimationSourceTab(VanillaAnimationSourceMode.Shapes);
@@ -608,7 +626,7 @@ public sealed partial class DebugWindowManager
             _vanillaDomainFilter = "";
             ResetVanillaEntitySelectionState();
             _activeDevToolsTab = DevToolsTab.Animations;
-            _modelStatus = $"Saved {domain}:{assetPath} and opened it in the animation editor.";
+            _modelStatus = $"Saved {domain}:{assetPath} and opened it in the animation editor.{meshAnimationWarning}";
         }
         catch (Exception exception)
         {
@@ -652,11 +670,13 @@ public sealed partial class DebugWindowManager
     private void DrawModelRuntimeControls(ModelDocumentData doc)
     {
         IAsset? runtimeAsset = ModelFindRuntimeAsset(doc);
+        string meshRuntimeStatus = "";
+        bool meshRuntimeReady = !ModelDocumentContainsNonCuboid(doc) || ModelMeshLibIsOperational(out meshRuntimeStatus);
         _liveApplyManager.DrawTargetControls(
             "model-live",
             ModelLiveApplyKey(doc),
             doc.DisplayPath,
-            runtimeAsset != null,
+            runtimeAsset != null && meshRuntimeReady,
             () => ApplyModelRuntime(force: true),
             RevertModelRuntime);
         if (runtimeAsset == null && doc.IsNew)
@@ -665,7 +685,9 @@ public sealed partial class DebugWindowManager
         }
         else if (runtimeAsset != null)
         {
-            ImGui.TextDisabled("Applying reloads and re-tesselates all shapes; the game may pause briefly.");
+            ImGui.TextDisabled(meshRuntimeReady
+                ? "Applying reloads and re-tesselates all shapes; the game may pause briefly."
+                : $"Live apply disabled: {meshRuntimeStatus}");
         }
     }
 
@@ -678,6 +700,11 @@ public sealed partial class DebugWindowManager
         }
 
         ModelDocumentData doc = _modelDoc;
+        if (ModelDocumentContainsNonCuboid(doc) && !ModelMeshLibIsOperational(out string meshRuntimeStatus))
+        {
+            _liveApplyManager.LastStatus = $"Models: MeshLib live apply unavailable. {meshRuntimeStatus}";
+            return _liveApplyManager.LastStatus;
+        }
         IAsset? asset = ModelFindRuntimeAsset(doc);
         if (asset == null)
         {

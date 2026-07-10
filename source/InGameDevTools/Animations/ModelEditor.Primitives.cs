@@ -123,7 +123,7 @@ public sealed partial class DebugWindowManager
             changed |= ImGui.Combo("Shape##model-prim-kind", ref _modelPrimitiveKindIndex, ModelPrimitiveKindLabels, ModelPrimitiveKindLabels.Length);
             ModelPrimitiveKind kind = (ModelPrimitiveKind)_modelPrimitiveKindIndex;
 
-            bool styleApplies = ModelPrimitiveSupportsExactMergedStyle(kind);
+            bool styleApplies = !ModelIsMeshLibMode && ModelPrimitiveSupportsExactMergedStyle(kind);
             if (styleApplies)
             {
                 int style = _modelPrimitiveStepped ? 0 : 1;
@@ -140,7 +140,7 @@ public sealed partial class DebugWindowManager
                 }
                 _modelPrimitiveStepped = style == 0;
             }
-            else
+            else if (!ModelIsMeshLibMode)
             {
                 _modelPrimitiveStepped = true;
                 ImGui.TextDisabled(kind switch
@@ -149,8 +149,12 @@ public sealed partial class DebugWindowManager
                     _ => "Construction: exact axis-aligned cuboids."
                 });
             }
+            else
+            {
+                ImGui.TextDisabled("Construction: one shared-vertex MeshLib triangle/quad surface.");
+            }
 
-            if (ModelPrimitiveUsesExactValidation(kind, _modelPrimitiveStepped))
+            if (!ModelIsMeshLibMode && ModelPrimitiveUsesExactValidation(kind, _modelPrimitiveStepped))
             {
                 changed |= ImGui.Checkbox("Cull internal faces##model-prim-cull-internal", ref _modelPrimitiveCullInternalFaces);
                 if (ImGui.IsItemHovered())
@@ -204,7 +208,9 @@ public sealed partial class DebugWindowManager
             }
             else
             {
-                ImGui.TextUnformatted($"{_modelPrimitivePreviewMetrics.ModeLabel}: {elementCount} cuboid(s), {_modelPrimitivePreviewMetrics.EnabledFaces} enabled face(s), {_modelPrimitivePreviewMetrics.CulledInternalFaces} internal face(s) culled, quality: {_modelPrimitivePreviewMetrics.QualityLabel}.");
+                ImGui.TextUnformatted(ModelIsMeshLibMode && _modelPrimitivePreviewParent?.NonCuboid != null
+                    ? $"MeshLib surface: {_modelPrimitivePreviewParent.NonCuboid.Vertices.Count} vertices, {_modelPrimitivePreviewParent.NonCuboid.Faces.Count} faces, quality: {_modelPrimitivePreviewMetrics.QualityLabel}."
+                    : $"{_modelPrimitivePreviewMetrics.ModeLabel}: {elementCount} cuboid(s), {_modelPrimitivePreviewMetrics.EnabledFaces} enabled face(s), {_modelPrimitivePreviewMetrics.CulledInternalFaces} internal face(s) culled, quality: {_modelPrimitivePreviewMetrics.QualityLabel}.");
                 if (_modelPrimitivePreviewMetrics.Warnings.Count > 0)
                 {
                     ImGui.TextColored(new NVector4(1f, 0.72f, 0.32f, 1f), $"{_modelPrimitivePreviewMetrics.Warnings.Count} warning(s): {_modelPrimitivePreviewMetrics.Warnings[0]}");
@@ -220,7 +226,9 @@ public sealed partial class DebugWindowManager
             if (!canCreate) ImGui.EndDisabled();
             if (ImGui.IsItemHovered())
             {
-                ImGui.SetTooltip("Add the cuboids to the shape, grouped under a new face-less parent element (single undo step).");
+                ImGui.SetTooltip(ModelIsMeshLibMode
+                    ? "Add this true triangle/quad mesh as one MeshLib element (single undo step)."
+                    : "Add the cuboids to the shape, grouped under a new face-less parent element (single undo step).");
             }
             ImGui.SameLine();
             if (ImGui.Button("Close##model-prim-close"))
@@ -549,7 +557,9 @@ public sealed partial class DebugWindowManager
         ModelSelectElement(parent);
         ModelMarkChanged();
         ModelEndEdit("Add primitive");
-        _modelStatus = $"Added {parent.Name} with {ModelPrimitiveCuboidCount(parent.Children)} cuboid(s).";
+        _modelStatus = parent.NonCuboid != null
+            ? $"Added MeshLib {parent.Name} with {parent.NonCuboid.Vertices.Count} vertices and {parent.NonCuboid.Faces.Count} faces."
+            : $"Added {parent.Name} with {ModelPrimitiveCuboidCount(parent.Children)} cuboid(s).";
     }
 
     private static void ModelNamePrimitiveChildren(ModelElementData element, string baseName, ref int index)
@@ -569,6 +579,11 @@ public sealed partial class DebugWindowManager
         }
 
         uint ghost = ImGui.ColorConvertFloat4ToU32(new NVector4(0.3f, 0.95f, 0.9f, 0.65f));
+        if (_modelPrimitivePreviewParent.NonCuboid?.Editable == true)
+        {
+            DrawModelMeshWireOverlay(drawList, camera, _modelPrimitivePreviewParent, ghost, 1.2f, drawVertices: false);
+            return;
+        }
         foreach (ModelElementData child in ModelPrimitiveLeafElements(_modelPrimitivePreviewParent.Children))
         {
             Matrixf matrix = ModelComputeElementMatrix(child);
@@ -609,6 +624,10 @@ public sealed partial class DebugWindowManager
             _modelPrimitiveRotation.Z = (float)ModelWrapDegrees(_modelPrimitiveRotation.Z);
 
             ModelPrimitiveKind kind = (ModelPrimitiveKind)_modelPrimitiveKindIndex;
+            if (ModelIsMeshLibMode)
+            {
+                return ModelBuildMeshLibPrimitive(kind, out error);
+            }
             ModelElementData parent = new()
             {
                 Name = kind switch
