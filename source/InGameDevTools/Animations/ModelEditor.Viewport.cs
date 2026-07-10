@@ -335,7 +335,7 @@ public sealed partial class DebugWindowManager
         bool toolOverlayActive = HandleModelViewportToolOverlayInput(min, max);
         if (toolOverlayActive) hovered = false;
 
-        if (hovered && !_modelGizmoDragging)
+        if (hovered && !ModelAnyViewportGizmoDragging)
         {
             NVector2 delta = ImGui.GetIO().MouseDelta;
             bool pan = ImGui.IsMouseDragging(ImGuiMouseButton.Middle) ||
@@ -449,7 +449,14 @@ public sealed partial class DebugWindowManager
             }
             else if (_modelGizmoTool is ModelGizmoTool.Extrude or ModelGizmoTool.Inset or ModelGizmoTool.Subdivide)
             {
-                gizmoConsumedMouse = false;
+                if (selected != null && _modelDoc.EnumerateElements().Contains(selected))
+                {
+                    gizmoConsumedMouse = DrawModelMeshTopologyGizmo(drawList, camera, selected, hovered);
+                }
+                else if (_modelMeshTopologyDragging)
+                {
+                    ModelEndMeshTopologyDrag(commit: false);
+                }
             }
             else if (selected != null && _modelDoc.EnumerateElements().Contains(selected))
             {
@@ -466,6 +473,14 @@ public sealed partial class DebugWindowManager
             {
                 ModelEndGizmoDrag(commit: true);
             }
+            if (_modelMeshComponentDragging && !ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            {
+                ModelEndMeshComponentDrag(commit: true);
+            }
+            if (_modelMeshTopologyDragging && !ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            {
+                ModelEndMeshTopologyDrag(commit: true);
+            }
 
             DrawModelPrimitiveGhost(drawList, camera);
             DrawModelCreatureGhost(drawList, camera);
@@ -473,7 +488,7 @@ public sealed partial class DebugWindowManager
             DrawModelClothingGhost(drawList, camera);
             DrawWeaponGhost(drawList, camera);
 
-            if (hovered && !gizmoConsumedMouse && !_modelGizmoDragging && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+            if (hovered && !gizmoConsumedMouse && !ModelAnyViewportGizmoDragging && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
             {
                 bool additive = IsDevToolsCtrlDown();
                 if (!ModelHandleMeshViewportSelection(camera, ImGui.GetMousePos(), additive))
@@ -539,8 +554,7 @@ public sealed partial class DebugWindowManager
             int primaryRows = ModelIsMeshLibMode ? 7 : 6;
             if (row >= 0 && row < primaryRows)
             {
-                if (_modelGizmoDragging) ModelEndGizmoDrag(commit: true);
-                _modelGizmoTool = row switch
+                ModelSetGizmoTool(row switch
                 {
                     0 => ModelGizmoTool.None,
                     1 => ModelGizmoTool.Move,
@@ -549,7 +563,7 @@ public sealed partial class DebugWindowManager
                     4 => ModelIsMeshLibMode ? ModelGizmoTool.Extrude : ModelGizmoTool.Cut,
                     5 => ModelIsMeshLibMode ? ModelGizmoTool.Inset : ModelGizmoTool.Chisel,
                     _ => ModelGizmoTool.Subdivide
-                };
+                });
             }
             else if (_modelGizmoTool == ModelGizmoTool.Cut && row >= 7 && row < 11)
             {
@@ -588,9 +602,9 @@ public sealed partial class DebugWindowManager
             DrawModelViewportToolRadio(position, rowStride, 3, "Rotate", ModelGizmoTool.Rotate, "Drag the rings to rotate around the rotation origin (Ctrl+Shift+4).", ref hoveredOrActive);
             if (ModelIsMeshLibMode)
             {
-                DrawModelViewportToolRadio(position, rowStride, 4, "Extrude", ModelGizmoTool.Extrude, "Select connected faces, set the distance in the toolbar, then Apply.", ref hoveredOrActive);
-                DrawModelViewportToolRadio(position, rowStride, 5, "Inset", ModelGizmoTool.Inset, "Select a coplanar face region, set its inset fraction, then Apply.", ref hoveredOrActive);
-                DrawModelViewportToolRadio(position, rowStride, 6, "Subdivide", ModelGizmoTool.Subdivide, "Select faces or edges and use Subdivide in the toolbar or inspector.", ref hoveredOrActive);
+                DrawModelViewportToolRadio(position, rowStride, 4, "Extrude", ModelGizmoTool.Extrude, "Select connected faces, then drag a face-normal arrow to extrude (Ctrl+Shift+5).", ref hoveredOrActive);
+                DrawModelViewportToolRadio(position, rowStride, 5, "Inset", ModelGizmoTool.Inset, "Select a coplanar face region, then drag its diamond handle inward (Ctrl+Shift+6).", ref hoveredOrActive);
+                DrawModelViewportToolRadio(position, rowStride, 6, "Subdivide", ModelGizmoTool.Subdivide, "Select faces or edges, then click the purple diamond gizmo (Ctrl+Shift+7).", ref hoveredOrActive);
             }
             else
             {
@@ -621,8 +635,7 @@ public sealed partial class DebugWindowManager
         ImGui.SetCursorScreenPos(position + new NVector2(0f, row * rowStride));
         if (ImGui.RadioButton($"{label}##{label}", _modelGizmoTool == tool))
         {
-            if (_modelGizmoDragging) ModelEndGizmoDrag(commit: true);
-            _modelGizmoTool = tool;
+            ModelSetGizmoTool(tool);
         }
 
         hoveredOrActive |= ImGui.IsItemHovered() || ImGui.IsItemActive();

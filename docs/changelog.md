@@ -6,6 +6,8 @@
 
 - Added an optional MeshLib model-editor mode with validated triangle/quad `noncuboid` authoring, component/topology/UV tools, cuboid conversion, true-mesh primitives, and reflective preview/live-apply integration.
 
+- Replaced the MeshLib extrude, inset, and subdivide toolbar actions with direct viewport gizmos and wire previews.
+
 - Fixed the DevTools window closing behavior when leaving a world, and moved the animation, creature, and Prism generators into the main editor window as embedded panels.
 - Fixed creature-generator scaling UVs so large generated parts stay textured, and rebuilt membrane wings as segmented torso-connected spars with per-segment membrane panels instead of detached web panels or one giant sheet.
 - Fixed procedural animation previews for generated shapes so passive generated surface panels no longer double-transform, and generator slider edits can live-update the currently looping generated animation.

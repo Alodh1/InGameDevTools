@@ -95,8 +95,6 @@ public sealed partial class DebugWindowManager
     private int _modelMeshActiveVertex = -1;
     private ModelMeshEdge? _modelMeshActiveEdge;
     private int _modelMeshActiveFace = -1;
-    private float _modelMeshExtrudeDistance = 1f;
-    private float _modelMeshInsetFraction = 0.2f;
     private float _modelMeshWeldTolerance = 0.0001f;
     private string _modelMeshValidationStatus = "";
 
@@ -136,7 +134,7 @@ public sealed partial class DebugWindowManager
                 ModelClearMeshComponentSelection();
                 if (_modelGizmoTool is ModelGizmoTool.Extrude or ModelGizmoTool.Inset or ModelGizmoTool.Subdivide)
                 {
-                    _modelGizmoTool = ModelGizmoTool.None;
+                    ModelSetGizmoTool(ModelGizmoTool.None);
                 }
             }
             _modelPreviewDirty = true;
@@ -180,26 +178,6 @@ public sealed partial class DebugWindowManager
         if (ImGui.SmallButton("Invert##model-mesh-select-invert")) ModelInvertMeshComponentSelection();
         ImGui.SameLine();
         if (ImGui.SmallButton("Connected##model-mesh-select-connected")) ModelSelectConnectedMeshComponents();
-
-        if (_modelMeshSelectionMode == ModelMeshSelectionMode.Face)
-        {
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(72f);
-            ImGui.DragFloat("Extrude##model-mesh-extrude-distance", ref _modelMeshExtrudeDistance, 0.05f, -64f, 64f, "%.3f");
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Apply##model-mesh-extrude")) ModelExtrudeSelectedMeshFaces(_modelMeshExtrudeDistance);
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(68f);
-            ImGui.SliderFloat("Inset##model-mesh-inset-fraction", ref _modelMeshInsetFraction, 0.01f, 0.95f, "%.2f");
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Apply##model-mesh-inset")) ModelInsetSelectedMeshFaces(_modelMeshInsetFraction);
-        }
-
-        if (_modelMeshSelectionMode is ModelMeshSelectionMode.Edge or ModelMeshSelectionMode.Face)
-        {
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Subdivide##model-mesh-subdivide")) ModelSubdivideSelectedMeshComponents();
-        }
     }
 
     private static bool ModelTryParseNonCuboid(JToken token, out ModelNonCuboidData data)

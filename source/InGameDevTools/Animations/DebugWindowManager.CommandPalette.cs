@@ -30,6 +30,7 @@ public sealed partial class DebugWindowManager
 
     private void RequestDevToolsTab(DevToolsTab tab)
     {
+        if (tab != DevToolsTab.Models) ModelEndViewportGizmoInteractions(commitTransforms: true);
         _requestedDevToolsTab = tab;
         _activeDevToolsTab = tab;
         if (tab == DevToolsTab.Animations)
@@ -47,6 +48,7 @@ public sealed partial class DebugWindowManager
 
     private void AcceptMainTabSelection(DevToolsTab tab)
     {
+        if (tab != DevToolsTab.Models) ModelEndViewportGizmoInteractions(commitTransforms: true);
         _activeDevToolsTab = tab;
         if (_requestedDevToolsTab == tab)
         {

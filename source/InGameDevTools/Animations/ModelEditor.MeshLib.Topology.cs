@@ -224,10 +224,20 @@ public sealed partial class DebugWindowManager
         if (mesh?.Editable != true) return;
         if (_modelMeshSelectionMode == ModelMeshSelectionMode.Face)
         {
+            if (!ModelMeshFacesHaveValidCoordinates(mesh, _modelMeshSelectedFaces, out string error))
+            {
+                _modelStatus = error;
+                return;
+            }
             ModelSubdivideMeshFaces(mesh, _modelMeshSelectedFaces);
         }
         else if (_modelMeshSelectionMode == ModelMeshSelectionMode.Edge)
         {
+            if (!ModelMeshEdgesHaveValidCoordinates(mesh, _modelMeshSelectedEdges, out string error))
+            {
+                _modelStatus = error;
+                return;
+            }
             ModelSubdivideMeshEdges(mesh, _modelMeshSelectedEdges);
         }
         else
@@ -240,6 +250,17 @@ public sealed partial class DebugWindowManager
     {
         if (selectedFaces.Count == 0) return;
         ModelBeginEdit();
+        HashSet<int> newSelection = ModelApplyMeshFaceSubdivision(mesh, selectedFaces);
+        ModelMarkChanged();
+        ModelEndEdit("Subdivide mesh faces");
+        ModelClearMeshComponentSelection();
+        _modelMeshSelectionMode = ModelMeshSelectionMode.Face;
+        _modelMeshSelectedFaces.UnionWith(newSelection);
+        _modelMeshActiveFace = newSelection.LastOrDefault(-1);
+    }
+
+    private static HashSet<int> ModelApplyMeshFaceSubdivision(ModelNonCuboidData mesh, IReadOnlySet<int> selectedFaces)
+    {
         Dictionary<ModelMeshEdge, int> midpoints = [];
         List<ModelMeshFaceData> output = [];
         HashSet<int> newSelection = [];
@@ -288,18 +309,24 @@ public sealed partial class DebugWindowManager
             }
         }
         mesh.Faces = output;
-        ModelClearMeshComponentSelection();
-        _modelMeshSelectionMode = ModelMeshSelectionMode.Face;
-        _modelMeshSelectedFaces.UnionWith(newSelection);
-        _modelMeshActiveFace = newSelection.LastOrDefault(-1);
-        ModelMarkChanged();
-        ModelEndEdit("Subdivide mesh faces");
+        return newSelection;
     }
 
     private void ModelSubdivideMeshEdges(ModelNonCuboidData mesh, IReadOnlySet<ModelMeshEdge> selectedEdges)
     {
         if (selectedEdges.Count == 0) return;
         ModelBeginEdit();
+        HashSet<int> newSelection = ModelApplyMeshEdgeSubdivision(mesh, selectedEdges);
+        ModelMarkChanged();
+        ModelEndEdit("Subdivide mesh edges");
+        ModelClearMeshComponentSelection();
+        _modelMeshSelectionMode = ModelMeshSelectionMode.Face;
+        _modelMeshSelectedFaces.UnionWith(newSelection);
+        _modelMeshActiveFace = newSelection.LastOrDefault(-1);
+    }
+
+    private static HashSet<int> ModelApplyMeshEdgeSubdivision(ModelNonCuboidData mesh, IReadOnlySet<ModelMeshEdge> selectedEdges)
+    {
         Dictionary<ModelMeshEdge, int> midpoints = [];
         foreach (ModelMeshEdge edge in selectedEdges) ModelGetOrCreateMeshMidpoint(mesh, midpoints, edge.A, edge.B);
         List<ModelMeshFaceData> output = [];
@@ -339,12 +366,7 @@ public sealed partial class DebugWindowManager
             }
         }
         mesh.Faces = output;
-        ModelClearMeshComponentSelection();
-        _modelMeshSelectionMode = ModelMeshSelectionMode.Face;
-        _modelMeshSelectedFaces.UnionWith(newSelection);
-        _modelMeshActiveFace = newSelection.LastOrDefault(-1);
-        ModelMarkChanged();
-        ModelEndEdit("Subdivide mesh edges");
+        return newSelection;
     }
 
     private static int ModelGetOrCreateMeshMidpoint(ModelNonCuboidData mesh, Dictionary<ModelMeshEdge, int> midpoints, int a, int b)
@@ -400,12 +422,25 @@ public sealed partial class DebugWindowManager
     {
         ModelNonCuboidData? mesh = _modelSelectedElement?.NonCuboid;
         if (mesh?.Editable != true || _modelMeshSelectedFaces.Count == 0) return;
+        if (!ModelMeshFacesHaveValidCoordinates(mesh, _modelMeshSelectedFaces, out string validationError))
+        {
+            _modelStatus = validationError;
+            return;
+        }
         if (!ModelTryBuildMeshFaceRegions(mesh, _modelMeshSelectedFaces, out List<HashSet<int>> regions, out string error))
         {
             _modelStatus = error;
             return;
         }
         ModelBeginEdit();
+        ModelApplyMeshFaceExtrusion(mesh, regions, distance);
+        ModelMarkChanged();
+        ModelEndEdit("Extrude mesh face region");
+        _modelStatus = $"Extruded {_modelMeshSelectedFaces.Count} face(s) by {distance:0.###} units.";
+    }
+
+    private static void ModelApplyMeshFaceExtrusion(ModelNonCuboidData mesh, IEnumerable<HashSet<int>> regions, float distance)
+    {
         foreach (HashSet<int> region in regions)
         {
             NVector3 normal = ModelMeshRegionNormal(mesh, region);
@@ -435,9 +470,6 @@ public sealed partial class DebugWindowManager
                 });
             }
         }
-        ModelMarkChanged();
-        ModelEndEdit("Extrude mesh face region");
-        _modelStatus = $"Extruded {_modelMeshSelectedFaces.Count} face(s) by {distance:0.###} units.";
     }
 
     private void ModelInsetSelectedMeshFaces(float fraction)
@@ -445,6 +477,11 @@ public sealed partial class DebugWindowManager
         ModelNonCuboidData? mesh = _modelSelectedElement?.NonCuboid;
         if (mesh?.Editable != true || _modelMeshSelectedFaces.Count == 0) return;
         fraction = Math.Clamp(fraction, 0.01f, 0.95f);
+        if (!ModelMeshFacesHaveValidCoordinates(mesh, _modelMeshSelectedFaces, out string validationError))
+        {
+            _modelStatus = validationError;
+            return;
+        }
         if (!ModelTryBuildMeshFaceRegions(mesh, _modelMeshSelectedFaces, out List<HashSet<int>> regions, out string error))
         {
             _modelStatus = error;
@@ -460,6 +497,14 @@ public sealed partial class DebugWindowManager
         }
 
         ModelBeginEdit();
+        ModelApplyMeshFaceInset(mesh, regions, fraction);
+        ModelMarkChanged();
+        ModelEndEdit("Inset mesh face region");
+        _modelStatus = $"Inset {_modelMeshSelectedFaces.Count} face(s) by {fraction:P0}.";
+    }
+
+    private static void ModelApplyMeshFaceInset(ModelNonCuboidData mesh, IEnumerable<HashSet<int>> regions, float fraction)
+    {
         foreach (HashSet<int> region in regions)
         {
             int[] regionVertices = region.SelectMany(index => mesh.Faces[index].Vertices).Distinct().ToArray();
@@ -494,9 +539,6 @@ public sealed partial class DebugWindowManager
                 });
             }
         }
-        ModelMarkChanged();
-        ModelEndEdit("Inset mesh face region");
-        _modelStatus = $"Inset {_modelMeshSelectedFaces.Count} face(s) by {fraction:P0}.";
     }
 
     private static bool ModelTryBuildMeshFaceRegions(ModelNonCuboidData mesh, IReadOnlySet<int> selection, out List<HashSet<int>> regions, out string error)
@@ -541,6 +583,75 @@ public sealed partial class DebugWindowManager
             regions.Add(region);
         }
         return regions.Count > 0;
+    }
+
+    private static bool ModelMeshFacesHaveValidCoordinates(
+        ModelNonCuboidData mesh,
+        IEnumerable<int> selectedFaces,
+        out string error)
+    {
+        int[] faces = selectedFaces.Distinct().ToArray();
+        if (faces.Length == 0)
+        {
+            error = "Select one or more mesh faces.";
+            return false;
+        }
+
+        foreach (int faceIndex in faces)
+        {
+            if (faceIndex < 0 || faceIndex >= mesh.Faces.Count)
+            {
+                error = "The face selection is stale. Select the mesh faces again.";
+                return false;
+            }
+
+            ModelMeshFaceData face = mesh.Faces[faceIndex];
+            if (face.Vertices.Length is not (3 or 4) ||
+                face.Vertices.Distinct().Count() < 3 ||
+                face.Vertices.Any(vertexIndex =>
+                    vertexIndex < 0 ||
+                    vertexIndex >= mesh.Vertices.Count ||
+                    mesh.Vertices[vertexIndex].Length < 3 ||
+                    mesh.Vertices[vertexIndex].Take(3).Any(value => !double.IsFinite(value))))
+            {
+                error = "Selected faces contain invalid vertex data. Fix the mesh validation errors before using topology tools.";
+                return false;
+            }
+        }
+
+        error = "";
+        return true;
+    }
+
+    private static bool ModelMeshEdgesHaveValidCoordinates(
+        ModelNonCuboidData mesh,
+        IReadOnlySet<ModelMeshEdge> selectedEdges,
+        out string error)
+    {
+        if (selectedEdges.Count == 0)
+        {
+            error = "Select one or more mesh edges.";
+            return false;
+        }
+        foreach (ModelMeshEdge edge in selectedEdges)
+        {
+            if (edge.A < 0 || edge.B < 0 || edge.A >= mesh.Vertices.Count || edge.B >= mesh.Vertices.Count ||
+                mesh.Vertices[edge.A].Length < 3 || mesh.Vertices[edge.B].Length < 3)
+            {
+                error = "Selected edges contain invalid vertex data. Fix the mesh validation errors before subdividing.";
+                return false;
+            }
+        }
+
+        int[] affectedFaces = Enumerable.Range(0, mesh.Faces.Count)
+            .Where(faceIndex => ModelFaceContainsAnyEdge(mesh.Faces[faceIndex], selectedEdges))
+            .ToArray();
+        if (affectedFaces.Length == 0)
+        {
+            error = "The edge selection is stale. Select the mesh edges again.";
+            return false;
+        }
+        return ModelMeshFacesHaveValidCoordinates(mesh, affectedFaces, out error);
     }
 
     private static List<(int A, int B, ModelMeshFaceData Face)> ModelMeshRegionBoundary(ModelNonCuboidData mesh, IReadOnlySet<int> region)

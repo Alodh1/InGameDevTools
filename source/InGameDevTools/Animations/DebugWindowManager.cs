@@ -1187,6 +1187,7 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGuiWindowFlags windowFlags = ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings;
         if (_devToolsCollapsed)
         {
+            ModelEndViewportGizmoInteractions(commitTransforms: true);
             RestoreExpandedEditorInputSuppression();
             ClearAiBehaviorLiveApplyState();
             RestoreWorldgenPreviewForEditorTeardown("devtools collapsed");

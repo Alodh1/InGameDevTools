@@ -2462,31 +2462,31 @@ public sealed partial class DebugWindowManager
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._1, GlKeys.Number1))
         {
-            _modelGizmoTool = ModelGizmoTool.None;
+            ModelSetGizmoTool(ModelGizmoTool.None);
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._2, GlKeys.Number2))
         {
-            _modelGizmoTool = ModelGizmoTool.Move;
+            ModelSetGizmoTool(ModelGizmoTool.Move);
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._3, GlKeys.Number3))
         {
-            _modelGizmoTool = ModelGizmoTool.Resize;
+            ModelSetGizmoTool(ModelGizmoTool.Resize);
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._4, GlKeys.Number4))
         {
-            _modelGizmoTool = ModelGizmoTool.Rotate;
+            ModelSetGizmoTool(ModelGizmoTool.Rotate);
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._5, GlKeys.Number5))
         {
-            _modelGizmoTool = ModelIsMeshLibMode ? ModelGizmoTool.Extrude : ModelGizmoTool.Cut;
+            ModelSetGizmoTool(ModelIsMeshLibMode ? ModelGizmoTool.Extrude : ModelGizmoTool.Cut);
         }
         else if (ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._6, GlKeys.Number6))
         {
-            _modelGizmoTool = ModelIsMeshLibMode ? ModelGizmoTool.Inset : ModelGizmoTool.Chisel;
+            ModelSetGizmoTool(ModelIsMeshLibMode ? ModelGizmoTool.Inset : ModelGizmoTool.Chisel);
         }
         else if (ModelIsMeshLibMode && ctrl && shift && IsDevToolsShortcutPressed(ImGuiKey._7, GlKeys.Number7))
         {
-            _modelGizmoTool = ModelGizmoTool.Subdivide;
+            ModelSetGizmoTool(ModelGizmoTool.Subdivide);
         }
         else if (ModelHandleNudgeShortcuts())
         {

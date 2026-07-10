@@ -1528,7 +1528,7 @@ public sealed partial class DebugWindowManager
             _liveApplyManager.RevertAll();
         }
 
-        if (_modelGizmoDragging) ModelEndGizmoDrag(commit: true);
+        ModelEndViewportGizmoInteractions(commitTransforms: true);
         ClearAiBehaviorLiveApplyState();
         SetEditorFrameOverride(null);
         _behavior = null;

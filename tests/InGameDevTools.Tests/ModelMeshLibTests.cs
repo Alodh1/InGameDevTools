@@ -184,6 +184,23 @@ public sealed class ModelMeshLibTests
     }
 
     [Fact]
+    public void TopologyTools_RejectSelectedFacesWithShortVertexCoordinates()
+    {
+        object mesh = ParseMesh(
+            """
+            {
+              "vertices": [[0,0,0],[4,0,0],[4,4,0],[0,4]],
+              "faces": [{"v":[0,1,2,3],"texture":"#main"}]
+            }
+            """);
+        MethodInfo validate = typeof(DebugWindowManager).GetMethod("ModelMeshFacesHaveValidCoordinates", StaticFlags)!;
+        object?[] args = [mesh, new HashSet<int> { 0 }, ""];
+
+        Assert.False((bool)validate.Invoke(null, args)!);
+        Assert.Contains("invalid vertex", args[2]!.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void SharedMidpoint_IsReusedForBothEdgeDirections()
     {
         object mesh = ParseMesh(
@@ -202,6 +219,115 @@ public sealed class ModelMeshLibTests
         Assert.Equal(forward, reverse);
         Assert.Equal(4, vertices.Count);
         Assert.Equal(new[] { 1d, 0d, 0d }, (double[])vertices[forward]!);
+    }
+
+    [Fact]
+    public void FaceExtrusion_AddsDisplacedCapAndBoundarySides()
+    {
+        object mesh = ParseMesh(
+            """
+            {
+              "vertices": [[0,0,0],[4,0,0],[4,4,0],[0,4,0]],
+              "faces": [{"v":[0,1,2,3],"texture":"#main"}]
+            }
+            """);
+        object regions = BuildFaceRegions(mesh, new HashSet<int> { 0 });
+        MethodInfo extrude = typeof(DebugWindowManager).GetMethod("ModelApplyMeshFaceExtrusion", StaticFlags)!;
+
+        extrude.Invoke(null, [mesh, regions, 2f]);
+
+        IList vertices = (IList)GetMember(mesh, "Vertices");
+        IList faces = (IList)GetMember(mesh, "Faces");
+        Assert.Equal(8, vertices.Count);
+        Assert.Equal(5, faces.Count);
+        Assert.Equal(new[] { 4, 5, 6, 7 }, (int[])GetMember(faces[0]!, "Vertices"));
+        Assert.All(vertices.Cast<double[]>().Skip(4), vertex => Assert.Equal(2d, vertex[2], 6));
+    }
+
+    [Fact]
+    public void FaceInset_AddsInnerCapAndFourBorderFaces()
+    {
+        object mesh = ParseMesh(
+            """
+            {
+              "vertices": [[0,0,0],[4,0,0],[4,4,0],[0,4,0]],
+              "faces": [{"v":[0,1,2,3],"texture":"#main"}]
+            }
+            """);
+        object regions = BuildFaceRegions(mesh, new HashSet<int> { 0 });
+        MethodInfo inset = typeof(DebugWindowManager).GetMethod("ModelApplyMeshFaceInset", StaticFlags)!;
+
+        inset.Invoke(null, [mesh, regions, 0.25f]);
+
+        IList vertices = (IList)GetMember(mesh, "Vertices");
+        IList faces = (IList)GetMember(mesh, "Faces");
+        Assert.Equal(8, vertices.Count);
+        Assert.Equal(5, faces.Count);
+        Assert.Equal(new[] { 4, 5, 6, 7 }, (int[])GetMember(faces[0]!, "Vertices"));
+        Assert.Equal(new[] { 0.5d, 0.5d, 0d }, (double[])vertices[4]!);
+        Assert.Equal(new[] { 3.5d, 3.5d, 0d }, (double[])vertices[6]!);
+    }
+
+    [Theory]
+    [InlineData("[[0,0,0],[4,0,0],[0,4,0]]", "[0,1,2]", 6)]
+    [InlineData("[[0,0,0],[4,0,0],[4,4,0],[0,4,0]]", "[0,1,2,3]", 9)]
+    public void FaceSubdivision_ProducesFourSelectedFaces(string verticesJson, string faceJson, int expectedVertexCount)
+    {
+        object mesh = ParseMesh($$"""
+            {
+              "vertices": {{verticesJson}},
+              "faces": [{"v":{{faceJson}},"texture":"#main"}]
+            }
+            """);
+        MethodInfo subdivide = typeof(DebugWindowManager).GetMethod("ModelApplyMeshFaceSubdivision", StaticFlags)!;
+
+        object selection = subdivide.Invoke(null, [mesh, new HashSet<int> { 0 }])!;
+
+        Assert.Equal(expectedVertexCount, ((IList)GetMember(mesh, "Vertices")).Count);
+        Assert.Equal(4, ((IList)GetMember(mesh, "Faces")).Count);
+        Assert.Equal(4, ((IEnumerable)selection).Cast<object>().Count());
+    }
+
+    [Fact]
+    public void EdgeSubdivision_InsertsMidpointAndBuildsTriangleFan()
+    {
+        object mesh = ParseMesh(
+            """
+            {
+              "vertices": [[0,0,0],[4,0,0],[4,4,0],[0,4,0]],
+              "faces": [{"v":[0,1,2,3],"texture":"#main"}]
+            }
+            """);
+        Type edgeType = typeof(DebugWindowManager).GetNestedType("ModelMeshEdge", BindingFlags.NonPublic)!;
+        object edge = edgeType.GetMethod("Create", StaticFlags)!.Invoke(null, [0, 1])!;
+        Type edgeSetType = typeof(HashSet<>).MakeGenericType(edgeType);
+        object selectedEdges = Activator.CreateInstance(edgeSetType)!;
+        edgeSetType.GetMethod("Add")!.Invoke(selectedEdges, [edge]);
+        MethodInfo subdivide = typeof(DebugWindowManager).GetMethod("ModelApplyMeshEdgeSubdivision", StaticFlags)!;
+
+        object selection = subdivide.Invoke(null, [mesh, selectedEdges])!;
+
+        Assert.Equal(6, ((IList)GetMember(mesh, "Vertices")).Count);
+        Assert.Equal(5, ((IList)GetMember(mesh, "Faces")).Count);
+        Assert.Equal(5, ((IEnumerable)selection).Cast<object>().Count());
+    }
+
+    [Theory]
+    [InlineData(10f, 4f, 2f, 0f, 5f)]
+    [InlineData(-6f, 9f, 0f, 3f, 3f)]
+    public void TopologyGizmoDrag_ProjectsMouseMotionOntoHandleAxis(
+        float mouseX,
+        float mouseY,
+        float axisX,
+        float axisY,
+        float expectedUnits)
+    {
+        MethodInfo project = typeof(DebugWindowManager).GetMethod("ModelProjectMeshTopologyDrag", StaticFlags)!;
+
+        float units = (float)project.Invoke(null,
+            [new System.Numerics.Vector2(mouseX, mouseY), new System.Numerics.Vector2(axisX, axisY)])!;
+
+        Assert.Equal(expectedUnits, units, 5);
     }
 
     [Fact]
@@ -292,6 +418,14 @@ public sealed class ModelMeshLibTests
             """);
         object element = ((IList)GetMember(document, "Roots"))[0]!;
         return GetMember(element, "NonCuboid");
+    }
+
+    private static object BuildFaceRegions(object mesh, IReadOnlySet<int> selectedFaces)
+    {
+        MethodInfo buildRegions = typeof(DebugWindowManager).GetMethod("ModelTryBuildMeshFaceRegions", StaticFlags)!;
+        object?[] args = [mesh, selectedFaces, null, ""];
+        Assert.True((bool)buildRegions.Invoke(null, args)!);
+        return args[2]!;
     }
 
     private static string SerializeDocument(object document)
