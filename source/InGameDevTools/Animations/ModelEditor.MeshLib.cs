@@ -138,6 +138,7 @@ public sealed partial class DebugWindowManager
                 }
             }
             _modelPreviewDirty = true;
+            ModelInvalidateGeneratorPreviews();
         }
         if (ImGui.IsItemHovered())
         {
@@ -153,6 +154,15 @@ public sealed partial class DebugWindowManager
                 operational ? "MeshLib ready" : "MeshLib offline");
             if (ImGui.IsItemHovered()) ImGui.SetTooltip(status);
         }
+    }
+
+    private void ModelInvalidateGeneratorPreviews()
+    {
+        _modelPrimitivePreviewDirty = true;
+        _modelCreaturePreviewDirty = true;
+        _playerModelPreviewDirty = true;
+        _clothingPreviewDirty = true;
+        _weaponPreviewDirty = true;
     }
 
     private void DrawModelMeshToolbar()

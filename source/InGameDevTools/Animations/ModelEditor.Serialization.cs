@@ -501,6 +501,7 @@ public sealed partial class DebugWindowManager
         _modelDoc = parsed;
         ModelSelectElement(parsed.Roots.FirstOrDefault());
         _modelReparentSource = null;
+        ModelInvalidateGeneratorPreviews();
         ModelMarkChanged();
         ModelEndEdit("Apply JSON");
         _modelJsonError = "";

@@ -69,6 +69,80 @@ public sealed class PlayerModelTests
         }
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void MeshLibSkeleton_MaterializesEveryRenderableElement(int baseShapeIndex)
+    {
+        object root = BuildShape(baseShapeIndex, meshLib: true);
+        string[] faceless = ["HeadWithSnout", "AboveSnout", "SnoutHeadWide"];
+
+        foreach (object element in Descendants(root))
+        {
+            string name = ElementName(element);
+            object? mesh = GetMemberOrNull(element, "NonCuboid");
+            object?[] faces = (object?[])GetMember(element, "Faces");
+            if (faceless.Contains(name))
+            {
+                Assert.Null(mesh);
+                Assert.All(faces, Assert.Null);
+                continue;
+            }
+
+            Assert.True(mesh != null, $"{name} did not receive MeshLib geometry");
+            Assert.True((bool)GetMember(mesh!, "Editable"));
+            Assert.NotEmpty((IEnumerable)GetMember(mesh!, "Vertices"));
+            Assert.NotEmpty((IEnumerable)GetMember(mesh!, "Faces"));
+            Assert.All(faces, Assert.Null);
+        }
+    }
+
+    [Fact]
+    public void MeshLibSkeleton_UsesSemanticRoundedTopology()
+    {
+        object root = BuildShape(baseShapeIndex: 0, meshLib: true);
+        object headMesh = GetMember(First(root, "Head"), "NonCuboid");
+        object armMesh = GetMember(First(root, "UpperArmR"), "NonCuboid");
+
+        Assert.True(((ICollection)GetMember(headMesh, "Vertices")).Count > 8);
+        Assert.True(((ICollection)GetMember(armMesh, "Vertices")).Count > 8);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void MeshLibSkeleton_PreservesCanonicalStructureBoundsAndMetadata(int baseShapeIndex)
+    {
+        object vanilla = BuildShape(baseShapeIndex);
+        object meshLib = BuildShape(baseShapeIndex, meshLib: true);
+        object[] vanillaElements = Descendants(vanilla).ToArray();
+        object[] meshElements = Descendants(meshLib).ToArray();
+
+        Assert.Equal(vanillaElements.Select(ElementName), meshElements.Select(ElementName));
+        Assert.Equal(vanillaElements.Length, meshElements.Length);
+        for (int index = 0; index < vanillaElements.Length; index++)
+        {
+            object expected = vanillaElements[index];
+            object actual = meshElements[index];
+            Assert.Equal((double[])GetMember(expected, "From"), (double[])GetMember(actual, "From"));
+            Assert.Equal((double[])GetMember(expected, "To"), (double[])GetMember(actual, "To"));
+            Assert.Equal((double[]?)GetMemberOrNull(expected, "RotationOrigin"),
+                (double[]?)GetMemberOrNull(actual, "RotationOrigin"));
+            Assert.Equal(ElementName(GetMember(expected, "Parent")), ElementName(GetMember(actual, "Parent")));
+
+            JToken? expectedExtra = GetMemberOrNull(expected, "Extra") as JToken;
+            JToken? actualExtra = GetMemberOrNull(actual, "Extra") as JToken;
+            Assert.True(JToken.DeepEquals(expectedExtra, actualExtra));
+        }
+    }
+
+    [Fact]
+    public void VanillaSkeleton_DoesNotCreateMeshLibPayloads()
+    {
+        object root = BuildShape(baseShapeIndex: 0);
+        Assert.All(Descendants(root), element => Assert.Null(GetMemberOrNull(element, "NonCuboid")));
+    }
+
     [Fact]
     public void Head_CarriesTheEyesAttachmentPoint()
     {
@@ -225,16 +299,28 @@ public sealed class PlayerModelTests
 
     // ---- helpers (mirror ModelCreatureTests' reflection harness) ----
 
-    private static object BuildShape(int baseShapeIndex, Action<object>? configure = null)
+    private static object BuildShape(int baseShapeIndex, Action<object>? configure = null, bool meshLib = false)
     {
-        return BuildShapeCore(baseShapeIndex, configure).Root;
+        return BuildShapeCore(baseShapeIndex, configure, meshLib).Root;
     }
 
-    private static (DebugWindowManager Manager, object Root) BuildShapeCore(int baseShapeIndex, Action<object>? configure = null)
+    private static (DebugWindowManager Manager, object Root) BuildShapeCore(
+        int baseShapeIndex,
+        Action<object>? configure = null,
+        bool meshLib = false)
     {
         DebugWindowManager manager = CreateUninitializedManager();
         object document = CreateModelDocument();
         SetField(manager, "_modelDoc", document);
+        if (meshLib)
+        {
+            FieldInfo modeField = typeof(DebugWindowManager).GetField("_modelEditorMode", InstanceFlags)
+                ?? throw new MissingMemberException(nameof(DebugWindowManager), "_modelEditorMode");
+            SetField(manager, "_modelEditorMode", Enum.Parse(modeField.FieldType, "MeshLib"));
+            PropertyInfo modeProperty = typeof(DebugWindowManager).GetProperty("ModelIsMeshLibMode", InstanceFlags)
+                ?? throw new MissingMemberException(nameof(DebugWindowManager), "ModelIsMeshLibMode");
+            Assert.True((bool)modeProperty.GetValue(manager)!);
+        }
 
         object parameters = CreatePlayerModelParams();
         SetMember(parameters, "BaseShapeIndex", baseShapeIndex);

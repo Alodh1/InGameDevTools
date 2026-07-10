@@ -733,6 +733,80 @@ public sealed class ModelCreatureTests
         Assert.DoesNotContain(Descendants(plain), e => ElementName(e).Contains("Round"));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(10)]
+    public void MeshLib_RepresentativeArchetypesUseValidatedSemanticMeshes(int archetype)
+    {
+        object group = BuildCreatureCore(applyArchetype: archetype, meshLib: true).Group;
+        MethodInfo validate = typeof(DebugWindowManager).GetMethod("ModelValidateNonCuboid", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelValidateNonCuboid");
+        bool semantic = false;
+
+        foreach (object element in Descendants(group))
+        {
+            if (GetDouble(element, "SizeX") <= 0 || GetDouble(element, "SizeY") <= 0 || GetDouble(element, "SizeZ") <= 0) continue;
+            object mesh = GetMember(element, "NonCuboid");
+            Assert.All(((Array)GetMember(element, "Faces")).Cast<object?>(), Assert.Null);
+            Assert.Empty(((IEnumerable)validate.Invoke(null, [mesh])!).Cast<object>());
+            semantic |= ((IList)GetMember(mesh, "Vertices")).Count != 8 || ((IList)GetMember(mesh, "Faces")).Count != 6;
+        }
+
+        Assert.True(semantic, $"creature archetype {archetype} only produced box topology");
+    }
+
+    [Fact]
+    public void EveryArchetype_PreservesVanillaCompatibilityAndBuildsValidMeshLibGeometry()
+    {
+        Type archetypeType = typeof(DebugWindowManager).GetNestedType("ModelCreatureArchetype", BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(nameof(DebugWindowManager), "ModelCreatureArchetype");
+        MethodInfo validate = typeof(DebugWindowManager).GetMethod("ModelValidateNonCuboid", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelValidateNonCuboid");
+
+        for (int archetype = 0; archetype < Enum.GetValues(archetypeType).Length; archetype++)
+        {
+            object[] vanilla = Descendants(BuildCreatureCore(applyArchetype: archetype, autoTexture: true).Group).ToArray();
+            object[] meshLib = Descendants(BuildCreatureCore(applyArchetype: archetype, autoTexture: true, meshLib: true).Group).ToArray();
+            Assert.Equal(vanilla.Select(ElementName), meshLib.Select(ElementName));
+
+            for (int index = 0; index < vanilla.Length; index++)
+            {
+                object expected = vanilla[index];
+                object actual = meshLib[index];
+                Assert.Equal((double[])GetMember(expected, "From"), (double[])GetMember(actual, "From"));
+                Assert.Equal((double[])GetMember(expected, "To"), (double[])GetMember(actual, "To"));
+                Assert.Equal((double[]?)GetMemberOrNull(expected, "RotationOrigin"),
+                    (double[]?)GetMemberOrNull(actual, "RotationOrigin"));
+                Assert.Equal(GetDouble(expected, "RotationX"), GetDouble(actual, "RotationX"));
+                Assert.Equal(GetDouble(expected, "RotationY"), GetDouble(actual, "RotationY"));
+                Assert.Equal(GetDouble(expected, "RotationZ"), GetDouble(actual, "RotationZ"));
+                Assert.Equal(ElementName(GetMember(expected, "Parent")), ElementName(GetMember(actual, "Parent")));
+                Assert.Null(GetMemberOrNull(expected, "NonCuboid"));
+
+                object mesh = GetMember(actual, "NonCuboid");
+                Assert.Empty(((IEnumerable)validate.Invoke(null, [mesh])!).Cast<object>());
+                Assert.All(((Array)GetMember(actual, "Faces")).Cast<object?>(), Assert.Null);
+                object meshFace = ((IList)GetMember(mesh, "Faces"))[0]!;
+                Assert.Equal(FaceTexture(expected), (string)GetMember(meshFace, "Texture"));
+            }
+        }
+    }
+
+    [Fact]
+    public void MeshLib_SmoothingChangesTopologyWithoutAddingRoundElements()
+    {
+        object coarse = BuildCreatureCore(meshLib: true, configure: p => SetMember(p, "Smoothing", 0)).Group;
+        object smooth = BuildCreatureCore(meshLib: true, configure: p => SetMember(p, "Smoothing", 2)).Group;
+
+        Assert.Equal(Descendants(coarse).Select(ElementName), Descendants(smooth).Select(ElementName));
+        Assert.DoesNotContain(Descendants(smooth), element => ElementName(element).Contains("Round", StringComparison.Ordinal));
+        object coarseMesh = GetMember(First(coarse, "head"), "NonCuboid");
+        object smoothMesh = GetMember(First(smooth, "head"), "NonCuboid");
+        Assert.True(((IList)GetMember(smoothMesh, "Vertices")).Count > ((IList)GetMember(coarseMesh, "Vertices")).Count);
+    }
+
     [Fact]
     public void WingRidges_DivideTheMembraneIntoSections()
     {
@@ -806,7 +880,7 @@ public sealed class ModelCreatureTests
 
     private static (DebugWindowManager Manager, object Group) BuildCreatureCore(
         float legSplay = 4f, float legBend = 0f, int? applyArchetype = null, bool autoTexture = false,
-        string[]? extraTextureCodes = null, Action<object>? configure = null)
+        string[]? extraTextureCodes = null, Action<object>? configure = null, bool meshLib = false)
     {
         DebugWindowManager manager = CreateUninitializedManager();
         object document = CreateModelDocument();
@@ -815,6 +889,7 @@ public sealed class ModelCreatureTests
             AddTexture(document, code);
         }
         SetField(manager, "_modelDoc", document);
+        if (meshLib) SetEnumField(manager, "_modelEditorMode", "MeshLib");
 
         object parameters = CreateCreatureParams();
         SetMember(parameters, "LegSplay", legSplay);
@@ -1037,6 +1112,13 @@ public sealed class ModelCreatureTests
         FieldInfo field = target.GetType().GetField(name, InstanceFlags)
             ?? throw new MissingMemberException(target.GetType().FullName, name);
         field.SetValue(target, value);
+    }
+
+    private static void SetEnumField(object target, string name, string value)
+    {
+        FieldInfo field = target.GetType().GetField(name, InstanceFlags)
+            ?? throw new MissingFieldException(target.GetType().FullName, name);
+        field.SetValue(target, Enum.Parse(field.FieldType, value));
     }
 
     private static void SetMember(object target, string name, object? value)

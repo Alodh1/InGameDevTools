@@ -6,6 +6,8 @@
 
 - Added an optional MeshLib model-editor mode with validated triangle/quad `noncuboid` authoring, component/topology/UV tools, cuboid conversion, true-mesh primitives, and reflective preview/live-apply integration.
 
+- Made the Creature, PlayerModel, Clothing, and Tool / Weapon generators emit editable semantic MeshLib surfaces when MeshLib editor mode is active, while preserving their original Vanilla cuboid output.
+
 - Replaced the MeshLib extrude, inset, and subdivide toolbar actions with direct viewport gizmos and wire previews.
 
 - Fixed the DevTools window closing behavior when leaving a world, and moved the animation, creature, and Prism generators into the main editor window as embedded panels.

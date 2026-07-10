@@ -108,7 +108,15 @@ public sealed partial class DebugWindowManager
         }
         else
         {
-            ImGui.TextUnformatted($"{_weaponPreviewCount} element(s) / {WeaponMaxElements} max. Blue ghost shows the result.");
+            if (ModelIsMeshLibMode)
+            {
+                (int vertices, int faces) = ModelGeneratedMeshCounts(_weaponPreviewRoot);
+                ImGui.TextUnformatted($"{_weaponPreviewCount} mesh element(s), {vertices} vertices, {faces} faces. Blue ghost shows the result.");
+            }
+            else
+            {
+                ImGui.TextUnformatted($"{_weaponPreviewCount} element(s) / {WeaponMaxElements} max. Blue ghost shows the result.");
+            }
         }
 
         bool canCreate = _weaponPreviewRoot != null && string.IsNullOrEmpty(_weaponPreviewError);

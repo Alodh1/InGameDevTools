@@ -17,6 +17,15 @@ public sealed class ModelClothingTests
         "Neck", "Head", "UpperFootL", "LowerFootL", "UpperFootR", "LowerFootR"
     ];
 
+    public static IEnumerable<object[]> ClothingPresetCases =>
+    [
+        ["Hood"], ["Cap"], ["Helmet"], ["Mask"], ["Necklace"], ["Scarf"], ["Shirt"], ["Jacket"],
+        ["Coat"], ["Robe"], ["Tabard"], ["Cuirass"], ["Pauldrons"], ["Bracers"], ["Gloves"],
+        ["Gauntlets"], ["Belt"], ["Trousers"], ["Skirt"], ["Greaves"], ["Boots"], ["Cloak"],
+        ["Emblem"], ["WildwoodCloak"], ["DruidRobe"], ["PlatedArmor"], ["Brigand"], ["RegalMantle"],
+        ["RaggedShroud"]
+    ];
+
     [Fact]
     public void NoRegionsEnabled_FailsWithAHint()
     {
@@ -242,6 +251,268 @@ public sealed class ModelClothingTests
     }
 
     [Fact]
+    public void AccentTexture_HasItsOwnItemTextureMapping()
+    {
+        (DebugWindowManager manager, object parameters) = SetupManager("WildwoodCloak");
+        SetMember(parameters, "Texture", "cloth");
+        SetMember(parameters, "TrimTexture", "metal");
+        SetMember(parameters, "AccentTexture", "wood");
+
+        JObject item = (JObject)Invoke(manager, "ClothingBuildItemJson");
+        JObject textures = (JObject)item["textures"]!;
+
+        Assert.NotNull(textures["cloth"]);
+        Assert.NotNull(textures["metal"]);
+        Assert.NotNull(textures["wood"]);
+    }
+
+    [Fact]
+    public void MeshLib_ConvertsOnlyRenderableGarmentDescendants()
+    {
+        object rig = BuildRig(out string? error, "Coat", meshLib: true);
+        Assert.True(string.IsNullOrEmpty(error), error);
+
+        List<object> anchors = Anchors(rig).ToList();
+        Assert.NotEmpty(anchors);
+        HashSet<object> garment = [];
+        foreach (object anchor in anchors)
+        {
+            garment.Add(anchor);
+            Assert.Null(GetMemberOrNull(anchor, "NonCuboid"));
+            Assert.All(Faces(anchor), Assert.Null);
+
+            foreach (object element in Descendants(anchor))
+            {
+                garment.Add(element);
+                if (Size(element, "SizeX") <= 0.0001 || Size(element, "SizeY") <= 0.0001 || Size(element, "SizeZ") <= 0.0001)
+                {
+                    continue;
+                }
+
+                object? mesh = GetMemberOrNull(element, "NonCuboid");
+                Assert.True(mesh != null, $"{Name(element)} did not receive MeshLib geometry");
+                Assert.True((bool)GetMember(mesh!, "Editable"));
+                Assert.NotEmpty((IEnumerable)GetMember(mesh!, "Vertices"));
+                Assert.NotEmpty((IEnumerable)GetMember(mesh!, "Faces"));
+                Assert.All(Faces(element), Assert.Null);
+            }
+        }
+
+        // The grey wearer is preview-only and must remain a vanilla rig; it is never emitted by ClothingCommit.
+        List<object> wearer = Descendants(rig).Where(element => !garment.Contains(element)).ToList();
+        Assert.NotEmpty(wearer);
+        Assert.All(wearer, element => Assert.Null(GetMemberOrNull(element, "NonCuboid")));
+    }
+
+    [Fact]
+    public void MeshLib_PreservesGarmentNamesHierarchyBoundsAndStepParents()
+    {
+        object vanilla = BuildRig(out _, "Robe");
+        object meshLib = BuildRig(out _, "Robe", meshLib: true);
+        object[] vanillaGarment = Anchors(vanilla).SelectMany(Subtree).ToArray();
+        object[] meshGarment = Anchors(meshLib).SelectMany(Subtree).ToArray();
+
+        Assert.Equal(vanillaGarment.Length, meshGarment.Length);
+        for (int index = 0; index < vanillaGarment.Length; index++)
+        {
+            object expected = vanillaGarment[index];
+            object actual = meshGarment[index];
+            Assert.Equal(Name(expected), Name(actual));
+            Assert.Equal((double[])GetMember(expected, "From"), (double[])GetMember(actual, "From"));
+            Assert.Equal((double[])GetMember(expected, "To"), (double[])GetMember(actual, "To"));
+            Assert.Equal((double[]?)GetMemberOrNull(expected, "RotationOrigin"),
+                (double[]?)GetMemberOrNull(actual, "RotationOrigin"));
+            Assert.Equal((string)GetMember(expected, "StepParentName"), (string)GetMember(actual, "StepParentName"));
+            Assert.Equal(GetMemberOrNull(expected, "Parent") is object expectedParent ? Name(expectedParent) : null,
+                GetMemberOrNull(actual, "Parent") is object actualParent ? Name(actualParent) : null);
+        }
+    }
+
+    [Fact]
+    public void MeshLib_UsesSemanticClothOrganicArmorAndHardwareProfiles()
+    {
+        object wildwood = BuildRig(out _, "WildwoodCloak", meshLib: true);
+        object branchMesh = Mesh(Descendants(wildwood).First(element => Name(element).Contains("branch", StringComparison.Ordinal)));
+        object leafMesh = Mesh(Descendants(wildwood).First(element => Name(element).Contains("leaf", StringComparison.Ordinal)));
+        object tatterMesh = Mesh(Descendants(wildwood).First(element => Name(element).Contains("tatter", StringComparison.Ordinal)));
+        Assert.True(((IList)GetMember(branchMesh, "Vertices")).Count > 8); // tapered round loft
+        Assert.NotEqual(6, ((IList)GetMember(leafMesh, "Faces")).Count);  // leaf contour
+        Assert.NotEqual(6, ((IList)GetMember(tatterMesh, "Faces")).Count); // ribbon/membrane
+
+        object armor = BuildRig(out _, "PlatedArmor", meshLib: true);
+        object plateMesh = Mesh(Descendants(armor).First(element => Name(element).Contains("plate_", StringComparison.Ordinal)));
+        object studMesh = Mesh(Descendants(armor).First(element => Name(element).Contains("stud", StringComparison.Ordinal)));
+        Assert.NotEqual(8, ((IList)GetMember(plateMesh, "Vertices")).Count); // shaped plate
+        Assert.True(((IList)GetMember(studMesh, "Vertices")).Count > 8);    // dome
+
+        object belt = BuildRig(out _, "Belt", meshLib: true);
+        object buckleMesh = Mesh(Descendants(belt).First(element => Name(element) == "buckle"));
+        Assert.True(((IList)GetMember(buckleMesh, "Vertices")).Count > 8); // open box tube
+
+        object mantle = BuildRig(out _, "RegalMantle", meshLib: true);
+        object gemMesh = Mesh(Descendants(mantle).First(element => Name(element).Contains("gem", StringComparison.Ordinal)));
+        Assert.Equal(8, ((IList)GetMember(gemMesh, "Faces")).Count);       // faceted jewel
+    }
+
+    [Fact]
+    public void MeshLib_PreservesBaseTrimAndAccentTexturesOnMeshFaces()
+    {
+        object rig = BuildRig(out _, configure: p =>
+        {
+            ApplyMinimalCape(p);
+            SetMember(p, "Texture", "cloth");
+            SetMember(p, "TrimTexture", "metal");
+            SetMember(p, "AccentTexture", "wood");
+            SetMember(p, "Branches", true); SetMember(p, "BranchSurface", 0); SetMember(p, "BranchCount", 3); SetMember(p, "BranchLeaves", false);
+            SetMember(p, "Studs", true); SetMember(p, "StudSurface", 0); SetMember(p, "StudCount", 3);
+        }, meshLib: true);
+
+        Assert.Equal("wood", MeshFaceTexture(Descendants(rig).First(element => Name(element).Contains("branch", StringComparison.Ordinal))));
+        Assert.Equal("metal", MeshFaceTexture(Descendants(rig).First(element => Name(element).Contains("stud", StringComparison.Ordinal))));
+        Assert.Equal("cloth", MeshFaceTexture(Descendants(rig).First(element => Name(element).StartsWith("cape", StringComparison.Ordinal))));
+    }
+
+    [Theory]
+    [MemberData(nameof(ClothingPresetCases))]
+    public void EveryPreset_PreservesVanillaStructureAndBuildsValidMeshLibGarments(string preset)
+    {
+        object vanilla = BuildRig(out string? vanillaError, preset);
+        object meshLib = BuildRig(out string? meshError, preset, meshLib: true);
+        Assert.True(string.IsNullOrEmpty(vanillaError), vanillaError);
+        Assert.True(string.IsNullOrEmpty(meshError), meshError);
+
+        object[] vanillaGarment = Anchors(vanilla).SelectMany(Subtree).ToArray();
+        object[] meshGarment = Anchors(meshLib).SelectMany(Subtree).ToArray();
+        Assert.Equal(vanillaGarment.Length, meshGarment.Length);
+        Assert.Equal(vanillaGarment.Select(Name), meshGarment.Select(Name));
+
+        MethodInfo validate = typeof(DebugWindowManager).GetMethod(
+            "ModelValidateNonCuboid", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelValidateNonCuboid");
+        for (int index = 0; index < vanillaGarment.Length; index++)
+        {
+            object expected = vanillaGarment[index];
+            object actual = meshGarment[index];
+            Assert.Equal((double[])GetMember(expected, "From"), (double[])GetMember(actual, "From"));
+            Assert.Equal((double[])GetMember(expected, "To"), (double[])GetMember(actual, "To"));
+            Assert.Equal((string)GetMember(expected, "StepParentName"), (string)GetMember(actual, "StepParentName"));
+            Assert.Equal((double[]?)GetMemberOrNull(expected, "RotationOrigin"),
+                (double[]?)GetMemberOrNull(actual, "RotationOrigin"));
+            Assert.Equal(Size(expected, "RotationX"), Size(actual, "RotationX"));
+            Assert.Equal(Size(expected, "RotationY"), Size(actual, "RotationY"));
+            Assert.Equal(Size(expected, "RotationZ"), Size(actual, "RotationZ"));
+            Assert.Equal(Name(GetMember(expected, "Parent")), Name(GetMember(actual, "Parent")));
+
+            if (!string.IsNullOrEmpty((string)GetMember(actual, "StepParentName")) ||
+                Size(actual, "SizeX") <= 0.0001 || Size(actual, "SizeY") <= 0.0001 || Size(actual, "SizeZ") <= 0.0001)
+            {
+                Assert.Null(GetMemberOrNull(actual, "NonCuboid"));
+                continue;
+            }
+
+            Assert.Null(GetMemberOrNull(expected, "NonCuboid"));
+            Assert.NotNull(Faces(expected)[0]);
+            object mesh = Mesh(actual);
+            IEnumerable errors = (IEnumerable)validate.Invoke(null, [mesh])!;
+            Assert.Empty(errors.Cast<object>());
+            Assert.All(Faces(actual), Assert.Null);
+        }
+    }
+
+    [Fact]
+    public void GeneratedMeshLibGarment_RoundTripsHierarchyAnchorsTransformsTexturesAndUnknownMetadata()
+    {
+        (DebugWindowManager manager, _) = SetupManager("WildwoodCloak", configure: parameters =>
+        {
+            SetMember(parameters, "Texture", "cloth");
+            SetMember(parameters, "TrimTexture", "metal");
+            SetMember(parameters, "AccentTexture", "wood");
+        }, meshLib: true);
+        MethodInfo build = typeof(DebugWindowManager).GetMethod("ClothingBuildRig", InstanceFlags)!;
+        object?[] buildArgs = [null];
+        object rig = build.Invoke(manager, buildArgs)
+            ?? throw new InvalidOperationException("Clothing rig was null: " + buildArgs[0]);
+        Assert.True(string.IsNullOrEmpty(buildArgs[0]?.ToString()), buildArgs[0]?.ToString());
+
+        object document = GetMember(manager, "_modelDoc");
+        IList roots = (IList)GetMember(document, "Roots");
+        foreach (object anchor in Anchors(rig))
+        {
+            roots.Add(Invoke(anchor, "CloneSubtree"));
+        }
+        Invoke(manager, "ClothingEnsureTextures");
+        SetMember(document, "Extra", new JObject { ["futureRoot"] = new JObject { ["keep"] = true } });
+        object decorated = roots.Cast<object>().SelectMany(Subtree)
+            .First(element => GetMemberOrNull(element, "NonCuboid") != null);
+        SetMember(decorated, "Extra", new JObject { ["futureGenerated"] = 42 });
+
+        MethodInfo serialize = typeof(DebugWindowManager).GetMethod(
+            "ModelSerializeDocument", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+        string json = (string)serialize.Invoke(null, [document, true, false])!;
+        Assert.DoesNotContain("GeneratedMeshSpec", json, StringComparison.Ordinal);
+
+        MethodInfo parse = typeof(DebugWindowManager).GetMethod("ModelTryParseDocument", InstanceFlags)!;
+        object?[] parseArgs = [json, "test", "shapes/item/generated-garment.json", false, null, ""];
+        Assert.True((bool)parse.Invoke(manager, parseArgs)!, parseArgs[5]?.ToString());
+        object parsed = parseArgs[4]!;
+
+        object[] expected = roots.Cast<object>().SelectMany(Subtree).ToArray();
+        object[] actual = ((IList)GetMember(parsed, "Roots")).Cast<object>().SelectMany(Subtree).ToArray();
+        Assert.Equal(expected.Select(Name), actual.Select(Name));
+        int decoratedIndex = Array.IndexOf(expected, decorated);
+        Assert.InRange(decoratedIndex, 0, expected.Length - 1);
+        for (int index = 0; index < expected.Length; index++)
+        {
+            object before = expected[index];
+            object after = actual[index];
+            Assert.Equal((double[])GetMember(before, "From"), (double[])GetMember(after, "From"));
+            Assert.Equal((double[])GetMember(before, "To"), (double[])GetMember(after, "To"));
+            Assert.Equal((double[]?)GetMemberOrNull(before, "RotationOrigin"),
+                (double[]?)GetMemberOrNull(after, "RotationOrigin"));
+            Assert.Equal(Size(before, "RotationX"), Size(after, "RotationX"));
+            Assert.Equal(Size(before, "RotationY"), Size(after, "RotationY"));
+            Assert.Equal(Size(before, "RotationZ"), Size(after, "RotationZ"));
+            Assert.Equal((string)GetMember(before, "StepParentName"), (string)GetMember(after, "StepParentName"));
+
+            object? beforeMesh = GetMemberOrNull(before, "NonCuboid");
+            object? afterMesh = GetMemberOrNull(after, "NonCuboid");
+            if (beforeMesh == null)
+            {
+                Assert.Null(afterMesh);
+                continue;
+            }
+            Assert.NotNull(afterMesh);
+            IList beforeVertices = (IList)GetMember(beforeMesh, "Vertices");
+            IList afterVertices = (IList)GetMember(afterMesh!, "Vertices");
+            Assert.Equal(beforeVertices.Count, afterVertices.Count);
+            for (int vertex = 0; vertex < beforeVertices.Count; vertex++)
+            {
+                Assert.Equal((double[])beforeVertices[vertex]!, (double[])afterVertices[vertex]!);
+            }
+            IList beforeFaces = (IList)GetMember(beforeMesh, "Faces");
+            IList afterFaces = (IList)GetMember(afterMesh!, "Faces");
+            Assert.Equal(beforeFaces.Count, afterFaces.Count);
+            for (int face = 0; face < beforeFaces.Count; face++)
+            {
+                Assert.Equal((int[])GetMember(beforeFaces[face]!, "Vertices"),
+                    (int[])GetMember(afterFaces[face]!, "Vertices"));
+                Assert.Equal((string)GetMember(beforeFaces[face]!, "Texture"),
+                    (string)GetMember(afterFaces[face]!, "Texture"));
+            }
+            Assert.All(Faces(after), Assert.Null);
+        }
+
+        Dictionary<string, string> expectedTextures = ((IEnumerable)GetMember(document, "Textures")).Cast<object>()
+            .ToDictionary(texture => (string)GetMember(texture, "Code"), texture => (string)GetMember(texture, "Path"), StringComparer.Ordinal);
+        Dictionary<string, string> actualTextures = ((IEnumerable)GetMember(parsed, "Textures")).Cast<object>()
+            .ToDictionary(texture => (string)GetMember(texture, "Code"), texture => (string)GetMember(texture, "Path"), StringComparer.Ordinal);
+        Assert.Equal(expectedTextures.OrderBy(pair => pair.Key), actualTextures.OrderBy(pair => pair.Key));
+        Assert.True(((JObject)GetMember(parsed, "Extra"))["futureRoot"]!["keep"]!.Value<bool>());
+        object parsedDecorated = actual[decoratedIndex];
+        Assert.Equal(42, ((JObject)GetMember(parsedDecorated, "Extra"))["futureGenerated"]!.Value<int>());
+    }
+
+    [Fact]
     public void Plating_BuildsARowColGrid()
     {
         object rig = BuildRig(out _, configure: p =>
@@ -284,9 +555,10 @@ public sealed class ModelClothingTests
 
     // ---- harness (mirrors PlayerModelTests' reflection helpers) ----
 
-    private static object BuildRig(out string? error, string? preset = null, int baseShapeIndex = 0, Action<object>? configure = null)
+    private static object BuildRig(out string? error, string? preset = null, int baseShapeIndex = 0,
+        Action<object>? configure = null, bool meshLib = false)
     {
-        (DebugWindowManager manager, _) = SetupManager(preset, baseShapeIndex, configure);
+        (DebugWindowManager manager, _) = SetupManager(preset, baseShapeIndex, configure, meshLib);
         MethodInfo build = typeof(DebugWindowManager).GetMethod("ClothingBuildRig", InstanceFlags)!;
         object?[] args = [null];
         object? rig = build.Invoke(manager, args);
@@ -302,9 +574,10 @@ public sealed class ModelClothingTests
         return args[0]?.ToString();
     }
 
-    private static (DebugWindowManager Manager, object Parameters) SetupManager(string? preset = null, int baseShapeIndex = 0, Action<object>? configure = null)
+    private static (DebugWindowManager Manager, object Parameters) SetupManager(string? preset = null,
+        int baseShapeIndex = 0, Action<object>? configure = null, bool meshLib = false)
     {
-        DebugWindowManager manager = NewManager(out object parameters);
+        DebugWindowManager manager = NewManager(out object parameters, meshLib);
         SetMember(parameters, "BaseShapeIndex", baseShapeIndex);
         if (preset != null)
         {
@@ -315,12 +588,18 @@ public sealed class ModelClothingTests
         return (manager, parameters);
     }
 
-    private static DebugWindowManager NewManager(out object parameters)
+    private static DebugWindowManager NewManager(out object parameters, bool meshLib = false)
     {
 #pragma warning disable SYSLIB0050
         DebugWindowManager manager = (DebugWindowManager)FormatterServices.GetUninitializedObject(typeof(DebugWindowManager));
 #pragma warning restore SYSLIB0050
         SetField(manager, "_modelDoc", CreateModelDocument());
+        if (meshLib)
+        {
+            FieldInfo mode = typeof(DebugWindowManager).GetField("_modelEditorMode", InstanceFlags)
+                ?? throw new MissingMemberException(nameof(DebugWindowManager), "_modelEditorMode");
+            SetField(manager, "_modelEditorMode", Enum.Parse(mode.FieldType, "MeshLib"));
+        }
         parameters = CreateClothingParams();
         SetField(manager, "_clothingParams", parameters);
         return manager;
@@ -344,6 +623,19 @@ public sealed class ModelClothingTests
 
     private static object?[] Faces(object element) => (object?[])GetMember(element, "Faces");
 
+    private static object Mesh(object element)
+    {
+        return GetMemberOrNull(element, "NonCuboid")
+            ?? throw new InvalidOperationException($"{Name(element)} has no MeshLib geometry");
+    }
+
+    private static string MeshFaceTexture(object element)
+    {
+        object mesh = Mesh(element);
+        object face = ((IList)GetMember(mesh, "Faces"))[0]!;
+        return (string)GetMember(face, "Texture");
+    }
+
     private static object Invoke(object target, string method, params object?[] args)
     {
         MethodInfo info = target.GetType().GetMethod(method, InstanceFlags)
@@ -361,6 +653,12 @@ public sealed class ModelClothingTests
                 yield return descendant;
             }
         }
+    }
+
+    private static IEnumerable<object> Subtree(object root)
+    {
+        yield return root;
+        foreach (object descendant in Descendants(root)) yield return descendant;
     }
 
     private static string Name(object element) => (string)GetMember(element, "Name");
@@ -398,6 +696,16 @@ public sealed class ModelClothingTests
         if (field != null) return field.GetValue(target)!;
         PropertyInfo? property = type.GetProperty(name, InstanceFlags);
         if (property != null) return property.GetValue(target)!;
+        throw new MissingMemberException(type.FullName, name);
+    }
+
+    private static object? GetMemberOrNull(object target, string name)
+    {
+        Type type = target.GetType();
+        FieldInfo? field = type.GetField(name, InstanceFlags);
+        if (field != null) return field.GetValue(target);
+        PropertyInfo? property = type.GetProperty(name, InstanceFlags);
+        if (property != null) return property.GetValue(target);
         throw new MissingMemberException(type.FullName, name);
     }
 

@@ -407,6 +407,16 @@ public sealed partial class DebugWindowManager
             string accent = ModelWeaponResolveTexture(p.AccentTexture, p.AutoTexture ? "accent" : metal, metal);
             ModelWeaponAssignFaces(group, metal, handle, accent);
 
+            if (ModelIsMeshLibMode)
+            {
+                ModelAssignGeneratedMeshSpecs(group, ModelWeaponGeneratedMeshSpec);
+                if (!ModelMaterializeGeneratedMeshes(group, include: null, out string meshError))
+                {
+                    error = meshError;
+                    return null;
+                }
+            }
+
             int count = ModelCreatureElementCount(group);
             if (count == 0)
             {
@@ -426,6 +436,134 @@ public sealed partial class DebugWindowManager
             error = $"Generation failed: {exception.Message}";
             return null;
         }
+    }
+
+    private ModelGeneratedMeshSpec ModelWeaponGeneratedMeshSpec(ModelElementData element)
+    {
+        string name = element.Name.ToLowerInvariant();
+        int longAxis = ModelGeneratedLongestAxis(element);
+        int shortAxis = ModelWeaponSmallestAxis(element);
+
+        if (name.Contains("gem", StringComparison.Ordinal) || name.Contains("jewel", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Jewel);
+        }
+        if (name.StartsWith("flange", StringComparison.Ordinal))
+        {
+            return (WeaponFlangeType)Math.Clamp(_weaponParams.FlangeType, 0, WeaponFlangeTypeLabels.Length - 1) switch
+            {
+                WeaponFlangeType.Flange => ModelGeneratedSpec(ModelGeneratedMeshKind.Leaf, axis: longAxis),
+                WeaponFlangeType.Stud => ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: longAxis, sides: 12, layers: 4),
+                WeaponFlangeType.Spike => ModelGeneratedSpec(ModelGeneratedMeshKind.Cone, axis: longAxis, sides: 8),
+                _ => ModelGeneratedSpec(ModelGeneratedMeshKind.Ellipsoid, axis: longAxis, sides: 12, layers: 6)
+            };
+        }
+        if (name.Contains("tip", StringComparison.Ordinal) || name.Contains("spike", StringComparison.Ordinal) ||
+            name.Contains("prong", StringComparison.Ordinal) || name.Contains("serr", StringComparison.Ordinal) ||
+            name.Contains("barb", StringComparison.Ordinal) || name is "pickback" or "axebackpick")
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Cone, axis: longAxis, sides: 8);
+        }
+        if (name.Contains("bladebevel", StringComparison.Ordinal) || name.Contains("bladeswedge", StringComparison.Ordinal) ||
+            name.Contains("edge", StringComparison.Ordinal) || name.Contains("adze", StringComparison.Ordinal) ||
+            name.Contains("claw", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Wedge, axis: longAxis);
+        }
+        if (name.Contains("bladespine", StringComparison.Ordinal) || name.Contains("fuller", StringComparison.Ordinal) ||
+            name.Contains("midrib", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis: longAxis, sides: 8, endScale: 0.82d);
+        }
+        if (ModelWeaponIsNumberedPart(name, "blade") || ModelWeaponIsNumberedPart(name, "polearmblade") ||
+            ModelWeaponIsNumberedPart(name, "scytheblade"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.ExtrudedContour, axis: longAxis, startScale: 0.82d, endScale: 0.68d);
+        }
+        if (name.Contains("spearhead", StringComparison.Ordinal) || name.Contains("axebit", StringComparison.Ordinal) ||
+            name.Contains("axebeard", StringComparison.Ordinal) || name.Contains("axetophorn", StringComparison.Ordinal) ||
+            name.Contains("spadescoop", StringComparison.Ordinal) || name.Contains("hoeblade", StringComparison.Ordinal) ||
+            name.Contains("spearaxe", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.ExtrudedContour, axis: longAxis, startScale: 0.62d, endScale: 0.42d);
+        }
+        if (name.Contains("guardcup", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: shortAxis, sides: 12, layers: 6);
+        }
+        if (name.Contains("disc", StringComparison.Ordinal) || name.Contains("wheel", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis: shortAxis, sides: 12);
+        }
+        if (name.Contains("pommelring", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Ring, axis: longAxis, sides: 12);
+        }
+        if (name == "pommel")
+        {
+            return (WeaponPommelStyle)Math.Clamp(_weaponParams.PommelStyle, 0, WeaponPommelStyleLabels.Length - 1) switch
+            {
+                WeaponPommelStyle.Wheel => ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis: shortAxis, sides: 12),
+                WeaponPommelStyle.Cap => ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: 0, sign: -1, sides: 12, layers: 6),
+                WeaponPommelStyle.Faceted => ModelGeneratedSpec(ModelGeneratedMeshKind.Jewel),
+                WeaponPommelStyle.ScentStopper => ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis: longAxis, sides: 8, endScale: 0.76d),
+                _ => ModelGeneratedSpec(ModelGeneratedMeshKind.Ellipsoid, axis: longAxis, sides: 12, layers: 6)
+            };
+        }
+        if (name == "pommelfacet")
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Jewel);
+        }
+        if (name is "pommelcap" or "pommelpeen")
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: 0, sign: -1, sides: 12, layers: 6);
+        }
+        if (name == "macehead")
+        {
+            return (WeaponMaceHead)Math.Clamp(_weaponParams.MaceHead, 0, WeaponMaceHeadLabels.Length - 1) switch
+            {
+                WeaponMaceHead.Ball => ModelGeneratedSpec(ModelGeneratedMeshKind.Ellipsoid, axis: longAxis, sides: 12, layers: 6),
+                WeaponMaceHead.Cylinder => ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis: longAxis, sides: 12),
+                WeaponMaceHead.Box => ModelGeneratedSpec(ModelGeneratedMeshKind.ChamferedBox),
+                _ => ModelGeneratedSpec(ModelGeneratedMeshKind.Jewel)
+            };
+        }
+        if (name.Contains("ball", StringComparison.Ordinal) || name.Contains("knob", StringComparison.Ordinal) ||
+            name.Contains("round", StringComparison.Ordinal) ||
+            name.StartsWith("pommel", StringComparison.Ordinal) || name.Contains("staffknob", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Ellipsoid, axis: longAxis, sides: 12, layers: 6);
+        }
+        if (name.StartsWith("grip", StringComparison.Ordinal) || name.StartsWith("wrap", StringComparison.Ordinal) ||
+            name.StartsWith("shaft", StringComparison.Ordinal) || name.StartsWith("haft", StringComparison.Ordinal) ||
+            name.StartsWith("socket", StringComparison.Ordinal) || name.StartsWith("staff", StringComparison.Ordinal) ||
+            name.StartsWith("club", StringComparison.Ordinal) || name.StartsWith("bowlimb", StringComparison.Ordinal) ||
+            name.StartsWith("bowstring", StringComparison.Ordinal) || name.Contains("basketbar", StringComparison.Ordinal) ||
+            name.Contains("quillon", StringComparison.Ordinal) || name.Contains("langet", StringComparison.Ordinal) ||
+            name.Contains("collar", StringComparison.Ordinal) || name.Contains("rib", StringComparison.Ordinal))
+        {
+            double endScale = name.StartsWith("grip", StringComparison.Ordinal) || name.StartsWith("shaft", StringComparison.Ordinal) ||
+                name.StartsWith("haft", StringComparison.Ordinal) || name.StartsWith("bowlimb", StringComparison.Ordinal)
+                ? 0.82d
+                : 1d;
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis: longAxis, sides: 8, endScale: endScale);
+        }
+        if (name is "guard" or "hammerhead" or "hammerface" or "axehead" or "pickhead")
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.ChamferedBox);
+        }
+        return ModelGeneratedSpec(ModelGeneratedMeshKind.ChamferedBox);
+    }
+
+    private static bool ModelWeaponIsNumberedPart(string name, string prefix)
+    {
+        return name.StartsWith(prefix, StringComparison.Ordinal) && name.Length > prefix.Length && char.IsDigit(name[prefix.Length]);
+    }
+
+    private static int ModelWeaponSmallestAxis(ModelElementData element)
+    {
+        double[] size = [element.SizeX, element.SizeY, element.SizeZ];
+        return size[0] <= size[1] && size[0] <= size[2] ? 0 : size[1] <= size[2] ? 1 : 2;
     }
 
     // ---- Grip / guard / pommel --------------------------------------------
@@ -1352,12 +1490,7 @@ public sealed partial class DebugWindowManager
             ?? "";
 
         HashSet<string> existing = new(_modelDoc.Textures.Select(texture => texture.Code), StringComparer.Ordinal);
-        foreach (string code in root.EnumerateSubtree()
-            .SelectMany(node => node.Faces)
-            .Where(face => face != null)
-            .Select(face => face!.Texture)
-            .Where(code => !string.IsNullOrEmpty(code))
-            .Distinct(StringComparer.Ordinal))
+        foreach (string code in ModelGeneratedTextureCodes(root))
         {
             if (existing.Add(code))
             {
@@ -1405,6 +1538,11 @@ public sealed partial class DebugWindowManager
         foreach (ModelElementData element in _weaponPreviewRoot.EnumerateSubtree())
         {
             if (element.SizeX <= 0.0001 || element.SizeY <= 0.0001 || element.SizeZ <= 0.0001) continue;
+            if (element.NonCuboid?.Editable == true)
+            {
+                DrawModelMeshWireOverlay(drawList, camera, element, ghost, 1.2f, drawVertices: false);
+                continue;
+            }
             var matrix = ModelComputeElementMatrix(element);
             Vector3[] corners = ModelTransformBoxCorners(matrix, element);
             foreach ((int a, int b) in ModelBoxEdges)

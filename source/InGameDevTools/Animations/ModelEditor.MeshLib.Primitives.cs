@@ -2,73 +2,17 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
-    private sealed class ModelMeshPrimitiveBuilder
-    {
-        private readonly DebugWindowManager owner;
-        private readonly string texture;
-        private readonly Dictionary<(long X, long Y, long Z), int> shared = [];
-
-        public ModelMeshPrimitiveBuilder(DebugWindowManager owner, string texture)
-        {
-            this.owner = owner;
-            this.texture = string.IsNullOrWhiteSpace(texture) ? "all" : texture.TrimStart('#');
-        }
-
-        public ModelNonCuboidData Mesh { get; } = new();
-
-        public int Vertex(double u, double v, double w, bool share = true)
-        {
-            (double x, double y, double z) = owner.ModelPrimitiveAxisMap(u, v, w);
-            x += owner._modelPrimitiveCenter.X;
-            y += owner._modelPrimitiveCenter.Y;
-            z += owner._modelPrimitiveCenter.Z;
-            (long X, long Y, long Z) key = ((long)Math.Round(x * 1_000_000d), (long)Math.Round(y * 1_000_000d), (long)Math.Round(z * 1_000_000d));
-            if (share && shared.TryGetValue(key, out int existing)) return existing;
-            int index = Mesh.Vertices.Count;
-            Mesh.Vertices.Add([Round(x), Round(y), Round(z)]);
-            if (share) shared[key] = index;
-            return index;
-        }
-
-        public void Face(int[] vertices, params float[][] uv)
-        {
-            Mesh.Faces.Add(new ModelMeshFaceData
-            {
-                Vertices = vertices,
-                Texture = texture,
-                Uv = uv.Length == vertices.Length
-                    ? uv.Select(value => (float[])value.Clone()).ToList()
-                    : DefaultUv(vertices.Length)
-            });
-        }
-
-        public void Quad(int a, int b, int c, int d, float u0 = 0f, float u1 = 16f, float v0 = 0f, float v1 = 16f)
-        {
-            Face([a, b, c, d], [u0, v1], [u1, v1], [u1, v0], [u0, v0]);
-        }
-
-        public void Tri(int a, int b, int c)
-        {
-            Face([a, b, c], [0f, 16f], [16f, 16f], [8f, 0f]);
-        }
-
-        private static List<float[]> DefaultUv(int count)
-        {
-            return count == 3
-                ? [[0f, 16f], [16f, 16f], [8f, 0f]]
-                : [[0f, 16f], [16f, 16f], [16f, 0f], [0f, 0f]];
-        }
-
-        private static double Round(double value) => Math.Abs(value) < 0.0000005 ? 0d : Math.Round(value, 6);
-    }
-
     private ModelElementData? ModelBuildMeshLibPrimitive(ModelPrimitiveKind kind, out string error)
     {
         error = "";
         string texture = string.IsNullOrWhiteSpace(_modelPrimitiveTexture)
             ? _modelDoc?.Textures.FirstOrDefault()?.Code ?? "all"
             : _modelPrimitiveTexture;
-        ModelMeshPrimitiveBuilder builder = new(this, texture);
+        ModelGeneratedMeshBuilder builder = new(texture, (u, v, w) =>
+        {
+            (double x, double y, double z) = ModelPrimitiveAxisMap(u, v, w);
+            return (x + _modelPrimitiveCenter.X, y + _modelPrimitiveCenter.Y, z + _modelPrimitiveCenter.Z);
+        });
         try
         {
             switch (kind)
@@ -172,7 +116,7 @@ public sealed partial class DebugWindowManager
         };
     }
 
-    private void ModelBuildMeshCylinder(ModelMeshPrimitiveBuilder b, double radius, double height, double topRadius, double innerRadius)
+    private void ModelBuildMeshCylinder(ModelGeneratedMeshBuilder b, double radius, double height, double topRadius, double innerRadius)
     {
         int sides = Math.Clamp(_modelPrimitiveSides, 3, 64);
         double v0 = -height * 0.5, v1 = height * 0.5;
@@ -221,7 +165,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void ModelBuildMeshCone(ModelMeshPrimitiveBuilder b, double bottomRadius, double topRadius, double height, double wall)
+    private void ModelBuildMeshCone(ModelGeneratedMeshBuilder b, double bottomRadius, double topRadius, double height, double wall)
     {
         int layers = Math.Clamp(_modelPrimitiveLayers, 1, 32);
         int sides = Math.Clamp(_modelPrimitiveSides, 3, 64);
@@ -257,7 +201,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void ModelBuildMeshSphere(ModelMeshPrimitiveBuilder b, bool capsule)
+    private void ModelBuildMeshSphere(ModelGeneratedMeshBuilder b, bool capsule)
     {
         int sides = Math.Clamp(_modelPrimitiveSides, 3, 64);
         int layers = Math.Clamp(_modelPrimitiveLayers, 2, 32);
@@ -295,7 +239,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void ModelBuildMeshTorus(ModelMeshPrimitiveBuilder b)
+    private void ModelBuildMeshTorus(ModelGeneratedMeshBuilder b)
     {
         int majorSegments = Math.Clamp(_modelPrimitiveSegments, 3, 128);
         int minorSegments = Math.Clamp(_modelPrimitiveSides, 3, 64);
@@ -333,7 +277,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void ModelBuildMeshFrustum(ModelMeshPrimitiveBuilder b)
+    private void ModelBuildMeshFrustum(ModelGeneratedMeshBuilder b)
     {
         double halfWidth = _modelPrimitiveDiameter * 0.5;
         double halfDepth = _modelPrimitiveDepth * 0.5;
@@ -362,7 +306,7 @@ public sealed partial class DebugWindowManager
         b.Quad(bottom[3], bottom[2], bottom[1], bottom[0]);
     }
 
-    private void ModelBuildMeshWedge(ModelMeshPrimitiveBuilder b)
+    private void ModelBuildMeshWedge(ModelGeneratedMeshBuilder b)
     {
         double run = _modelPrimitiveDiameter * 0.5;
         double rise = _modelPrimitiveRise * 0.5;
@@ -374,7 +318,7 @@ public sealed partial class DebugWindowManager
         for (int i = 0; i < 3; i++) b.Quad(left[i], left[(i + 1) % 3], right[(i + 1) % 3], right[i]);
     }
 
-    private void ModelBuildMeshHelix(ModelMeshPrimitiveBuilder b)
+    private void ModelBuildMeshHelix(ModelGeneratedMeshBuilder b)
     {
         int segments = Math.Clamp(_modelPrimitiveSegments, 3, 256);
         double radius = _modelPrimitiveDiameter * 0.5;
@@ -405,7 +349,7 @@ public sealed partial class DebugWindowManager
         ModelCapMeshRing(b, rings[^1], false);
     }
 
-    private void ModelBuildMeshBoxTube(ModelMeshPrimitiveBuilder b)
+    private void ModelBuildMeshBoxTube(ModelGeneratedMeshBuilder b)
     {
         double outerU = _modelPrimitiveDiameter * 0.5, outerW = _modelPrimitiveDepth * 0.5;
         double innerU = Math.Max(0.001, outerU - _modelPrimitiveWall), innerW = Math.Max(0.001, outerW - _modelPrimitiveWall);
@@ -426,7 +370,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private int[] ModelMeshRing(ModelMeshPrimitiveBuilder b, double radius, double v, int sides, double startDegrees = 0d, double sweepDegrees = 360d)
+    private int[] ModelMeshRing(ModelGeneratedMeshBuilder b, double radius, double v, int sides, double startDegrees = 0d, double sweepDegrees = 360d)
     {
         bool closed = sweepDegrees >= 359.999;
         int count = closed ? sides : sides + 1;
@@ -440,7 +384,7 @@ public sealed partial class DebugWindowManager
         return ring;
     }
 
-    private static void ModelJoinMeshRings(ModelMeshPrimitiveBuilder b, IReadOnlyList<int[]> rings, int sides, bool closed)
+    private static void ModelJoinMeshRings(ModelGeneratedMeshBuilder b, IReadOnlyList<int[]> rings, int sides, bool closed)
     {
         for (int ringIndex = 0; ringIndex < rings.Count - 1; ringIndex++)
         {
@@ -464,7 +408,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private static void ModelCapMeshRing(ModelMeshPrimitiveBuilder b, int[] ring, bool bottom)
+    private static void ModelCapMeshRing(ModelGeneratedMeshBuilder b, int[] ring, bool bottom)
     {
         if (ring.Length < 3) return;
         for (int i = 1; i < ring.Length - 1; i++)
@@ -474,7 +418,7 @@ public sealed partial class DebugWindowManager
         }
     }
 
-    private void ModelBuildMeshExtrudedContour(ModelMeshPrimitiveBuilder b, IReadOnlyList<(double U, double W)> contour, double thickness)
+    private void ModelBuildMeshExtrudedContour(ModelGeneratedMeshBuilder b, IReadOnlyList<(double U, double W)> contour, double thickness)
     {
         if (contour.Count < 3) return;
         List<(double U, double W)> points = ModelEnsureCounterClockwise(contour);

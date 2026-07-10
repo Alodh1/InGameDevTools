@@ -620,7 +620,15 @@ public sealed partial class DebugWindowManager
             }
             else
             {
-                ImGui.TextUnformatted($"{_modelCreaturePreviewCount} element(s) / {ModelCreatureMaxElements} max. Green ghost shows the result.");
+                if (ModelIsMeshLibMode)
+                {
+                    (int vertices, int faces) = ModelGeneratedMeshCounts(_modelCreaturePreviewRoot);
+                    ImGui.TextUnformatted($"{_modelCreaturePreviewCount} element(s), {vertices} mesh vertices, {faces} mesh faces / {ModelCreatureMaxElements} max. Green ghost shows the result.");
+                }
+                else
+                {
+                    ImGui.TextUnformatted($"{_modelCreaturePreviewCount} element(s) / {ModelCreatureMaxElements} max. Green ghost shows the result.");
+                }
             }
 
             bool canCreate = _modelCreaturePreviewRoot != null && string.IsNullOrEmpty(_modelCreaturePreviewError);
@@ -2063,7 +2071,10 @@ public sealed partial class DebugWindowManager
             // boxes that round the chunky volumes. Both snapshot the structural elements first so they don't
             // recurse onto their own additions.
             ModelCreatureFillJoints(p, group);
-            ModelCreatureApplySmoothing(p, group);
+            if (!ModelIsMeshLibMode)
+            {
+                ModelCreatureApplySmoothing(p, group);
+            }
 
             // Targeted per-element overrides on top of the procedural base (resize/move/rotate/hide named parts).
             ModelApplyCreatureTweaks(group);
@@ -2071,6 +2082,16 @@ public sealed partial class DebugWindowManager
             ModelCreatureScaleSubtree(group, Math.Clamp((double)p.UniformScale, 0.1, 8.0));
 
             ModelCreatureAssignFaces(group, texture, p.AutoTexture);
+
+            if (ModelIsMeshLibMode)
+            {
+                ModelAssignGeneratedMeshSpecs(group, element => ModelCreatureGeneratedMeshSpec(element, p.Smoothing));
+                if (!ModelMaterializeGeneratedMeshes(group, include: null, out string meshError))
+                {
+                    error = meshError;
+                    return null;
+                }
+            }
 
             int count = ModelCreatureElementCount(group);
             if (count == 0)
@@ -3195,6 +3216,89 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    /// <summary>
+    /// Maps the animation-ready boxes to semantic MeshLib surfaces. The original From/To bounds and pivots
+    /// remain the compatibility contract; only the renderable surface changes. Chain elements expose their
+    /// growth axis through a pivot on one end face, while centred detail boxes use their longest dimension.
+    /// </summary>
+    private static ModelGeneratedMeshSpec ModelCreatureGeneratedMeshSpec(ModelElementData element, int smoothing)
+    {
+        (int axis, int sign) = ModelCreatureGeneratedAxis(element);
+        int level = Math.Clamp(smoothing, 0, 2);
+        int loftSides = level switch { 0 => 4, 1 => 8, _ => 16 };
+        int curvedSides = level switch { 0 => 8, 1 => 12, _ => 16 };
+        int curvedLayers = level switch { 0 => 4, 1 => 6, _ => 8 };
+        string name = element.Name;
+
+        if (ModelCreatureNameStartsWithAny(name, "wing") && name.Contains("Membrane", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Membrane, axis, sign);
+        }
+
+        if (ModelCreatureNameStartsWithAny(name, "ear", "crest", "fin", "feather", "mane", "dewlap", "plume") ||
+            name.Contains("Feather", StringComparison.Ordinal) || name.Contains("Blade", StringComparison.Ordinal) ||
+            name.Contains("Fin", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Leaf, axis, sign);
+        }
+
+        if (ModelCreatureNameStartsWithAny(name, "horn", "tusk", "claw", "fang", "quill", "stinger", "spike") ||
+            name.Contains("Fang", StringComparison.Ordinal) || name.Contains("Tine", StringComparison.Ordinal) ||
+            name.Contains("Claw", StringComparison.Ordinal) || name.Contains("Hook", StringComparison.Ordinal) ||
+            name.Contains("Stinger", StringComparison.Ordinal) || name.Contains("Quill", StringComparison.Ordinal) ||
+            name.Contains("Spike", StringComparison.Ordinal) || name.Contains("Tusk", StringComparison.Ordinal) ||
+            name.Contains("Horn", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Cone, axis, sign, loftSides);
+        }
+
+        if (name.StartsWith("shell", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: 1, sign: 1, sides: curvedSides, layers: curvedLayers);
+        }
+
+        if (ModelCreatureNameStartsWithAny(name, "head", "joint", "eye", "shoulder", "haunch", "belly", "hump", "cheek", "nose") ||
+            name.Contains("ClubHead", StringComparison.Ordinal) || name.Contains("Tuft", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Ellipsoid, axis, sign, curvedSides, curvedLayers);
+        }
+
+        if (ModelCreatureNameStartsWithAny(name, "spine", "neck", "leg", "foot", "arm", "hand", "tail", "trunk", "antenna", "antler") ||
+            name.StartsWith("wing", StringComparison.Ordinal))
+        {
+            double endScale = ModelCreatureNameStartsWithAny(name, "tail", "trunk", "antenna", "antler") ? 0.72d : 1d;
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis, sign, loftSides, startScale: 1d, endScale: endScale);
+        }
+
+        if (ModelCreatureNameStartsWithAny(name, "jaw", "snout", "brow", "mouth"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Wedge, axis, sign);
+        }
+
+        return ModelGeneratedSpec(ModelGeneratedMeshKind.ChamferedBox, axis, sign);
+    }
+
+    private static (int Axis, int Sign) ModelCreatureGeneratedAxis(ModelElementData element)
+    {
+        if (element.RotationOrigin is { Length: >= 3 } origin)
+        {
+            for (int axis = 0; axis < 3; axis++)
+            {
+                double size = element.To[axis] - element.From[axis];
+                double tolerance = Math.Max(0.00001d, size * 0.00001d);
+                if (Math.Abs(origin[axis] - element.From[axis]) <= tolerance) return (axis, 1);
+                if (Math.Abs(origin[axis] - element.To[axis]) <= tolerance) return (axis, -1);
+            }
+        }
+
+        return (ModelGeneratedLongestAxis(element), 1);
+    }
+
+    private static bool ModelCreatureNameStartsWithAny(string name, params string[] prefixes)
+    {
+        return prefixes.Any(prefix => name.StartsWith(prefix, StringComparison.Ordinal));
+    }
+
     /// <summary>Applies the targeted per-element tweaks: hides flagged elements (and their subtree), then resizes /
     /// nudges / rotates the named elements that remain. Keyed by name so the same tweaks re-apply every rebuild.</summary>
     private void ModelApplyCreatureTweaks(ModelElementData group)
@@ -3534,12 +3638,15 @@ public sealed partial class DebugWindowManager
             ?? "";
 
         HashSet<string> existing = new(_modelDoc.Textures.Select(texture => texture.Code), StringComparer.Ordinal);
-        foreach (string code in root.EnumerateSubtree()
-            .SelectMany(node => node.Faces)
-            .Where(face => face != null)
-            .Select(face => face!.Texture)
-            .Where(code => !string.IsNullOrEmpty(code))
-            .Distinct(StringComparer.Ordinal))
+        IEnumerable<string> referencedCodes = root.EnumerateSubtree().Any(node => node.NonCuboid?.Editable == true)
+            ? ModelGeneratedTextureCodes(root)
+            : root.EnumerateSubtree()
+                .SelectMany(node => node.Faces)
+                .Where(face => face != null)
+                .Select(face => face!.Texture)
+                .Where(code => !string.IsNullOrEmpty(code))
+                .Distinct(StringComparer.Ordinal);
+        foreach (string code in referencedCodes)
         {
             if (existing.Add(code))
             {
@@ -3605,6 +3712,11 @@ public sealed partial class DebugWindowManager
             if (element.SizeX <= 0.0001 || element.SizeY <= 0.0001 || element.SizeZ <= 0.0001) continue;
             bool selected = !string.IsNullOrEmpty(_modelCreatureTweakSelected)
                 && string.Equals(element.Name, _modelCreatureTweakSelected, StringComparison.Ordinal);
+            if (element.NonCuboid?.Editable == true)
+            {
+                DrawModelMeshWireOverlay(drawList, camera, element, selected ? highlight : ghost, selected ? 2.2f : 1.2f, drawVertices: false);
+                continue;
+            }
             Matrixf matrix = ModelComputeElementMatrix(element);
             Vector3[] corners = ModelTransformBoxCorners(matrix, element);
             foreach ((int a, int b) in ModelBoxEdges)

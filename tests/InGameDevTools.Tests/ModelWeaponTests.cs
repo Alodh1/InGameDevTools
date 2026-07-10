@@ -189,6 +189,117 @@ public sealed class ModelWeaponTests
     }
 
     [Fact]
+    public void EveryArchetype_BuildsValidMeshLibGeometry()
+    {
+        MethodInfo validate = typeof(DebugWindowManager).GetMethod("ModelValidateNonCuboid", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelValidateNonCuboid");
+        for (int i = 0; i < WeaponArchetypeCount(); i++)
+        {
+            object vanillaGroup = BuildWeaponCore(applyArchetype: i, autoTexture: true).Group;
+            object group = BuildWeaponCore(applyArchetype: i, autoTexture: true, meshLib: true).Group;
+            object[] vanilla = Descendants(vanillaGroup).ToArray();
+            object[] meshElements = Descendants(group).ToArray();
+            Assert.Equal(vanilla.Select(ElementName), meshElements.Select(ElementName));
+            bool semantic = false;
+            for (int index = 0; index < meshElements.Length; index++)
+            {
+                object expected = vanilla[index];
+                object element = meshElements[index];
+                Assert.Equal((double[])GetMember(expected, "From"), (double[])GetMember(element, "From"));
+                Assert.Equal((double[])GetMember(expected, "To"), (double[])GetMember(element, "To"));
+                Assert.Equal((double[]?)GetMemberOrNull(expected, "RotationOrigin"),
+                    (double[]?)GetMemberOrNull(element, "RotationOrigin"));
+                Assert.Equal(GetDouble(expected, "RotationX"), GetDouble(element, "RotationX"));
+                Assert.Equal(GetDouble(expected, "RotationY"), GetDouble(element, "RotationY"));
+                Assert.Equal(GetDouble(expected, "RotationZ"), GetDouble(element, "RotationZ"));
+                Assert.Equal(ElementName(GetMember(expected, "Parent")), ElementName(GetMember(element, "Parent")));
+                Assert.Null(GetMemberOrNull(expected, "NonCuboid"));
+                object? mesh = GetMemberOrNull(element, "NonCuboid");
+                if (mesh == null) continue;
+                Assert.Empty(((IEnumerable)validate.Invoke(null, [mesh])!).Cast<object>());
+                Assert.All(((Array)GetMember(element, "Faces")).Cast<object?>(), Assert.Null);
+                Assert.Equal(FaceTexture(expected), MeshFaceTexture(element));
+                semantic |= ((IList)GetMember(mesh, "Vertices")).Count != 8 || ((IList)GetMember(mesh, "Faces")).Count != 6;
+            }
+            Assert.True(semantic, $"archetype {i} only produced box topology");
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]  // sword
+    [InlineData(15)] // trident
+    [InlineData(20)] // axe
+    [InlineData(29)] // morningstar
+    [InlineData(38)] // scythe
+    [InlineData(42)] // shortbow
+    public void MeshLib_RepresentativeArchetypesProduceValidatedSemanticMeshes(int archetype)
+    {
+        object group = BuildWeaponCore(applyArchetype: archetype, meshLib: true).Group;
+        MethodInfo validate = typeof(DebugWindowManager).GetMethod("ModelValidateNonCuboid", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new MissingMethodException(nameof(DebugWindowManager), "ModelValidateNonCuboid");
+        bool semantic = false;
+
+        foreach (object element in Descendants(group))
+        {
+            if (GetDouble(element, "SizeX") <= 0 || GetDouble(element, "SizeY") <= 0 || GetDouble(element, "SizeZ") <= 0) continue;
+            object mesh = GetMember(element, "NonCuboid");
+            Assert.All(((Array)GetMember(element, "Faces")).Cast<object?>(), Assert.Null);
+            var errors = (IEnumerable)validate.Invoke(null, [mesh])!;
+            Assert.Empty(errors.Cast<object>());
+            int vertices = ((IList)GetMember(mesh, "Vertices")).Count;
+            int faces = ((IList)GetMember(mesh, "Faces")).Count;
+            semantic |= vertices != 8 || faces != 6;
+        }
+
+        Assert.True(semantic, $"archetype {archetype} only produced box topology");
+    }
+
+    [Fact]
+    public void MeshLib_AutoTexturesRemainOnMeshFaces()
+    {
+        object group = BuildWeaponCore(applyArchetype: 0, autoTexture: true, meshLib: true).Group;
+        Assert.Equal("handle", MeshFaceTexture(First(group, "grip")));
+        Assert.Equal("metal", MeshFaceTexture(First(group, "blade1")));
+    }
+
+    [Fact]
+    public void MeshLib_MapsBladeRingAndPickHardwareToTheirSemanticProfiles()
+    {
+        object sword = BuildWeaponCore(applyArchetype: 0, meshLib: true).Group;
+        Assert.Equal((12, 14), MeshCounts(First(sword, "blade1"))); // extruded six-point contour
+
+        object ringPommel = BuildWeaponCore(applyArchetype: 0, meshLib: true,
+            configure: parameters => SetMember(parameters, "PommelStyle", 6 /* Ring */)).Group;
+        Assert.Equal((48, 48), MeshCounts(First(ringPommel, "pommelRing1"))); // 12 x 4 torus
+
+        object wheelPommel = BuildWeaponCore(applyArchetype: 0, meshLib: true,
+            configure: parameters => SetMember(parameters, "PommelStyle", 2 /* Wheel */)).Group;
+        Assert.Equal((24, 32), MeshCounts(First(wheelPommel, "pommel"))); // 12-sided disc
+
+        object capPommel = BuildWeaponCore(applyArchetype: 0, meshLib: true,
+            configure: parameters => SetMember(parameters, "PommelStyle", 3 /* Cap */)).Group;
+        Assert.Equal((73, 82), MeshCounts(First(capPommel, "pommel"))); // rounded dome
+
+        object facetedPommel = BuildWeaponCore(applyArchetype: 0, meshLib: true,
+            configure: parameters => SetMember(parameters, "PommelStyle", 4 /* Faceted */)).Group;
+        Assert.Equal((6, 8), MeshCounts(First(facetedPommel, "pommel")));
+        Assert.Equal((6, 8), MeshCounts(First(facetedPommel, "pommelFacet")));
+
+        object pickAdze = BuildWeaponCore(applyArchetype: 34 /* WarPick */, meshLib: true,
+            configure: parameters => SetMember(parameters, "PickBack", 2 /* Adze */)).Group;
+        Assert.Equal((16, 20), MeshCounts(First(pickAdze, "pickHead"))); // chamfered hardware block
+        Assert.Equal((6, 5), MeshCounts(First(pickAdze, "pickAdze")));   // cutting wedge
+
+        object pickHammer = BuildWeaponCore(applyArchetype: 34 /* WarPick */, meshLib: true,
+            configure: parameters => SetMember(parameters, "PickBack", 3 /* Hammer */)).Group;
+        Assert.Equal((16, 20), MeshCounts(First(pickHammer, "pickHammer")));
+
+        object axePick = BuildWeaponCore(applyArchetype: 20 /* Axe */, meshLib: true,
+            configure: parameters => SetMember(parameters, "AxeBack", 3 /* Pick */)).Group;
+        Assert.Equal(9, MeshCounts(First(axePick, "axeBackPick")).Vertices); // eight-sided cone + tip
+    }
+
+    [Fact]
     public void BladeCrossSection_AddsAThickSpineRidgeAndBevelFacets()
     {
         // A bevelled blade gives each segment a thick spine ridge plus angled edge facets; the spine box is
@@ -268,11 +379,13 @@ public sealed class ModelWeaponTests
     private static object BuildWeapon(int? applyArchetype = null) => BuildWeaponCore(applyArchetype).Group;
 
     private static (DebugWindowManager Manager, object Group) BuildWeaponCore(
-        int? applyArchetype = null, bool autoTexture = false, string? metalTexture = null, Action<object>? configure = null)
+        int? applyArchetype = null, bool autoTexture = false, string? metalTexture = null, Action<object>? configure = null,
+        bool meshLib = false)
     {
         DebugWindowManager manager = CreateUninitializedManager();
         object document = CreateModelDocument();
         SetField(manager, "_modelDoc", document);
+        if (meshLib) SetEnumField(manager, "_modelEditorMode", "MeshLib");
 
         object parameters = CreateWeaponParams();
         SetMember(parameters, "AutoTexture", autoTexture);
@@ -364,6 +477,19 @@ public sealed class ModelWeaponTests
         return (string)GetMember(face, "Texture");
     }
 
+    private static string MeshFaceTexture(object element)
+    {
+        object mesh = GetMember(element, "NonCuboid");
+        object face = ((IList)GetMember(mesh, "Faces"))[0]!;
+        return (string)GetMember(face, "Texture");
+    }
+
+    private static (int Vertices, int Faces) MeshCounts(object element)
+    {
+        object mesh = GetMember(element, "NonCuboid");
+        return (((IList)GetMember(mesh, "Vertices")).Count, ((IList)GetMember(mesh, "Faces")).Count);
+    }
+
     private static IEnumerable<object> Descendants(object group)
     {
         foreach (object child in (IEnumerable)GetMember(group, "Children"))
@@ -421,5 +547,12 @@ public sealed class ModelWeaponTests
         }
 
         throw new MissingMemberException(target.GetType().FullName, name);
+    }
+
+    private static void SetEnumField(object target, string name, string value)
+    {
+        FieldInfo field = target.GetType().GetField(name, InstanceFlags)
+            ?? throw new MissingFieldException(target.GetType().FullName, name);
+        field.SetValue(target, Enum.Parse(field.FieldType, value));
     }
 }

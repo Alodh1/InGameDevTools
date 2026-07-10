@@ -372,6 +372,22 @@ public sealed partial class DebugWindowManager
                 ClothingAssignFaces(anchor, baseTex, trimTex, accentTex);
             }
 
+            // The wearer rig exists only to show fit in the generator preview. In MeshLib mode convert the
+            // renderable garment descendants in place, one step-parented piece at a time, while leaving both
+            // the wearer and the face-less compatibility anchors as vanilla cuboids/anchors.
+            if (ModelIsMeshLibMode)
+            {
+                foreach (ModelElementData anchor in ClothingAnchors(rig).ToList())
+                {
+                    ModelAssignGeneratedMeshSpecs(anchor, ClothingGeneratedMeshSpec);
+                    if (!ModelMaterializeGeneratedMeshes(anchor, include: null, out string meshError))
+                    {
+                        error = meshError;
+                        return null;
+                    }
+                }
+            }
+
             int count = ClothingGarmentElementCount(rig);
             if (count == 0)
             {
@@ -796,6 +812,153 @@ public sealed partial class DebugWindowManager
             if (name.Contains(token, StringComparison.OrdinalIgnoreCase)) return 1;
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Maps clothing's animation-ready boxes to semantic MeshLib surfaces. Names are deliberately used as the
+    /// stable contract here: the generator already uses them to route base/trim/accent textures, and keeping one
+    /// element per named part preserves sway-chain pivots, step-parent anchors and editor selection behavior.
+    /// </summary>
+    private static ModelGeneratedMeshSpec ClothingGeneratedMeshSpec(ModelElementData element)
+    {
+        string name = element.Name;
+        string anchor = ClothingOwningAnchorName(element);
+        (int axis, int sign) = ClothingGeneratedAxis(element);
+
+        // Organic and jewelled decorations have the most specific profiles, so classify them before broader
+        // garment tokens such as "trim" and "plate".
+        if (ClothingNameContainsAny(name, "leaf", "feather", "plume"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Leaf, axis, sign);
+        }
+        if (ClothingNameContainsAny(name, "thorn", "spike"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Cone, axis, sign, sides: 8);
+        }
+        if (ClothingNameContainsAny(name, "gem", "jewel"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Jewel, axis, sign);
+        }
+        if (ClothingNameContainsAny(name, "stud", "rivet"))
+        {
+            int outwardAxis = ClothingGeneratedShortestAxis(element);
+            int outwardSign = ClothingGeneratedOutwardSign(element, outwardAxis);
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, outwardAxis, outwardSign, sides: 12, layers: 6);
+        }
+        if (ClothingNameContainsAny(name, "branch", "twig", "vine", "root"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis, sign, sides: 8, endScale: 0.42d);
+        }
+
+        // A buckle is actual open hardware rather than a solid decorated box. Its thinnest dimension is the
+        // extrusion axis, leaving the rectangular opening in the two broad dimensions.
+        if (name.Contains("buckle", StringComparison.OrdinalIgnoreCase))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.BoxTube, ClothingGeneratedShortestAxis(element));
+        }
+
+        // Armor plates retain their individual names and transforms, but gain a shaped cutting/overlap edge.
+        // Shoulder plates are domed over the joint; flat scale/lamellar/chest plates use a wedge profile.
+        if (ClothingNameContainsAny(name, "plate", "scale", "lamel"))
+        {
+            return anchor.StartsWith("Pauldron", StringComparison.Ordinal)
+                ? ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: 1, sign: 1, sides: 12, layers: 6)
+                : ModelGeneratedSpec(ModelGeneratedMeshKind.Wedge, axis, sign);
+        }
+
+        // Wraps are open rings around the relevant body part. Cape collars are draped panels rather than neck
+        // wraps, so they stay in the ribbon family below.
+        if ((ClothingNameContainsAny(name, "collar", "band", "cuff", "ruff") && anchor != "Cape") ||
+            anchor == "Belt" && name == "band")
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Ring, axis: 1, sides: 12);
+        }
+
+        // Hanging cloth follows its existing joint axis and remains one editable mesh per sway segment.
+        if (ClothingNameContainsAny(name,
+                "cape", "skirt", "scarf", "tatter", "mantle", "drape", "cowl", "lapel") ||
+            name.StartsWith("front", StringComparison.OrdinalIgnoreCase) ||
+            name == "back" ||
+            anchor is "Cape" or "Skirt" or "Mantle" or "HoodDrape")
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Membrane, axis, sign);
+        }
+
+        // Head and shoulder coverings are fitted domes. Face pieces are shallow outward-facing shells.
+        if (anchor == "Headwear" && ClothingNameContainsAny(name, "cap", "hood", "helm"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: 1, sign: 1, sides: 12, layers: 6);
+        }
+        if (anchor == "Facewear" || ClothingNameContainsAny(name, "mask", "visor", "goggle"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: 0, sign: -1, sides: 12, layers: 6);
+        }
+
+        // Full torso, arm and leg coverings become rounded/tapered lofts. This includes fitted layers and boot
+        // shafts but excludes flat soles and pouches, which intentionally remain chamfered hardware volumes.
+        if (ClothingNameContainsAny(name,
+                "panel", "layer", "upper", "fore", "glove", "thigh", "shin", "boot", "shaft", "crown"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis: 1, sign, sides: 8,
+                startScale: 0.94d, endScale: 0.86d);
+        }
+
+        if (ClothingNameContainsAny(name, "strap", "fringe", "trim", "fur"))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Membrane, axis, sign);
+        }
+
+        // Soles, pouches, brims and other intentionally blocky hardware still receive editable non-cuboid
+        // geometry, using bevelled corners rather than silently falling back to a six-face cube.
+        return ModelGeneratedSpec(ModelGeneratedMeshKind.ChamferedBox, axis, sign);
+    }
+
+    private static string ClothingOwningAnchorName(ModelElementData element)
+    {
+        for (ModelElementData? current = element.Parent; current != null; current = current.Parent)
+        {
+            if (!string.IsNullOrEmpty(current.StepParentName)) return current.Name;
+        }
+        return "";
+    }
+
+    private static bool ClothingNameContainsAny(string name, params string[] tokens)
+    {
+        return tokens.Any(token => name.Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static (int Axis, int Sign) ClothingGeneratedAxis(ModelElementData element)
+    {
+        if (element.RotationOrigin is { Length: >= 3 } origin)
+        {
+            for (int candidate = 0; candidate < 3; candidate++)
+            {
+                double size = element.To[candidate] - element.From[candidate];
+                double tolerance = Math.Max(0.00001d, size * 0.00001d);
+                if (Math.Abs(origin[candidate] - element.From[candidate]) <= tolerance) return (candidate, 1);
+                if (Math.Abs(origin[candidate] - element.To[candidate]) <= tolerance) return (candidate, -1);
+            }
+        }
+        return (ModelGeneratedLongestAxis(element), 1);
+    }
+
+    private static int ClothingGeneratedShortestAxis(ModelElementData element)
+    {
+        double[] sizes = [element.SizeX, element.SizeY, element.SizeZ];
+        int axis = 0;
+        for (int candidate = 1; candidate < sizes.Length; candidate++)
+        {
+            if (sizes[candidate] < sizes[axis]) axis = candidate;
+        }
+        return axis;
+    }
+
+    private static int ClothingGeneratedOutwardSign(ModelElementData element, int axis)
+    {
+        if (element.Parent == null) return 1;
+        double center = (element.From[axis] + element.To[axis]) * 0.5d;
+        double parentCenter = (element.Parent.From[axis] + element.Parent.To[axis]) * 0.5d;
+        return center < parentCenter ? -1 : 1;
     }
 
     // ---- Decoration pass ---------------------------------------------------
@@ -1572,6 +1735,15 @@ public sealed partial class DebugWindowManager
         {
             ((JObject)item["textures"]!)[p.TrimTexture] = new JObject { ["base"] = ClothingTexturePath(basePath) };
         }
+        if (!string.IsNullOrWhiteSpace(p.AccentTexture) &&
+            !string.Equals(p.AccentTexture, baseTex, StringComparison.Ordinal) &&
+            !string.Equals(p.AccentTexture, p.TrimTexture, StringComparison.Ordinal))
+        {
+            string accentPath = _modelDoc?.Textures
+                .FirstOrDefault(texture => string.Equals(texture.Code, p.AccentTexture, StringComparison.Ordinal))?.Path
+                ?? basePath;
+            ((JObject)item["textures"]!)[p.AccentTexture] = new JObject { ["base"] = ClothingTexturePath(accentPath) };
+        }
 
         item["guiTransform"] = new JObject
         {
@@ -1883,7 +2055,11 @@ public sealed partial class DebugWindowManager
         }
         else
         {
-            ImGui.TextUnformatted($"{_clothingPreviewCount} garment element(s) / {ModelCreatureMaxElements} max. Green = clothes, grey = wearer body.");
+            (int vertices, int faces) = ModelGeneratedMeshCounts(_clothingPreviewRig);
+            string meshStatus = ModelIsMeshLibMode
+                ? $" {vertices} vertices / {faces} mesh faces."
+                : "";
+            ImGui.TextUnformatted($"{_clothingPreviewCount} garment element(s) / {ModelCreatureMaxElements} max.{meshStatus} Green = clothes, grey = wearer body.");
         }
 
         bool canCreate = _clothingPreviewRig != null && string.IsNullOrEmpty(_clothingPreviewError);
@@ -2235,6 +2411,11 @@ public sealed partial class DebugWindowManager
             if (element.SizeX <= 0.0001 || element.SizeY <= 0.0001 || element.SizeZ <= 0.0001) continue;
             if (!string.IsNullOrEmpty(element.StepParentName)) continue;   // skip the face-less anchor box itself
             bool isGarment = garment.Contains(element);
+            if (isGarment && element.NonCuboid?.Editable == true)
+            {
+                DrawModelMeshWireOverlay(drawList, camera, element, green, 1.4f, drawVertices: false);
+                continue;
+            }
             Matrixf matrix = ModelComputeElementMatrix(element);
             Vector3[] corners = ModelTransformBoxCorners(matrix, element);
             foreach ((int a, int b) in ModelBoxEdges)

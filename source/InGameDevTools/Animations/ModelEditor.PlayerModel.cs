@@ -720,6 +720,19 @@ public sealed partial class DebugWindowManager
                 : p.Texture;
             PlayerModelAssignFaces(root, texture);
 
+            if (ModelIsMeshLibMode)
+            {
+                ModelAssignGeneratedMeshSpecs(root, PlayerModelGeneratedMeshSpec);
+                if (!ModelMaterializeGeneratedMeshes(
+                        root,
+                        element => !PlayerModelFacelessAnchors.Contains(element.Name),
+                        out string meshError))
+                {
+                    error = meshError;
+                    return null;
+                }
+            }
+
             int count = ModelCreatureElementCount(root);
             if (count == 0)
             {
@@ -739,6 +752,131 @@ public sealed partial class DebugWindowManager
             error = $"Generation failed: {exception.Message}";
             return null;
         }
+    }
+
+    private static ModelGeneratedMeshSpec PlayerModelGeneratedMeshSpec(ModelElementData element)
+    {
+        string name = element.Name;
+        int longestAxis = PlayerModelGeneratedLongestAxis(element);
+
+        if (name == "Head" || name.StartsWith("Eye", StringComparison.Ordinal) ||
+            name.EndsWith("Pupil", StringComparison.Ordinal) || name == "Nose")
+        {
+            int axis = name.StartsWith("Eye", StringComparison.Ordinal) || name.EndsWith("Pupil", StringComparison.Ordinal)
+                ? 2
+                : 1;
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Ellipsoid, axis: axis, sides: 12, layers: 6);
+        }
+
+        if (name.StartsWith("Ear", StringComparison.Ordinal) ||
+            name.StartsWith("Crest", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Leaf, axis: 1);
+        }
+
+        if (name.StartsWith("Horn", StringComparison.Ordinal) ||
+            name.StartsWith("Spike", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(
+                ModelGeneratedMeshKind.Cone,
+                axis: longestAxis,
+                sign: PlayerModelGeneratedSign(element, longestAxis),
+                sides: 8);
+        }
+
+        if (name.StartsWith("Antenna", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(
+                ModelGeneratedMeshKind.Tube,
+                axis: longestAxis,
+                sign: PlayerModelGeneratedSign(element, longestAxis),
+                sides: 8,
+                endScale: 0.45d);
+        }
+
+        if (name.StartsWith("Claw", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Cone, axis: 0, sign: -1, sides: 8);
+        }
+
+        if (name.StartsWith("FangUp", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Cone, axis: 1, sign: -1, sides: 8);
+        }
+
+        if (name.StartsWith("FangLow", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Cone, axis: 1, sides: 8);
+        }
+
+        if (name.StartsWith("Tail", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(
+                ModelGeneratedMeshKind.Tube,
+                axis: longestAxis,
+                sign: PlayerModelGeneratedSign(element, longestAxis),
+                sides: 8,
+                endScale: 0.72d);
+        }
+
+        if (name is "Muzzle" or "Snout" or "Jaw")
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Tube, axis: 0, sign: -1, sides: 8, endScale: 0.78d);
+        }
+
+        if (name.StartsWith("ArmFluff", StringComparison.Ordinal) ||
+            name.StartsWith("LegFluff", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.Dome, axis: 1, sign: -1, sides: 12, layers: 6);
+        }
+
+        if (name.StartsWith("Brow", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(ModelGeneratedMeshKind.ChamferedBox);
+        }
+
+        if (name is "LowerTorso" or "UpperTorso")
+        {
+            return ModelGeneratedSpec(
+                ModelGeneratedMeshKind.Tube,
+                axis: 1,
+                sign: PlayerModelGeneratedSign(element, 1),
+                sides: 8,
+                endScale: 0.88d);
+        }
+
+        if (name == "Neck" || name.StartsWith("UpperArm", StringComparison.Ordinal) ||
+            name.StartsWith("LowerArm", StringComparison.Ordinal) ||
+            name.StartsWith("UpperFoot", StringComparison.Ordinal) ||
+            name.StartsWith("MiddleFoot", StringComparison.Ordinal) ||
+            name.StartsWith("LowerFoot", StringComparison.Ordinal))
+        {
+            return ModelGeneratedSpec(
+                ModelGeneratedMeshKind.Tube,
+                axis: 1,
+                sign: PlayerModelGeneratedSign(element, 1),
+                sides: 8,
+                endScale: 0.9d);
+        }
+
+        return ModelGeneratedSpec(ModelGeneratedMeshKind.ChamferedBox, axis: longestAxis);
+    }
+
+    private static int PlayerModelGeneratedLongestAxis(ModelElementData element)
+    {
+        double[] sizes = [element.SizeX, element.SizeY, element.SizeZ];
+        int axis = 0;
+        for (int candidate = 1; candidate < sizes.Length; candidate++)
+        {
+            if (sizes[candidate] > sizes[axis]) axis = candidate;
+        }
+        return axis;
+    }
+
+    private static int PlayerModelGeneratedSign(ModelElementData element, int axis)
+    {
+        if (element.RotationOrigin is not { Length: >= 3 } origin) return 1;
+        return Math.Abs(origin[axis] - element.From[axis]) <= Math.Abs(origin[axis] - element.To[axis]) ? 1 : -1;
     }
 
     private void PlayerModelAssignFaces(ModelElementData root, string texture)
@@ -960,7 +1098,11 @@ public sealed partial class DebugWindowManager
         }
         else
         {
-            ImGui.TextUnformatted($"{_playerModelPreviewCount} element(s) / {ModelCreatureMaxElements} max. Green ghost shows the result.");
+            (int vertices, int faces) = ModelGeneratedMeshCounts(_playerModelPreviewRoot);
+            string meshStatus = ModelIsMeshLibMode
+                ? $" {vertices} vertices / {faces} mesh faces."
+                : "";
+            ImGui.TextUnformatted($"{_playerModelPreviewCount} element(s) / {ModelCreatureMaxElements} max.{meshStatus} Green ghost shows the result.");
         }
 
         bool canCreate = _playerModelPreviewRoot != null && string.IsNullOrEmpty(_playerModelPreviewError);
@@ -1160,6 +1302,11 @@ public sealed partial class DebugWindowManager
         {
             if (element.SizeX <= 0.0001 || element.SizeY <= 0.0001 || element.SizeZ <= 0.0001) continue;
             if (PlayerModelFacelessAnchors.Contains(element.Name)) continue;
+            if (element.NonCuboid?.Editable == true)
+            {
+                DrawModelMeshWireOverlay(drawList, camera, element, ghost, 1.2f, drawVertices: false);
+                continue;
+            }
             Matrixf matrix = ModelComputeElementMatrix(element);
             Vector3[] corners = ModelTransformBoxCorners(matrix, element);
             foreach ((int a, int b) in ModelBoxEdges)

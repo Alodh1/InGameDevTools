@@ -85,6 +85,9 @@ public sealed partial class DebugWindowManager
         public string StepParentName = "";
         public ModelFaceData?[] Faces = new ModelFaceData?[6];
         public ModelNonCuboidData? NonCuboid;
+        // Generator-only profile metadata. Materialized into NonCuboid before a preview is committed;
+        // intentionally omitted from cloning and the hand-written shape serializer.
+        public ModelGeneratedMeshSpec? GeneratedMeshSpec;
         public List<ModelElementData> Children = [];
         public ModelElementData? Parent;
         public JObject? Extra;
@@ -3279,7 +3282,7 @@ public sealed partial class DebugWindowManager
         _modelPreviewDirty = true;
         _modelJsonBufferStale = true;
         _modelReparentSource = null;
-        _modelPrimitivePreviewDirty = true;
+        ModelInvalidateGeneratorPreviews();
         ModelResetCameraToFit();
     }
 
@@ -4424,6 +4427,7 @@ public sealed partial class DebugWindowManager
 
         _modelDoc.Dirty = true;
         _modelPreviewDirty = true;
+        ModelInvalidateGeneratorPreviews();
         _modelJsonBufferStale = true;
         _modelLiveChangedAtMs = _api.World?.ElapsedMilliseconds ?? 0;
         _modelLiveDirty = true;
@@ -4565,6 +4569,7 @@ public sealed partial class DebugWindowManager
             _modelMeshActiveFace = entry.MeshFaces.LastOrDefault(-1);
         }
         _modelPreviewDirty = true;
+        ModelInvalidateGeneratorPreviews();
         _modelJsonBufferStale = true;
         _modelLiveDirty = true;
         _modelLiveChangedAtMs = _api.World?.ElapsedMilliseconds ?? 0;
