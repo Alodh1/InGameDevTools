@@ -63,18 +63,53 @@ public sealed partial class DebugWindowManager : IDisposable
     public void Load(ICoreClientAPI api)
     {
         _behavior = api.World.Player.Entity.GetBehavior<FirstPersonAnimationsBehavior>();
-        _sourceAssetIndex = BuildSourceAssetIndex(api);
-        RegisterCollectibleTransformAttributes(api);
     }
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
+        if (_drawSubscribed && _imguiModSystem != null)
+        {
+            _imguiModSystem.Draw -= DrawEditor;
+            _imguiModSystem.Closed -= CloseExternalDevTools;
+            _drawSubscribed = false;
+        }
+
+        _liveApplyManager.RevertAll();
         ClearLiveApplyState();
+        _liveApplyManager.Clear();
         RestoreExpandedEditorInputSuppression();
         RestoreWorldgenPreviewForEditorTeardown("devtools disposed");
+        DisposeVanillaPreviewScene();
+        _vanillaPreviewRenderer?.Dispose();
+        _vanillaPreviewRenderer = null;
         DisposeWorldgenPreviewRasterTexture();
         ModelDisposeTexturePaintTexture();
         ModelDisposePreviewResources();
+        InvalidateBlockItemJsonPreview();
+        _blockItemJsonPreviewRenderer?.Dispose();
+        _blockItemJsonPreviewRenderer = null;
+        _transformPreviewMesh?.Dispose();
+        _transformPreviewMesh = null;
+        _transformReferenceMesh?.Dispose();
+        _transformReferenceMesh = null;
+        _transformsPreviewRenderer?.Dispose();
+        _transformsPreviewRenderer = null;
+        _particleEffectsManager.Dispose();
+        _transformGizmoRenderer?.Dispose();
+        _transformGizmoRenderer = null;
+        _imguiAnimationViewportRenderer?.Dispose();
+        _imguiAnimationViewportRenderer = null;
+        _detachedEditorCamera?.Dispose();
+        _detachedEditorCamera = null;
+        _vanillaHistory.ClearAll();
+        _animationHistory.ClearAll();
+        DevToolsTextDiffView.ClearCache();
+        _sourceAssetIndex = null;
+        _behavior = null;
+        _colliders.Clear();
         _recoveryManager.FlushPending();
         FlushDevToolsConfigSave(force: true);
         if (_inputSuppressionTickListener != -1)
@@ -84,12 +119,7 @@ public sealed partial class DebugWindowManager : IDisposable
         }
 
         SetEditorViewportSuppression(false);
-
-        if (!_drawSubscribed || _imguiModSystem == null) return;
-
-        _imguiModSystem.Draw -= DrawEditor;
-        _imguiModSystem.Closed -= CloseExternalDevTools;
-        _drawSubscribed = false;
+        if (ReferenceEquals(_instance, this)) _instance = null!;
     }
 
     public static void RegisterTransformByCode(ModelTransform transform, string code)
@@ -124,6 +154,8 @@ public sealed partial class DebugWindowManager : IDisposable
     private sealed class SourceSaveRequest
     {
         private readonly System.Func<string> _commit;
+        private string[]? _oldLines;
+        private string[]? _newLines;
 
         public SourceSaveRequest(string sourceFile, string oldText, string newText, string successStatus, System.Func<string> commit)
         {
@@ -138,6 +170,8 @@ public sealed partial class DebugWindowManager : IDisposable
         public string OldText { get; }
         public string NewText { get; }
         public string SuccessStatus { get; }
+        public string[] OldLines => _oldLines ??= SplitSourceLines(OldText);
+        public string[] NewLines => _newLines ??= SplitSourceLines(NewText);
 
         public string Commit()
         {
@@ -307,42 +341,51 @@ public sealed partial class DebugWindowManager : IDisposable
         string domain = collectible.Code.Domain;
         string kind = collectible is Block ? "blocktypes" : "itemtypes";
         string path = collectible.Code.Path;
+        string sourceKey = BuildCollectibleSourceKey(domain, kind);
 
-        if (_instance._sourceAssetIndex == null ||
-            !_instance._sourceAssetIndex.CollectiblesByDomainKind.TryGetValue(BuildCollectibleSourceKey(domain, kind), out List<CollectibleSourceAsset>? candidates))
+        SourceAssetIndex index = _instance.EnsureSourceAssetIndex();
+        if (!index.CollectiblesByDomainKind.TryGetValue(sourceKey, out List<CollectibleSourceAsset>? candidates))
         {
             return null;
+        }
+
+        if (index.CollectiblesByDomainKindAndPathCode.TryGetValue(sourceKey, out Dictionary<string, IAsset>? byPathCode))
+        {
+            string candidatePath = path;
+            while (true)
+            {
+                if (byPathCode.TryGetValue(candidatePath, out IAsset? pathAsset)) return pathAsset;
+                int separator = candidatePath.LastIndexOf('-');
+                if (separator <= 0) break;
+                candidatePath = candidatePath[..separator];
+            }
         }
 
         IAsset? bestAsset = null;
         int bestScore = -1;
 
+        // Unusual assets can declare a code unrelated to their filename. Parse only on this
+        // fallback path, when cheap path metadata could not identify any candidate.
         foreach (CollectibleSourceAsset candidate in candidates)
         {
-            string code = candidate.Code;
-            int score = -1;
-            if (string.Equals(code, path, StringComparison.OrdinalIgnoreCase))
-            {
-                score = 10000 + code.Length;
-            }
-            else if (path.StartsWith(code + "-", StringComparison.OrdinalIgnoreCase))
-            {
-                score = 1000 + code.Length;
-            }
-            else if (Path.GetFileNameWithoutExtension(candidate.Asset.Location.Path).Equals(code, StringComparison.OrdinalIgnoreCase) &&
-                path.Contains(code, StringComparison.OrdinalIgnoreCase))
-            {
-                score = 100 + code.Length;
-            }
+            string code = candidate.ResolveCode();
+            int score = ScoreCollectibleSourceCandidate(code, path, allowContains: true);
+            if (score <= bestScore) continue;
 
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestAsset = candidate.Asset;
-            }
+            bestScore = score;
+            bestAsset = candidate.Asset;
         }
 
         return bestAsset;
+    }
+
+    private static int ScoreCollectibleSourceCandidate(string code, string runtimePath, bool allowContains)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return -1;
+        if (string.Equals(code, runtimePath, StringComparison.OrdinalIgnoreCase)) return 10000 + code.Length;
+        if (runtimePath.StartsWith(code + "-", StringComparison.OrdinalIgnoreCase)) return 1000 + code.Length;
+        if (allowContains && runtimePath.Contains(code, StringComparison.OrdinalIgnoreCase)) return 100 + code.Length;
+        return -1;
     }
 
     private static SourceSaveResult TrySaveAnimationToSource(string animationCode, Animation animation)
@@ -390,12 +433,40 @@ public sealed partial class DebugWindowManager : IDisposable
             if (asset != null) return asset;
         }
 
-        if (_instance._sourceAssetIndex?.ConfigAnimationsByKey.TryGetValue(BuildAnimationSourceKey(source.Domain, source.SourceKey), out IAsset? indexedAsset) == true)
+        if (_instance.EnsureSourceAssetIndex().ConfigAnimationsByDomain.TryGetValue(source.Domain, out List<IAsset>? candidates))
         {
-            return indexedAsset;
+            foreach (IAsset candidate in candidates)
+            {
+                if (ConfigAnimationAssetContains(candidate, source.SourceKey))
+                {
+                    return candidate;
+                }
+            }
         }
 
         return null;
+    }
+
+    private static bool ConfigAnimationAssetContains(IAsset asset, string sourceKey)
+    {
+        bool wasLoaded = asset.IsLoaded();
+        try
+        {
+            if (!wasLoaded && !asset.Origin.TryLoadAsset(asset)) return false;
+            return TryParseJsonObject(ReadAssetText(asset))?.Property(sourceKey, StringComparison.OrdinalIgnoreCase) != null;
+        }
+        finally
+        {
+            if (!wasLoaded && !asset.IsPatched)
+            {
+                asset.Data = null!;
+            }
+        }
+    }
+
+    private SourceAssetIndex EnsureSourceAssetIndex()
+    {
+        return _sourceAssetIndex ??= BuildSourceAssetIndex(_api);
     }
 
     /// <summary>
@@ -514,7 +585,12 @@ public sealed partial class DebugWindowManager : IDisposable
 
             if (assetPath.StartsWith("config/animations/", StringComparison.OrdinalIgnoreCase))
             {
-                AddConfigAnimationSourceAsset(index, asset);
+                if (!index.ConfigAnimationsByDomain.TryGetValue(asset.Location.Domain, out List<IAsset>? assets))
+                {
+                    assets = [];
+                    index.ConfigAnimationsByDomain[asset.Location.Domain] = assets;
+                }
+                assets.Add(asset);
             }
         }
 
@@ -523,11 +599,6 @@ public sealed partial class DebugWindowManager : IDisposable
 
     private static void AddCollectibleSourceAsset(SourceAssetIndex index, IAsset asset, string assetPath)
     {
-        JObject? json = TryParseJsonObject(ReadAssetText(asset));
-        string? code = json?["code"]?.ToString();
-        if (string.IsNullOrWhiteSpace(code)) return;
-        if (code.Contains(':')) code = code[(code.IndexOf(':') + 1)..];
-
         string kind = assetPath.StartsWith("blocktypes/", StringComparison.OrdinalIgnoreCase) ? "blocktypes" : "itemtypes";
         string key = BuildCollectibleSourceKey(asset.Location.Domain, kind);
         if (!index.CollectiblesByDomainKind.TryGetValue(key, out List<CollectibleSourceAsset>? assets))
@@ -536,30 +607,64 @@ public sealed partial class DebugWindowManager : IDisposable
             index.CollectiblesByDomainKind[key] = assets;
         }
 
-        assets.Add(new(asset, code));
-    }
-
-    private static void AddConfigAnimationSourceAsset(SourceAssetIndex index, IAsset asset)
-    {
-        if (TryParseJsonObject(ReadAssetText(asset)) is not JObject json) return;
-
-        foreach (JProperty property in json.Properties())
+        string pathCode = Path.GetFileNameWithoutExtension(assetPath);
+        assets.Add(new(asset, pathCode));
+        if (!index.CollectiblesByDomainKindAndPathCode.TryGetValue(key, out Dictionary<string, IAsset>? byPathCode))
         {
-            index.ConfigAnimationsByKey[BuildAnimationSourceKey(asset.Location.Domain, property.Name)] = asset;
+            byPathCode = new(StringComparer.OrdinalIgnoreCase);
+            index.CollectiblesByDomainKindAndPathCode[key] = byPathCode;
         }
+        byPathCode.TryAdd(pathCode, asset);
     }
 
     private static string BuildCollectibleSourceKey(string domain, string kind) => $"{domain}:{kind}";
 
-    private static string BuildAnimationSourceKey(string domain, string sourceKey) => $"{domain}:{sourceKey}";
-
     private sealed class SourceAssetIndex
     {
         public Dictionary<string, List<CollectibleSourceAsset>> CollectiblesByDomainKind { get; } = new(StringComparer.OrdinalIgnoreCase);
-        public Dictionary<string, IAsset> ConfigAnimationsByKey { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, Dictionary<string, IAsset>> CollectiblesByDomainKindAndPathCode { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<IAsset>> ConfigAnimationsByDomain { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
-    private sealed record CollectibleSourceAsset(IAsset Asset, string Code);
+    private sealed class CollectibleSourceAsset(IAsset asset, string pathCode)
+    {
+        private string? _resolvedCode;
+        private bool _resolved;
+
+        public IAsset Asset { get; } = asset;
+        public string PathCode { get; } = pathCode;
+
+        public string ResolveCode()
+        {
+            if (_resolved) return _resolvedCode ?? PathCode;
+            _resolved = true;
+
+            bool wasLoaded = Asset.IsLoaded();
+            try
+            {
+                if (!wasLoaded && !Asset.Origin.TryLoadAsset(Asset))
+                {
+                    return PathCode;
+                }
+
+                string? code = TryParseJsonObject(ReadAssetText(Asset))?["code"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(code) && code.Contains(':'))
+                {
+                    code = code[(code.IndexOf(':') + 1)..];
+                }
+
+                _resolvedCode = string.IsNullOrWhiteSpace(code) ? PathCode : code;
+                return _resolvedCode;
+            }
+            finally
+            {
+                if (!wasLoaded && !Asset.IsPatched)
+                {
+                    Asset.Data = null!;
+                }
+            }
+        }
+    }
 
     private static JObject CreateCollectibleAuthoringDocument(CollectibleObject collectible)
     {
@@ -740,6 +845,7 @@ public sealed partial class DebugWindowManager : IDisposable
     private bool _drawSubscribed;
     private long _inputSuppressionTickListener = -1;
     private SourceAssetIndex? _sourceAssetIndex;
+    private bool _disposed;
     private bool _fovReflectionWarningLogged;
     private bool _showEditorDiagnostics;
     private readonly DevToolsEditorDiagnostics _devToolsDiagnostics = new("Dev tools");
@@ -916,6 +1022,7 @@ public sealed partial class DebugWindowManager : IDisposable
         _showAnimationEditor = !_showAnimationEditor;
         if (_showAnimationEditor && !wasOpen)
         {
+            OnDebugEditorOpened();
             _imguiModSystem?.Show();
             _devToolsCollapsed = false;
             _selectVanillaAnimationsTabOnNextDraw = true;
@@ -931,8 +1038,10 @@ public sealed partial class DebugWindowManager : IDisposable
 
     public bool OpenExternalDevTools()
     {
+        bool wasOpen = _showAnimationEditor;
         _imguiModSystem?.Show();
         _showAnimationEditor = true;
+        if (!wasOpen) OnDebugEditorOpened();
         _devToolsCollapsed = false;
         _selectVanillaAnimationsTabOnNextDraw = true;
         return true;
@@ -1736,8 +1845,8 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGui.TextUnformatted(DevToolsLang.Get("ui.sourceSave.saveTo", "Save to {0}?", request.SourceFile));
         ImGui.Separator();
 
-        string[] oldLines = SplitSourceLines(request.OldText);
-        string[] newLines = SplitSourceLines(request.NewText);
+        string[] oldLines = request.OldLines;
+        string[] newLines = request.NewLines;
         float paneWidth = Math.Max(320f, (ImGui.GetContentRegionAvail().X - 12f) * 0.5f);
         System.Numerics.Vector2 paneSize = new(paneWidth, 500f);
 
@@ -1785,7 +1894,16 @@ public sealed partial class DebugWindowManager : IDisposable
         ImGui.Separator();
 
         int count = Math.Max(lines.Length, otherLines.Length);
-        for (int i = 0; i < count; i++)
+        float lineHeight = Math.Max(1f, ImGui.GetTextLineHeightWithSpacing());
+        int firstVisible = Math.Clamp((int)(ImGui.GetScrollY() / lineHeight) - 2, 0, count);
+        int visibleCount = Math.Max(1, (int)(size.Y / lineHeight) + 6);
+        int lastVisible = Math.Min(count, firstVisible + visibleCount);
+        if (firstVisible > 0)
+        {
+            ImGui.Dummy(new System.Numerics.Vector2(1f, firstVisible * lineHeight));
+        }
+
+        for (int i = firstVisible; i < lastVisible; i++)
         {
             string line = i < lines.Length ? lines[i] : "";
             bool changed = i >= lines.Length || i >= otherLines.Length || line != otherLines[i];
@@ -1800,6 +1918,11 @@ public sealed partial class DebugWindowManager : IDisposable
             {
                 ImGui.PopStyleColor();
             }
+        }
+
+        if (lastVisible < count)
+        {
+            ImGui.Dummy(new System.Numerics.Vector2(1f, (count - lastVisible) * lineHeight));
         }
 
         ImGui.EndChild();
@@ -4343,7 +4466,7 @@ public sealed partial class DebugWindowManager : IDisposable
     private void SetEditorFrameOverride(PlayerItemFrame? frame)
     {
         InGameDevTools.StandaloneDevtoolsRuntime.EnsurePlayerAnimationBehaviors(_api);
-        _behavior ??= _api.World.Player.Entity.GetBehavior<FirstPersonAnimationsBehavior>();
+        _behavior = _api.World.Player.Entity.GetBehavior<FirstPersonAnimationsBehavior>();
         ThirdPersonAnimationsBehavior? thirdPersonBehavior = _api.World.Player.Entity.GetBehavior<ThirdPersonAnimationsBehavior>();
 
         DebugPoseFreezeActive = frame != null;

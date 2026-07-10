@@ -94,6 +94,23 @@ internal static class DevToolsJsonTextTools
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Copy the whole JSON text to the clipboard.");
 
+        ImGui.SameLine();
+        if (ImGui.SmallButton($"Paste all##{id}-paste"))
+        {
+            string clipboard = ImGui.GetClipboardText();
+            if (!string.Equals(clipboard, text, StringComparison.Ordinal))
+            {
+                text = clipboard;
+                changed = true;
+                status = $"Replaced the document with {text.Length:N0} clipboard character(s).";
+            }
+            else
+            {
+                status = "Clipboard already matches the document.";
+            }
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Replace the whole JSON document from the clipboard without the native edit-buffer size limit.");
+
         return changed;
     }
 }

@@ -42,6 +42,9 @@ public sealed partial class DebugWindowManager
     private DevToolsCollectibleKind _blockItemJsonLoadedKind = DevToolsCollectibleKind.Block;
     private string _blockItemJsonText = "";
     private string _blockItemJsonOriginalText = "";
+    private int _blockItemJsonParseFrame = -1;
+    private string? _blockItemJsonParsedText;
+    private JObject? _blockItemJsonParsedRoot;
     private string _blockItemJsonStatus = "";
     private string _blockItemJsonLiveAppliedHash = "";
     private string _blockItemJsonOutputDomain = "game";
@@ -386,7 +389,7 @@ public sealed partial class DebugWindowManager
         ImGui.SeparatorText(_blockItemJsonLoadedLabel);
         ImGui.TextDisabled("Structured source fields are above the raw editor. Runtime apply patches attributes only; source save writes the full JSON.");
 
-        JObject? structuredJson = TryParseJsonObject(_blockItemJsonText);
+        JObject? structuredJson = ParseBlockItemJsonForCurrentFrame();
         if (structuredJson != null)
         {
             if (DrawBlockItemJsonStructuredEditor(structuredJson))
@@ -426,7 +429,12 @@ public sealed partial class DebugWindowManager
         }
 
         NVector2 editorSize = new(-float.Epsilon, Math.Max(220f, ImGui.GetContentRegionAvail().Y - 34f));
-        if (ImGui.InputTextMultiline("##block-item-json-text", ref _blockItemJsonText, 1024 * 1024, editorSize, ImGuiInputTextFlags.AllowTabInput))
+        if (ImGui.InputTextMultiline(
+                "##block-item-json-text",
+                ref _blockItemJsonText,
+                DevToolsImGuiTextBuffer.Capacity(_blockItemJsonText, minimum: 64 * 1024, headroom: 64 * 1024, growthLimit: 1024 * 1024),
+                editorSize,
+                ImGuiInputTextFlags.AllowTabInput))
         {
             _blockItemJsonStatus = "JSON edited. Apply runtime or save authored file when ready.";
             _blockItemJsonFieldBuffers.Clear();
@@ -668,7 +676,7 @@ public sealed partial class DebugWindowManager
                     valueJson = JsonConvert.SerializeObject(value, Formatting.Indented);
                 }
 
-                ImGui.InputTextMultiline("Value JSON", ref valueJson, 32 * 1024, new NVector2(-float.Epsilon, 72f), ImGuiInputTextFlags.AllowTabInput);
+                ImGui.InputTextMultiline("Value JSON", ref valueJson, DevToolsImGuiTextBuffer.Capacity(valueJson), new NVector2(-float.Epsilon, 72f), ImGuiInputTextFlags.AllowTabInput);
                 _blockItemJsonFieldBuffers[bufferKey] = valueJson;
                 if (ImGui.SmallButton("Apply texture value"))
                 {
@@ -901,7 +909,7 @@ public sealed partial class DebugWindowManager
             ImGui.TextDisabled("Path uses / separators, for example handbook/group or combustion/burnTemperature.");
             ImGui.SetNextItemWidth(-float.Epsilon);
             ImGui.InputText("Path##block-json-attribute-path", ref _blockItemJsonAttributePath, 512);
-            ImGui.InputTextMultiline("Value JSON##block-json-attribute-value", ref _blockItemJsonAttributeValueJson, 64 * 1024, new NVector2(-float.Epsilon, 70f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline("Value JSON##block-json-attribute-value", ref _blockItemJsonAttributeValueJson, DevToolsImGuiTextBuffer.Capacity(_blockItemJsonAttributeValueJson), new NVector2(-float.Epsilon, 70f), ImGuiInputTextFlags.AllowTabInput);
             if (ImGui.SmallButton("Set attribute##block-json-set-attribute"))
             {
                 if (!DevToolsJson.TryParseToken(_blockItemJsonAttributeValueJson, out JToken? token, out string error, useVintageStoryFallback: false) || token == null)
@@ -1015,7 +1023,7 @@ public sealed partial class DebugWindowManager
             buffer = JsonConvert.SerializeObject(extra, Formatting.Indented);
         }
 
-        ImGui.InputTextMultiline("##extra-json", ref buffer, 128 * 1024, new NVector2(-float.Epsilon, 86f), ImGuiInputTextFlags.AllowTabInput);
+        ImGui.InputTextMultiline("##extra-json", ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-float.Epsilon, 86f), ImGuiInputTextFlags.AllowTabInput);
         _blockItemJsonFieldBuffers[bufferKey] = buffer;
         if (ImGui.SmallButton("Apply extra fields"))
         {
@@ -1158,7 +1166,7 @@ public sealed partial class DebugWindowManager
                 buffer = JsonConvert.SerializeObject(json[propertyName] ?? defaultToken, Formatting.Indented);
             }
 
-            ImGui.InputTextMultiline($"##block-json-field-{propertyName}", ref buffer, 256 * 1024, new NVector2(-float.Epsilon, 110f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline($"##block-json-field-{propertyName}", ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-float.Epsilon, 110f), ImGuiInputTextFlags.AllowTabInput);
             _blockItemJsonFieldBuffers[bufferKey] = buffer;
 
             if (ImGui.Button($"Apply##block-json-apply-{propertyName}"))
@@ -1227,7 +1235,7 @@ public sealed partial class DebugWindowManager
         ImGui.TextDisabled($"{(_blockItemJsonLoadedKind == DevToolsCollectibleKind.Block ? "Block" : "Item")}: {_blockItemJsonLoadedLabel}");
         ImGui.TextDisabled($"Loaded from: {(_blockItemJsonLoadedIsRuntime ? "runtime collectable" : _blockItemJsonLoadedIsAuthored ? "authored override" : "source JSON")}");
 
-        bool valid = TryParseJsonObject(_blockItemJsonText) != null;
+        bool valid = ParseBlockItemJsonForCurrentFrame() != null;
         ImGui.TextColored(valid ? new NVector4(0.42f, 0.85f, 0.42f, 1f) : new NVector4(1f, 0.38f, 0.32f, 1f), valid ? "JSON valid" : "JSON invalid");
 
         ImGui.SetNextItemWidth(-float.Epsilon);
@@ -1447,9 +1455,24 @@ public sealed partial class DebugWindowManager
         _blockItemJsonStatus = "No selected document to reload.";
     }
 
+    private JObject? ParseBlockItemJsonForCurrentFrame()
+    {
+        int frame = ImGui.GetFrameCount();
+        if (_blockItemJsonParseFrame == frame &&
+            string.Equals(_blockItemJsonParsedText, _blockItemJsonText, StringComparison.Ordinal))
+        {
+            return _blockItemJsonParsedRoot;
+        }
+
+        _blockItemJsonParseFrame = frame;
+        _blockItemJsonParsedText = _blockItemJsonText;
+        _blockItemJsonParsedRoot = TryParseJsonObject(_blockItemJsonText);
+        return _blockItemJsonParsedRoot;
+    }
+
     private void DrawBlockItemJsonPreviewPanel()
     {
-        JObject? json = TryParseJsonObject(_blockItemJsonText);
+        JObject? json = ParseBlockItemJsonForCurrentFrame();
         if (json == null)
         {
             ImGui.TextColored(new NVector4(1f, 0.38f, 0.32f, 1f), "Preview unavailable until JSON parses.");

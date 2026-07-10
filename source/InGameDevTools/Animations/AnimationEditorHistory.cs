@@ -1,10 +1,12 @@
 using System.Collections.Generic;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace InGameDevTools.Animations;
 
 internal sealed class AnimationEditorHistory
 {
-    private const int MaxEntriesPerAnimation = 100;
+    private const int MaxEntriesPerAnimation = 32;
 
     private readonly Dictionary<string, List<AnimationHistoryEntry>> _undo = new();
     private readonly Dictionary<string, List<AnimationHistoryEntry>> _redo = new();
@@ -34,7 +36,7 @@ internal sealed class AnimationEditorHistory
         _pendingEdit = null;
 
         string current = Serialize(animation);
-        if (current == entry.Serialized) return false;
+        if (ContentHash(current) == entry.ContentHash) return false;
 
         Push(_undo, animationCode, entry);
         GetStack(_redo, animationCode).Clear();
@@ -50,7 +52,7 @@ internal sealed class AnimationEditorHistory
     {
         AnimationHistoryEntry entry = AnimationHistoryEntry.FromAnimation(label, before);
         List<AnimationHistoryEntry> undo = GetStack(_undo, animationCode);
-        if (undo.Count > 0 && undo[^1].Serialized == entry.Serialized) return false;
+        if (undo.Count > 0 && undo[^1].ContentHash == entry.ContentHash) return false;
 
         Push(_undo, animationCode, entry);
         GetStack(_redo, animationCode).Clear();
@@ -110,6 +112,13 @@ internal sealed class AnimationEditorHistory
         if (_pendingEdit?.AnimationCode == animationCode) _pendingEdit = null;
     }
 
+    public void ClearAll()
+    {
+        _undo.Clear();
+        _redo.Clear();
+        _pendingEdit = null;
+    }
+
     private static void Push(Dictionary<string, List<AnimationHistoryEntry>> stacks, string animationCode, AnimationHistoryEntry entry)
     {
         List<AnimationHistoryEntry> stack = GetStack(stacks, animationCode);
@@ -141,6 +150,11 @@ internal sealed class AnimationEditorHistory
 
     internal static string Serialize(Animation animation) => AnimationJson.FromAnimation(animation).ToString();
 
+    private static string ContentHash(string serialized)
+    {
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(serialized)));
+    }
+
     private sealed record PendingAnimationEdit(string AnimationCode, AnimationHistoryEntry Before);
 
     private sealed class AnimationHistoryEntry
@@ -163,11 +177,11 @@ internal sealed class AnimationEditorHistory
             _particlesFrameIndex = animation._particlesFrameIndex;
             _callbackFrameIndex = animation._callbackFrameIndex;
             _frameProgress = animation._frameProgress;
-            Serialized = Serialize(animation);
+            ContentHash = AnimationEditorHistory.ContentHash(Serialize(animation));
         }
 
         public string Label { get; }
-        public string Serialized { get; }
+        public string ContentHash { get; }
 
         public static AnimationHistoryEntry FromAnimation(string label, Animation animation) => new(label, animation);
 

@@ -14,20 +14,11 @@ public class ExtendedElementPose : ElementPose
 
     public int ElementNameHash { get; set; } = 0;
 
-    public EntityPlayer? Player { get; set; }
-
-    public static ObjectCache<ShapeElement, int>? NameHashCache { get; set; }
-
     public void ResolveElementName(ShapeElement element)
     {
-        if (element?.Name == null || NameHashCache == null) return;
-        
-        if (!NameHashCache.Get(element, out int hash))
-        {
-            hash = element.Name.GetHashCode();
-            NameHashCache.Add(element, hash);
-        }
+        if (element?.Name == null) return;
 
+        int hash = element.Name.GetHashCode();
         ElementNameHash = hash;
         if (_elementNameEnumCache.TryGetValue(hash, out EnumAnimatedElement enumValue))
         {
@@ -39,7 +30,7 @@ public class ExtendedElementPose : ElementPose
         }
     }
 
-    private static Dictionary<int, EnumAnimatedElement> _elementNameEnumCache = Enum.GetNames<EnumAnimatedElement>()
+    private static readonly Dictionary<int, EnumAnimatedElement> _elementNameEnumCache = Enum.GetNames<EnumAnimatedElement>()
         .ToDictionary(name => name.GetHashCode(), name => Enum.Parse<EnumAnimatedElement>(name));
 }
 

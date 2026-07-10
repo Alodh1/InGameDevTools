@@ -330,7 +330,7 @@ public sealed partial class DebugWindowManager
 
     private sealed class VanillaAnimationEditorHistory
     {
-        private const int MaxEntriesPerDocument = 100;
+        private const int MaxEntriesPerDocument = 24;
 
         private readonly Dictionary<string, List<VanillaAnimationDocumentSnapshot>> _undo = new();
         private readonly Dictionary<string, List<VanillaAnimationDocumentSnapshot>> _redo = new();

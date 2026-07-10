@@ -80,7 +80,11 @@ public sealed partial class DebugWindowManager
 
                     if (ImGui.SmallButton(DevToolsLang.Get("ui.recovery.restore", "Restore")))
                     {
-                        if (TryRestoreRecoverySnapshot(snapshot, out string status))
+                        if (!_recoveryManager.TryLoadSnapshot(snapshot.RecoveryKey, out DevToolsRecoverySnapshot? payload) || payload == null)
+                        {
+                            _settingsStatus = DevToolsLang.Get("ui.recovery.loadFailed", "Could not load recovery payload for {0}.", snapshot.DocumentLabel);
+                        }
+                        else if (TryRestoreRecoverySnapshot(payload, out string status))
                         {
                             _settingsStatus = status;
                             _recoveryManager.Discard(snapshot.RecoveryKey);
@@ -98,7 +102,10 @@ public sealed partial class DebugWindowManager
                     ImGui.SameLine();
                     if (ImGui.SmallButton(DevToolsLang.Get("ui.recovery.copy", "Copy")))
                     {
-                        ImGui.SetClipboardText(snapshot.Text ?? snapshot.BinaryBase64 ?? "");
+                        if (_recoveryManager.TryLoadSnapshot(snapshot.RecoveryKey, out DevToolsRecoverySnapshot? payload) && payload != null)
+                        {
+                            ImGui.SetClipboardText(payload.Text ?? payload.BinaryBase64 ?? "");
+                        }
                     }
                     ImGui.PopID();
                 }
@@ -141,29 +148,30 @@ public sealed partial class DebugWindowManager
     private void TrackModelRecovery(TimeSpan delay)
     {
         if (_modelDoc == null) return;
+        ModelDocumentData document = _modelDoc;
 
         string targetPath = "";
         try
         {
-            string path = EnsureJsonFilePath((_modelDoc.AssetPath ?? "").Trim().Replace('\\', '/'));
+            string path = EnsureJsonFilePath((document.AssetPath ?? "").Trim().Replace('\\', '/'));
             if (!path.StartsWith("shapes/", StringComparison.OrdinalIgnoreCase)) path = "shapes/" + path.TrimStart('/');
-            targetPath = GetToolAuthoredAssetPath("models", Path.Combine("assets", _modelDoc.Domain, path.Replace('/', Path.DirectorySeparatorChar)));
+            targetPath = GetToolAuthoredAssetPath("models", Path.Combine("assets", document.Domain, path.Replace('/', Path.DirectorySeparatorChar)));
         }
         catch
         {
-            targetPath = _modelDoc.DisplayPath;
+            targetPath = document.DisplayPath;
         }
 
-        string recoveryDocumentKey = ModelEnsureRecoveryKey(_modelDoc);
-        PruneLegacyModelRecoverySnapshots(_modelDoc, recoveryDocumentKey);
+        string recoveryDocumentKey = ModelEnsureRecoveryKey(document);
+        PruneLegacyModelRecoverySnapshots(document, recoveryDocumentKey);
 
         _recoveryManager.TrackText(
             "Models",
             recoveryDocumentKey,
-            _modelDoc.DisplayPath,
+            document.DisplayPath,
             targetPath,
-            ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: true),
-            _modelDoc.Dirty,
+            () => ModelSerializeDocument(document, includeInvisible: true, indented: true),
+            document.Dirty,
             delay);
     }
 
@@ -273,22 +281,22 @@ public sealed partial class DebugWindowManager
                 targetPath = document.DisplayPath;
             }
 
-            string text;
-            try
-            {
-                text = VanillaAnimationExportService.BuildDocumentJson(document);
-            }
-            catch
-            {
-                text = document.SourceJson?.ToString(Newtonsoft.Json.Formatting.Indented) ?? "{}";
-            }
-
             _recoveryManager.TrackText(
                 "Animations",
                 document.HistoryKey,
                 document.DisplayPath,
                 targetPath,
-                text,
+                () =>
+                {
+                    try
+                    {
+                        return VanillaAnimationExportService.BuildDocumentJson(document);
+                    }
+                    catch
+                    {
+                        return document.SourceJson?.ToString(Newtonsoft.Json.Formatting.Indented) ?? "{}";
+                    }
+                },
                 document.Dirty,
                 delay);
         }
@@ -297,6 +305,7 @@ public sealed partial class DebugWindowManager
     private void TrackTexturePaintRecovery(TimeSpan delay)
     {
         if (_modelDoc == null || _modelTexturePaintCanvas == null || string.IsNullOrWhiteSpace(_modelTexturePaintKey)) return;
+        DevToolsTexturePaintCanvas canvas = _modelTexturePaintCanvas;
 
         string targetPath = _modelTexturePaintSavePath;
         try
@@ -314,8 +323,8 @@ public sealed partial class DebugWindowManager
             _modelTexturePaintKey,
             _modelTexturePaintKey,
             targetPath,
-            _modelTexturePaintCanvas.EncodePng(),
-            _modelTexturePaintCanvas.Dirty,
+            canvas.EncodePng,
+            canvas.Dirty,
             delay);
     }
 
@@ -326,7 +335,7 @@ public sealed partial class DebugWindowManager
         string domain = string.IsNullOrWhiteSpace(_blockItemJsonOutputDomain) ? _blockItemJsonLoadedDomain : _blockItemJsonOutputDomain;
         string assetPath = string.IsNullOrWhiteSpace(_blockItemJsonOutputPath) ? _blockItemJsonLoadedAssetPath : _blockItemJsonOutputPath;
         string targetPath = GetToolAuthoredAssetPath("block-item-json", Path.Combine("assets", domain, EnsureJsonFilePath(assetPath).Replace('/', Path.DirectorySeparatorChar)));
-        _recoveryManager.TrackText("Block/Item JSON", _blockItemJsonLoadedKey, _blockItemJsonLoadedLabel, targetPath, _blockItemJsonText, IsBlockItemJsonDirty, delay);
+        _recoveryManager.TrackText("Block/Item JSON", _blockItemJsonLoadedKey, _blockItemJsonLoadedLabel, targetPath, () => _blockItemJsonText, IsBlockItemJsonDirty, delay);
     }
 
     private void TrackWorldgenRecovery(TimeSpan delay)
@@ -336,7 +345,8 @@ public sealed partial class DebugWindowManager
         if (entry == null) return;
 
         string targetPath = GetToolAuthoredAssetPath("worldgen", Path.Combine("assets", entry.Domain, entry.AssetPath.Replace('/', Path.DirectorySeparatorChar)));
-        _recoveryManager.TrackText("Worldgen", entry.Key, $"{entry.Domain}:{entry.AssetPath}", targetPath, _worldgenCurrentText, IsWorldgenEntryDirty(entry), delay);
+        bool dirty = !string.Equals(_worldgenCurrentText, _worldgenCleanText, StringComparison.Ordinal);
+        _recoveryManager.TrackText("Worldgen", entry.Key, $"{entry.Domain}:{entry.AssetPath}", targetPath, () => _worldgenCurrentText, dirty, delay);
     }
 
     private void TrackAiBehaviorRecovery(TimeSpan delay)
@@ -347,8 +357,8 @@ public sealed partial class DebugWindowManager
 
         string relativePath = Path.Combine("assets", entry.Domain, entry.AssetPath.Replace('/', Path.DirectorySeparatorChar));
         string targetPath = GetToolAuthoredAssetPath("entity-ai", relativePath);
-        bool dirty = IsAiBehaviorTextDirty(_aiBehaviorCurrentText, _aiBehaviorOriginalText);
-        _recoveryManager.TrackText("Entity AI", entry.Key, entry.DisplayCode, targetPath, _aiBehaviorCurrentText, dirty, delay);
+        bool dirty = !string.Equals(_aiBehaviorCurrentText, _aiBehaviorOriginalText, StringComparison.Ordinal);
+        _recoveryManager.TrackText("Entity AI", entry.Key, entry.DisplayCode, targetPath, () => _aiBehaviorCurrentText, dirty, delay);
     }
 
     private void TrackPatchCreatorRecovery(TimeSpan delay)
@@ -357,8 +367,7 @@ public sealed partial class DebugWindowManager
         string assetPath = DevToolsPatchDocumentDraft.BuildAssetPath(CurrentPatchCreatorOutputFormat, _patchCreatorPatchName);
         string targetPath = GetToolAuthoredAssetPath("patches", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
         string documentKey = string.IsNullOrWhiteSpace(_patchCreatorLoadedPatchKey) ? $"{domain}:{assetPath}" : _patchCreatorLoadedPatchKey;
-        string text = BuildPatchCreatorPatchJson(CurrentPatchCreatorOutputFormat);
-        _recoveryManager.TrackText("Patches", documentKey, $"{domain}:{assetPath}", targetPath, text, _patchCreatorDocumentDirty, delay);
+        _recoveryManager.TrackText("Patches", documentKey, $"{domain}:{assetPath}", targetPath, () => BuildPatchCreatorPatchJson(CurrentPatchCreatorOutputFormat), _patchCreatorDocumentDirty, delay);
     }
 
     private void TrackConfigLibRecovery(TimeSpan delay)
@@ -367,7 +376,7 @@ public sealed partial class DebugWindowManager
         string documentKey = string.IsNullOrWhiteSpace(_configLibLoadedDocumentKey)
             ? $"{_configLibDocument.Domain}:{_configLibDocument.RelativePath}"
             : _configLibLoadedDocumentKey;
-        _recoveryManager.TrackText("ConfigLib", documentKey, $"{_configLibDocument.Domain}:{_configLibDocument.RelativePath}", targetPath, _configLibDocument.ToPatchJson(), _configLibDocumentDirty, delay);
+        _recoveryManager.TrackText("ConfigLib", documentKey, $"{_configLibDocument.Domain}:{_configLibDocument.RelativePath}", targetPath, () => _configLibDocument.ToPatchJson(), _configLibDocumentDirty, delay);
     }
 
     private void TrackLootDropRecovery(TimeSpan delay)
@@ -375,11 +384,21 @@ public sealed partial class DebugWindowManager
         LootDropEntry? entry = SelectedLootDropEntry;
         if (entry == null || string.IsNullOrWhiteSpace(_lootDropLoadedKey)) return;
 
-        RefreshLootDropCachedState(entry);
         string domain = entry.SourceAsset?.Location.Domain ?? entry.Domain;
         string assetPath = entry.SourceAsset?.Location.Path ?? BuildLootDropFallbackAssetPath(entry);
         string targetPath = GetToolAuthoredAssetPath("loot-drops", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
-        _recoveryManager.TrackText("Loot/Drops", entry.Key, entry.Label, targetPath, CurrentLootDropJson(), IsLootDropDirty, delay);
+        _recoveryManager.TrackText(
+            "Loot/Drops",
+            entry.Key,
+            entry.Label,
+            targetPath,
+            () =>
+            {
+                RefreshLootDropCachedState(entry);
+                return CurrentLootDropJson();
+            },
+            IsLootDropDirty,
+            delay);
     }
 
     private void TrackTransformRecovery(TimeSpan delay)
@@ -394,7 +413,14 @@ public sealed partial class DebugWindowManager
         string kind = asset.Collectible is Block ? "blocktypes" : "itemtypes";
         string assetPath = sourceAsset?.Location.Path ?? $"{kind}/{EnsureJsonFilePath(asset.Collectible.Code?.Path ?? "unknown")}";
         string targetPath = GetToolAuthoredAssetPath("transforms", Path.Combine("assets", domain, assetPath.Replace('/', Path.DirectorySeparatorChar)));
-        _recoveryManager.TrackText("Transforms", slot.Key, $"{asset.Label} / {slot.DisplayName}", targetPath, TransformToToken(transform).ToString(Newtonsoft.Json.Formatting.Indented), _transformDirtyKeys.Contains(slot.Key), delay);
+        _recoveryManager.TrackText(
+            "Transforms",
+            slot.Key,
+            $"{asset.Label} / {slot.DisplayName}",
+            targetPath,
+            () => TransformToToken(transform).ToString(Newtonsoft.Json.Formatting.Indented),
+            _transformDirtyKeys.Contains(slot.Key),
+            delay);
     }
 
     private bool TryRestoreRecoverySnapshot(DevToolsRecoverySnapshot snapshot, out string status)

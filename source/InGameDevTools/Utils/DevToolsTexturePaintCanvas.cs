@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Compression;
 using System.Text;
 
@@ -5,6 +6,12 @@ namespace InGameDevTools.Utils;
 
 internal sealed class DevToolsTexturePaintCanvas
 {
+    private bool _dirty;
+    private int _uploadMinX;
+    private int _uploadMinY;
+    private int _uploadMaxX = -1;
+    private int _uploadMaxY = -1;
+
     public DevToolsTexturePaintCanvas(int width, int height, DevToolsTexturePaintColor clearColor)
     {
         Width = Math.Clamp(width, 1, 4096);
@@ -27,7 +34,15 @@ internal sealed class DevToolsTexturePaintCanvas
 
     public byte[] Rgba { get; }
 
-    public bool Dirty { get; set; }
+    public bool Dirty
+    {
+        get => _dirty;
+        set
+        {
+            _dirty = value;
+            if (value) MarkWholeCanvasForUpload();
+        }
+    }
 
     public static bool TryLoadPng(byte[] data, out DevToolsTexturePaintCanvas? canvas, out string error)
     {
@@ -47,9 +62,6 @@ internal sealed class DevToolsTexturePaintCanvas
 
     public byte[] EncodePng()
     {
-        using MemoryStream stream = new();
-        stream.Write([137, 80, 78, 71, 13, 10, 26, 10]);
-
         Span<byte> ihdr = stackalloc byte[13];
         WriteBigEndian(ihdr[..4], Width);
         WriteBigEndian(ihdr[4..8], Height);
@@ -58,27 +70,65 @@ internal sealed class DevToolsTexturePaintCanvas
         ihdr[10] = 0;
         ihdr[11] = 0;
         ihdr[12] = 0;
-        WriteChunk(stream, "IHDR", ihdr);
-
-        byte[] scanlines = new byte[checked((Width * 4 + 1) * Height)];
         int sourceStride = Width * 4;
-        int destinationStride = sourceStride + 1;
-        for (int y = 0; y < Height; y++)
-        {
-            int destination = y * destinationStride;
-            scanlines[destination] = 0;
-            Buffer.BlockCopy(Rgba, y * sourceStride, scanlines, destination + 1, sourceStride);
-        }
+        int scanlineLength = checked(sourceStride + 1);
 
         using MemoryStream compressed = new();
-        using (ZLibStream zlib = new(compressed, CompressionLevel.Fastest, leaveOpen: true))
+        byte[] scanline = ArrayPool<byte>.Shared.Rent(scanlineLength);
+        try
         {
-            zlib.Write(scanlines, 0, scanlines.Length);
+            scanline[0] = 0;
+            using ZLibStream zlib = new(compressed, CompressionLevel.Fastest, leaveOpen: true);
+            for (int y = 0; y < Height; y++)
+            {
+                Buffer.BlockCopy(Rgba, y * sourceStride, scanline, 1, sourceStride);
+                zlib.Write(scanline, 0, scanlineLength);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(scanline);
         }
 
-        WriteChunk(stream, "IDAT", compressed.ToArray());
+        if (!compressed.TryGetBuffer(out ArraySegment<byte> compressedBuffer))
+        {
+            throw new InvalidOperationException("Unable to access the encoded PNG buffer.");
+        }
+
+        int pngLength = checked(8 + 12 + ihdr.Length + 12 + compressedBuffer.Count + 12);
+        byte[] png = new byte[pngLength];
+        using MemoryStream stream = new(png, 0, png.Length, writable: true, publiclyVisible: true);
+        stream.Write([137, 80, 78, 71, 13, 10, 26, 10]);
+        WriteChunk(stream, "IHDR", ihdr);
+        WriteChunk(stream, "IDAT", compressedBuffer.AsSpan());
         WriteChunk(stream, "IEND", ReadOnlySpan<byte>.Empty);
-        return stream.ToArray();
+        return png;
+    }
+
+    public bool TryGetUploadRegion(out int x, out int y, out int width, out int height)
+    {
+        if (_uploadMaxX < _uploadMinX || _uploadMaxY < _uploadMinY)
+        {
+            x = 0;
+            y = 0;
+            width = 0;
+            height = 0;
+            return false;
+        }
+
+        x = _uploadMinX;
+        y = _uploadMinY;
+        width = _uploadMaxX - _uploadMinX + 1;
+        height = _uploadMaxY - _uploadMinY + 1;
+        return true;
+    }
+
+    public void ClearUploadRegion()
+    {
+        _uploadMinX = 0;
+        _uploadMinY = 0;
+        _uploadMaxX = -1;
+        _uploadMaxY = -1;
     }
 
     public DevToolsTexturePaintColor GetPixel(int x, int y)
@@ -101,7 +151,8 @@ internal sealed class DevToolsTexturePaintCanvas
         Rgba[index + 1] = color.G;
         Rgba[index + 2] = color.B;
         Rgba[index + 3] = color.A;
-        Dirty = true;
+        _dirty = true;
+        MarkPixelForUpload(x, y);
         return true;
     }
 
@@ -171,7 +222,33 @@ internal sealed class DevToolsTexturePaintCanvas
             }
         }
 
-        Dirty = true;
+        _dirty = true;
+        MarkWholeCanvasForUpload();
+    }
+
+    private void MarkPixelForUpload(int x, int y)
+    {
+        if (_uploadMaxX < _uploadMinX || _uploadMaxY < _uploadMinY)
+        {
+            _uploadMinX = x;
+            _uploadMaxX = x;
+            _uploadMinY = y;
+            _uploadMaxY = y;
+            return;
+        }
+
+        _uploadMinX = Math.Min(_uploadMinX, x);
+        _uploadMinY = Math.Min(_uploadMinY, y);
+        _uploadMaxX = Math.Max(_uploadMaxX, x);
+        _uploadMaxY = Math.Max(_uploadMaxY, y);
+    }
+
+    private void MarkWholeCanvasForUpload()
+    {
+        _uploadMinX = 0;
+        _uploadMinY = 0;
+        _uploadMaxX = Width - 1;
+        _uploadMaxY = Height - 1;
     }
 
     private bool Contains(int x, int y)

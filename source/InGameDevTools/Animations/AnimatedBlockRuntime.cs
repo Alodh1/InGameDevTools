@@ -22,8 +22,8 @@ public sealed class InGameDevToolsAnimatedBlockBehavior : BlockEntityBehavior
     private ICoreClientAPI? _capi;
     private DevToolsAnimatedBlockConfig _config;
     private AnimatableRenderer? _renderer;
-    private bool _rendererRegistered;
     private bool _skipDefaultMesh;
+    private bool _unloaded;
 
     public InGameDevToolsAnimatedBlockBehavior(BlockEntity blockentity) : base(blockentity)
     {
@@ -41,6 +41,7 @@ public sealed class InGameDevToolsAnimatedBlockBehavior : BlockEntityBehavior
         }
 
         _capi = capi;
+        _unloaded = false;
         capi.Event.EnqueueMainThreadTask(InitializeRenderer, "ingamedevtools-animated-block-init");
     }
 
@@ -51,19 +52,23 @@ public sealed class InGameDevToolsAnimatedBlockBehavior : BlockEntityBehavior
 
     public override void OnBlockRemoved()
     {
+        _unloaded = true;
         DisposeRenderer();
+        _capi = null;
         base.OnBlockRemoved();
     }
 
     public override void OnBlockUnloaded()
     {
+        _unloaded = true;
         DisposeRenderer();
+        _capi = null;
         base.OnBlockUnloaded();
     }
 
     private void InitializeRenderer()
     {
-        if (_capi == null || Block == null || Block.Shape?.Base == null || !_config.IsValid)
+        if (_unloaded || _capi == null || Block == null || Block.Shape?.Base == null || !_config.IsValid)
         {
             return;
         }
@@ -122,13 +127,12 @@ public sealed class InGameDevToolsAnimatedBlockBehavior : BlockEntityBehavior
             _activeAnimations[_config.AnimationCode] = metadata;
             Vec3d pos = new(Pos.X, Pos.Y, Pos.Z);
             _renderer = new AnimatableRenderer(_capi, pos, new Vec3f(), animator, _activeAnimations, mesh, EnumRenderStage.Opaque);
-            _capi.Event.RegisterRenderer(_renderer, EnumRenderStage.Opaque, "ingamedevtools-animated-block");
-            _rendererRegistered = true;
             _skipDefaultMesh = true;
             Blockentity.MarkDirty(true);
         }
         catch (Exception exception)
         {
+            DisposeRenderer();
             _skipDefaultMesh = false;
             _capi.Logger.Warning("InGameDevTools animated block setup failed for {0} at {1}: {2}", Block?.Code, Pos, exception);
         }
@@ -138,14 +142,8 @@ public sealed class InGameDevToolsAnimatedBlockBehavior : BlockEntityBehavior
     {
         if (_renderer == null)
         {
-            _rendererRegistered = false;
             _skipDefaultMesh = false;
             return;
-        }
-
-        if (_rendererRegistered && _capi != null)
-        {
-            _capi.Event.UnregisterRenderer(_renderer, EnumRenderStage.Opaque);
         }
 
         if (_renderer is IDisposable disposable)
@@ -154,7 +152,6 @@ public sealed class InGameDevToolsAnimatedBlockBehavior : BlockEntityBehavior
         }
 
         _renderer = null;
-        _rendererRegistered = false;
         _skipDefaultMesh = false;
     }
 

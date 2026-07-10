@@ -585,10 +585,20 @@ public sealed partial class DebugWindowManager
 
                 ImGui.SeparatorText("Raw JSON");
                 if (_rawBufferKey != entry.Key) SyncRawBuffer(entry);
-                ImGui.InputTextMultiline("##recipe-raw-json", ref _rawBuffer, 256 * 1024, new NVector2(-1, Math.Max(180f, ImGui.GetContentRegionAvail().Y - 72f)), ImGuiInputTextFlags.AllowTabInput);
+                ImGui.InputTextMultiline("##recipe-raw-json", ref _rawBuffer, DevToolsImGuiTextBuffer.Capacity(_rawBuffer), new NVector2(-1, Math.Max(180f, ImGui.GetContentRegionAvail().Y - 72f)), ImGuiInputTextFlags.AllowTabInput);
                 if (ImGui.Button("Apply raw JSON##recipe-raw-apply"))
                 {
                     ApplyRawJson(entry);
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Paste all##recipe-raw-paste"))
+                {
+                    _rawBuffer = ImGui.GetClipboardText();
+                    _status = $"Replaced raw JSON with {_rawBuffer.Length:N0} clipboard character(s).";
+                }
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip("Replace the whole JSON document from the clipboard without the native edit-buffer size limit.");
                 }
                 ImGui.SameLine();
                 if (ImGui.Button("Format##recipe-raw-format"))
@@ -1488,7 +1498,7 @@ public sealed partial class DebugWindowManager
                     document.DisplayPath,
                     document.DisplayPath,
                     outputPath,
-                    SerializeToken(document.Root),
+                    () => SerializeToken(document.Root),
                     document.Dirty,
                     delay);
             }
@@ -2669,7 +2679,7 @@ public sealed partial class DebugWindowManager
                 buffer = SerializeToken(entry.Recipe[propertyName] ?? JValue.CreateNull());
             }
 
-            ImGui.InputTextMultiline($"##recipe-advanced-json-{propertyName}", ref buffer, 128 * 1024, new NVector2(-1f, 96f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline($"##recipe-advanced-json-{propertyName}", ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-1f, 96f), ImGuiInputTextFlags.AllowTabInput);
             _jsonFieldBuffers[bufferKey] = buffer;
 
             bool changed = false;
@@ -2934,7 +2944,7 @@ public sealed partial class DebugWindowManager
                 _jsonFieldBuffers[bufferKey] = buffer;
             }
 
-            ImGui.InputTextMultiline(label, ref buffer, 32 * 1024, new NVector2(-1f, 88f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline(label, ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-1f, 88f), ImGuiInputTextFlags.AllowTabInput);
             _jsonFieldBuffers[bufferKey] = buffer;
 
             bool changed = false;

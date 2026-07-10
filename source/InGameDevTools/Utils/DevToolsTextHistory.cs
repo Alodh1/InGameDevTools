@@ -5,7 +5,7 @@ namespace InGameDevTools.Utils;
 /// live text: identical text is a no-op, rapid edits coalesce into one step, and edits after an
 /// undo truncate the redo branch. Reset when a different document is loaded.
 /// </summary>
-internal sealed class DevToolsTextHistory(int capacity = 40, double coalesceSeconds = 0.75)
+internal sealed class DevToolsTextHistory(int capacity = 40, double coalesceSeconds = 0.75, long maxRetainedCharacters = 8_000_000)
 {
     private readonly List<string> _states = [];
     private int _index = -1;
@@ -14,6 +14,7 @@ internal sealed class DevToolsTextHistory(int capacity = 40, double coalesceSeco
     public bool CanUndo => _index > 0;
     public bool CanRedo => _index >= 0 && _index < _states.Count - 1;
     public string Current => _index >= 0 ? _states[_index] : "";
+    internal long RetainedCharacters => _states.Sum(state => (long)state.Length);
 
     public void Reset(string text)
     {
@@ -56,6 +57,7 @@ internal sealed class DevToolsTextHistory(int capacity = 40, double coalesceSeco
             _index -= drop;
         }
 
+        TrimToMemoryBudget();
         _lastRecordTime = now;
     }
 
@@ -80,5 +82,16 @@ internal sealed class DevToolsTextHistory(int capacity = 40, double coalesceSeco
         text = _states[_index];
         _lastRecordTime = double.NegativeInfinity;
         return true;
+    }
+
+    private void TrimToMemoryBudget()
+    {
+        long retainedCharacters = RetainedCharacters;
+        while (_states.Count > 1 && retainedCharacters > maxRetainedCharacters)
+        {
+            retainedCharacters -= _states[0].Length;
+            _states.RemoveAt(0);
+            _index--;
+        }
     }
 }

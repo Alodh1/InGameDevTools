@@ -227,8 +227,7 @@ public sealed partial class DebugWindowManager
 
     private sealed record VanillaBlockSourceInfo(
         AssetLocation Location,
-        string AssetPath,
-        JObject? SourceJson)
+        string AssetPath)
     {
         public string Key => $"{Location.Domain}:{AssetPath}";
     }

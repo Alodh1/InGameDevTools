@@ -43,6 +43,13 @@ public sealed class AnimationsManager
         Animations = animationsByCode;
     }
 
+    public void Dispose()
+    {
+        Animations.Clear();
+        AnimationSources.Clear();
+        if (ReferenceEquals(_instance, this)) _instance = null!;
+    }
+
     public Animation? GetAnimation(string code, params string[] tags)
     {
         return GetAnimationRecursive(code, tags);

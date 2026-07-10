@@ -533,7 +533,6 @@ public sealed partial class DebugWindowManager
             canvas.Dirty = false;
             _modelTexturePaintSourceLabel = outputPath;
             _modelUvTextureCache.Clear();
-            _modelTexturePaintTextureDirty = true;
 
             bool changed = !string.Equals(texture.Path, path, StringComparison.Ordinal) ||
                 !doc.TextureSizes.TryGetValue(texture.Code, out int[]? size) ||
@@ -1165,6 +1164,7 @@ public sealed partial class DebugWindowManager
         int restoreActiveTexture = 0;
         int restoreTexture2D = 0;
         int restoreUnpackAlignment = 4;
+        int restoreUnpackRowLength = 0;
         GCHandle pinned = default;
 
         try
@@ -1173,6 +1173,17 @@ public sealed partial class DebugWindowManager
             GL.ActiveTexture(TextureUnit.Texture0);
             GL.GetInteger(GetPName.TextureBinding2D, out restoreTexture2D);
             GL.GetInteger(GetPName.UnpackAlignment, out restoreUnpackAlignment);
+            GL.GetInteger(GetPName.UnpackRowLength, out restoreUnpackRowLength);
+
+            bool dimensionsMatch = _modelTexturePaintTextureId > 0 &&
+                _modelTexturePaintTextureWidth == canvas.Width &&
+                _modelTexturePaintTextureHeight == canvas.Height;
+            bool hasUploadRegion = canvas.TryGetUploadRegion(
+                out int uploadX,
+                out int uploadY,
+                out int uploadWidth,
+                out int uploadHeight);
+            bool uploadSubRegion = dimensionsMatch && hasUploadRegion;
 
             if (_modelTexturePaintTextureId <= 0)
             {
@@ -1190,20 +1201,40 @@ public sealed partial class DebugWindowManager
 
             GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
             pinned = GCHandle.Alloc(canvas.Rgba, GCHandleType.Pinned);
-            GL.TexImage2D(
-                TextureTarget.Texture2D,
-                0,
-                PixelInternalFormat.Rgba8,
-                canvas.Width,
-                canvas.Height,
-                0,
-                PixelFormat.Rgba,
-                PixelType.UnsignedByte,
-                pinned.AddrOfPinnedObject());
+            if (uploadSubRegion)
+            {
+                GL.PixelStore(PixelStoreParameter.UnpackRowLength, canvas.Width);
+                int byteOffset = checked((uploadY * canvas.Width + uploadX) * 4);
+                GL.TexSubImage2D(
+                    TextureTarget.Texture2D,
+                    0,
+                    uploadX,
+                    uploadY,
+                    uploadWidth,
+                    uploadHeight,
+                    PixelFormat.Rgba,
+                    PixelType.UnsignedByte,
+                    IntPtr.Add(pinned.AddrOfPinnedObject(), byteOffset));
+            }
+            else
+            {
+                GL.PixelStore(PixelStoreParameter.UnpackRowLength, 0);
+                GL.TexImage2D(
+                    TextureTarget.Texture2D,
+                    0,
+                    PixelInternalFormat.Rgba8,
+                    canvas.Width,
+                    canvas.Height,
+                    0,
+                    PixelFormat.Rgba,
+                    PixelType.UnsignedByte,
+                    pinned.AddrOfPinnedObject());
+            }
 
             _modelTexturePaintTextureWidth = canvas.Width;
             _modelTexturePaintTextureHeight = canvas.Height;
             _modelTexturePaintTextureDirty = false;
+            canvas.ClearUploadRegion();
             textureId = _modelTexturePaintTextureId;
             return textureId > 0;
         }
@@ -1222,6 +1253,7 @@ public sealed partial class DebugWindowManager
             try
             {
                 GL.PixelStore(PixelStoreParameter.UnpackAlignment, restoreUnpackAlignment);
+                GL.PixelStore(PixelStoreParameter.UnpackRowLength, restoreUnpackRowLength);
                 GL.BindTexture(TextureTarget.Texture2D, restoreTexture2D);
                 GL.ActiveTexture((TextureUnit)restoreActiveTexture);
             }

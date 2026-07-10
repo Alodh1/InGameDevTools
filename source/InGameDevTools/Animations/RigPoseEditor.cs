@@ -62,8 +62,10 @@ public sealed partial class DebugWindowManager
     private float _rigMotionPathThickness = 1.5f;
     private Animation? _rigMotionPathAnimation;
     private string _rigMotionPathAnimationCode = "";
-    private string _rigMotionPathCacheKey = "";
+    private RigMotionPathCacheKey? _rigMotionPathCacheKey;
     private readonly List<TransformGizmoMotionPath> _rigMotionPathCache = [];
+    private readonly List<RigMotionPathTarget> _rigMotionPathTargets = [];
+    private bool _debugEditorCloseHandled;
     private bool _rigIkFollowParents;
     private bool _rigIkDragActive;
     private int _rigIkDragKeyframeIndex = -1;
@@ -371,6 +373,7 @@ public sealed partial class DebugWindowManager
         action();
         _animationHistory.CommitEdit(animationCode, animation);
         _animationHistoryExplicitEditThisFrame = true;
+        InvalidateRigMotionPathCache();
     }
 
     private bool DrawRigElementNumericEditor(EnumAnimatedElement selectedPart, AnimationElement element, out AnimationElement editedElement)
@@ -431,6 +434,7 @@ public sealed partial class DebugWindowManager
             _animationHistoryExplicitEditThisFrame = true;
         }
         ClearRigGizmoDrag();
+        InvalidateRigMotionPathCache();
     }
 
     private void ClearRigGizmoDrag()
@@ -626,7 +630,10 @@ public sealed partial class DebugWindowManager
         PlayerFrame frame = SetRigElement(keyFrame.Frame, selectedPart, element);
         animation.PlayerKeyFrames[index] = new PLayerKeyFrame(frame, keyFrame.Time, keyFrame.EasingFunction, keyFrame.EasingType, keyFrame.FrameProgressRange);
         animation._playerFrameEdited = true;
-        InvalidateRigMotionPathCache();
+        if (!_animationHistoryExternalDragActive)
+        {
+            InvalidateRigMotionPathCache();
+        }
     }
 
     private static void SetCurrentRigFrame(Animation animation, PlayerFrame frame)
@@ -912,12 +919,12 @@ public sealed partial class DebugWindowManager
 
     internal bool TryGetRigOnionSkinModels(out IReadOnlyList<TransformGizmoGhostModel> models)
     {
-        List<TransformGizmoGhostModel> result = [];
-        models = result;
+        models = Array.Empty<TransformGizmoGhostModel>();
 
         if (!_showAnimationEditor || !_rigPoseEditorEnabled || !_rigOnionSkinEnabled) return false;
         if (_rigOnionSkinAnimation == null || _rigOnionSkinAnimation.PlayerKeyFrames.Count == 0) return false;
 
+        List<TransformGizmoGhostModel> result = new(2);
         int currentIndex = Math.Clamp(_rigOnionSkinAnimation._playerFrameIndex, 0, _rigOnionSkinAnimation.PlayerKeyFrames.Count - 1);
         if (_rigOnionSkinPrevious && currentIndex > 0)
         {
@@ -939,27 +946,48 @@ public sealed partial class DebugWindowManager
         if (!_showAnimationEditor || !_rigPoseEditorEnabled || !_rigMotionPathsEnabled) return false;
         if (_rigMotionPathAnimation == null || _rigMotionPathAnimation.PlayerKeyFrames.Count == 0) return false;
 
-        List<RigMotionPathTarget> targets = GetRigMotionPathTargets(RigEditableParts[Math.Clamp(_rigPartIndex, 0, RigEditableParts.Length - 1)]);
-        if (targets.Count == 0) return false;
+        PopulateRigMotionPathTargets(
+            RigEditableParts[Math.Clamp(_rigPartIndex, 0, RigEditableParts.Length - 1)],
+            _rigMotionPathTargets);
+        if (_rigMotionPathTargets.Count == 0) return false;
 
         Animation animation = _rigMotionPathAnimation;
-        string cacheKey = BuildRigMotionPathCacheKey(animation, targets);
-        if (!string.Equals(cacheKey, _rigMotionPathCacheKey, StringComparison.Ordinal))
+        RigMotionPathCacheKey cacheKey = BuildRigMotionPathCacheKey(animation);
+        if (_rigMotionPathCacheKey != cacheKey)
         {
             _rigMotionPathCache.Clear();
-            _rigMotionPathCache.AddRange(BuildRigMotionPaths(animation, targets));
+            _rigMotionPathCache.AddRange(BuildRigMotionPaths(animation, _rigMotionPathTargets));
             _rigMotionPathCacheKey = cacheKey;
         }
 
+        UpdateRigMotionPathPlaybackState(animation);
         paths = _rigMotionPathCache;
         return _rigMotionPathCache.Count > 0;
     }
 
-    private string BuildRigMotionPathCacheKey(Animation animation, IReadOnlyList<RigMotionPathTarget> targets)
+    internal bool RigOnionSkinsVisible =>
+        _showAnimationEditor &&
+        _rigPoseEditorEnabled &&
+        _rigOnionSkinEnabled &&
+        _rigOnionSkinAnimation?.PlayerKeyFrames.Count > 0;
+
+    internal bool RigMotionPathsVisible =>
+        _showAnimationEditor &&
+        _rigPoseEditorEnabled &&
+        _rigMotionPathsEnabled &&
+        _rigMotionPathAnimation?.PlayerKeyFrames.Count > 0;
+
+    private RigMotionPathCacheKey BuildRigMotionPathCacheKey(Animation animation)
     {
-        int contentHash = StringComparer.Ordinal.GetHashCode(AnimationEditorHistory.Serialize(animation));
-        double currentMs = GetEditorFrameTimeMs(animation);
-        return $"{_rigMotionPathAnimationCode}|{contentHash}|{_rigMotionPathSamples}|{_rigMotionPathThickness:F2}|{_rigMotionPathSplit}|{_rigPartIndex}|{currentMs:F1}|{string.Join(",", targets.Select(target => target.Label))}";
+        return new RigMotionPathCacheKey(
+            animation,
+            _rigMotionPathAnimationCode,
+            ComputeRigMotionPathContentHash(animation),
+            Math.Clamp(_rigMotionPathSamples, 8, 240),
+            BitConverter.SingleToInt32Bits(_rigMotionPathThickness),
+            _rigMotionPathSplit,
+            _rigPartIndex,
+            RigMotionPathTargetMask());
     }
 
     private List<TransformGizmoMotionPath> BuildRigMotionPaths(Animation animation, IReadOnlyList<RigMotionPathTarget> targets)
@@ -982,11 +1010,6 @@ public sealed partial class DebugWindowManager
             }
         }
 
-        PlayerFrame currentFrame = animation.StillPlayerFrame(animation._playerFrameIndex, animation._frameProgress).Player;
-        TryBuildRigPoseTreeForFrame(currentFrame, out EntityPlayer currentPlayerEntity, out List<ElementPose> currentPoses);
-        double playerDurationMs = Math.Max(0.0001, GetEditorPlayerDurationMs(animation));
-        double currentFraction = Math.Clamp(GetEditorFrameTimeMs(animation) / playerDurationMs, 0, 1);
-
         List<TransformGizmoMotionPath> result = [];
         for (int targetIndex = 0; targetIndex < targets.Count; targetIndex++)
         {
@@ -994,23 +1017,51 @@ public sealed partial class DebugWindowManager
             if (points.Count < 2) continue;
 
             RigMotionPathTarget target = targets[targetIndex];
-            Vec3d? currentPoint = null;
-            if (currentPoses.Count > 0 && TryGetRigPartWorldOriginFromPoses(currentPlayerEntity, currentPoses, target.Part, out Vec3d origin))
-            {
-                currentPoint = origin;
-            }
-
             int pastColor = target.Selected ? RigMotionPathSelectedPastColor : RigMotionPathPastColor;
             int futureColor = target.Selected ? RigMotionPathSelectedFutureColor : RigMotionPathFutureColor;
-            result.Add(new TransformGizmoMotionPath(points, currentPoint, pastColor, futureColor, RigMotionPathCurrentColor, _rigMotionPathThickness, _rigMotionPathSplit, currentFraction));
+            result.Add(new TransformGizmoMotionPath(points, new Vec3d(), pastColor, futureColor, RigMotionPathCurrentColor, _rigMotionPathThickness, _rigMotionPathSplit, 0));
         }
 
         return result;
     }
 
-    private List<RigMotionPathTarget> GetRigMotionPathTargets(EnumAnimatedElement selectedPart)
+    private void UpdateRigMotionPathPlaybackState(Animation animation)
     {
-        List<RigMotionPathTarget> targets = [];
+        if (_rigMotionPathCache.Count == 0) return;
+
+        double playerDurationMs = Math.Max(0.0001, GetEditorPlayerDurationMs(animation));
+        double currentFraction = Math.Clamp(GetEditorFrameTimeMs(animation) / playerDurationMs, 0, 1);
+        for (int index = 0; index < _rigMotionPathCache.Count; index++)
+        {
+            TransformGizmoMotionPath path = _rigMotionPathCache[index];
+            if (path.Points.Count == 0) continue;
+
+            double samplePosition = currentFraction * Math.Max(0, path.Points.Count - 1);
+            int fromIndex = Math.Clamp((int)Math.Floor(samplePosition), 0, path.Points.Count - 1);
+            int toIndex = Math.Min(path.Points.Count - 1, fromIndex + 1);
+            double amount = samplePosition - fromIndex;
+            Vec3d from = path.Points[fromIndex];
+            Vec3d to = path.Points[toIndex];
+            Vec3d currentPoint = path.CurrentPoint ?? new Vec3d();
+            currentPoint.X = from.X + (to.X - from.X) * amount;
+            currentPoint.Y = from.Y + (to.Y - from.Y) * amount;
+            currentPoint.Z = from.Z + (to.Z - from.Z) * amount;
+
+            _rigMotionPathCache[index] = new TransformGizmoMotionPath(
+                path.Points,
+                currentPoint,
+                path.PastColor,
+                path.FutureColor,
+                path.CurrentColor,
+                path.Thickness,
+                path.SplitAtCurrentTime,
+                currentFraction);
+        }
+    }
+
+    private void PopulateRigMotionPathTargets(EnumAnimatedElement selectedPart, List<RigMotionPathTarget> targets)
+    {
+        targets.Clear();
         if (_rigMotionPathHead) targets.Add(new RigMotionPathTarget("Head", EnumAnimatedElement.Head, selectedPart == EnumAnimatedElement.Head));
         if (_rigMotionPathRightHand) targets.Add(new RigMotionPathTarget("Right hand", EnumAnimatedElement.LowerArmR, selectedPart is EnumAnimatedElement.LowerArmR or EnumAnimatedElement.ItemAnchor));
         if (_rigMotionPathLeftHand) targets.Add(new RigMotionPathTarget("Left hand", EnumAnimatedElement.LowerArmL, selectedPart is EnumAnimatedElement.LowerArmL or EnumAnimatedElement.ItemAnchorL));
@@ -1019,13 +1070,98 @@ public sealed partial class DebugWindowManager
         if (_rigMotionPathMainHandAnchor) targets.Add(new RigMotionPathTarget("Main-hand anchor", EnumAnimatedElement.ItemAnchor, selectedPart == EnumAnimatedElement.ItemAnchor));
         if (_rigMotionPathOffHandAnchor) targets.Add(new RigMotionPathTarget("Off-hand anchor", EnumAnimatedElement.ItemAnchorL, selectedPart == EnumAnimatedElement.ItemAnchorL));
         if (_rigMotionPathWeaponTip) targets.Add(new RigMotionPathTarget("Weapon tip", EnumAnimatedElement.ItemAnchor, selectedPart == EnumAnimatedElement.ItemAnchor));
-        return targets;
     }
 
     private void InvalidateRigMotionPathCache()
     {
-        _rigMotionPathCacheKey = "";
+        _rigMotionPathCacheKey = null;
         _rigMotionPathCache.Clear();
+        _rigMotionPathTargets.Clear();
+    }
+
+    private int RigMotionPathTargetMask()
+    {
+        int mask = 0;
+        if (_rigMotionPathHead) mask |= 1 << 0;
+        if (_rigMotionPathRightHand) mask |= 1 << 1;
+        if (_rigMotionPathLeftHand) mask |= 1 << 2;
+        if (_rigMotionPathRightFoot) mask |= 1 << 3;
+        if (_rigMotionPathLeftFoot) mask |= 1 << 4;
+        if (_rigMotionPathMainHandAnchor) mask |= 1 << 5;
+        if (_rigMotionPathOffHandAnchor) mask |= 1 << 6;
+        if (_rigMotionPathWeaponTip) mask |= 1 << 7;
+        return mask;
+    }
+
+    private static int ComputeRigMotionPathContentHash(Animation animation)
+    {
+        HashCode hash = new();
+        hash.Add(animation.PlayerKeyFrames.Count);
+        foreach (PLayerKeyFrame keyFrame in animation.PlayerKeyFrames)
+        {
+            hash.Add(keyFrame.Time.Ticks);
+            hash.Add((int)keyFrame.EasingFunction);
+            hash.Add((int)keyFrame.EasingType);
+            hash.Add(keyFrame.FrameProgressRange.X);
+            hash.Add(keyFrame.FrameProgressRange.Y);
+            AddRigPlayerFrameHash(ref hash, keyFrame.Frame);
+        }
+
+        return hash.ToHashCode();
+    }
+
+    private static void AddRigPlayerFrameHash(ref HashCode hash, PlayerFrame frame)
+    {
+        AddRigAnimationElementHash(ref hash, frame.UpperTorso);
+        AddRigAnimationElementHash(ref hash, frame.LowerTorso);
+        AddRigAnimationElementHash(ref hash, frame.DetachedAnchorFrame);
+
+        hash.Add(frame.RightHand.HasValue);
+        if (frame.RightHand is RightHandFrame rightHand)
+        {
+            AddRigAnimationElementHash(ref hash, rightHand.ItemAnchor);
+            AddRigAnimationElementHash(ref hash, rightHand.LowerArmR);
+            AddRigAnimationElementHash(ref hash, rightHand.UpperArmR);
+        }
+
+        hash.Add(frame.LeftHand.HasValue);
+        if (frame.LeftHand is LeftHandFrame leftHand)
+        {
+            AddRigAnimationElementHash(ref hash, leftHand.ItemAnchorL);
+            AddRigAnimationElementHash(ref hash, leftHand.LowerArmL);
+            AddRigAnimationElementHash(ref hash, leftHand.UpperArmL);
+        }
+
+        hash.Add(frame.OtherParts.HasValue);
+        if (frame.OtherParts is OtherPartsFrame otherParts)
+        {
+            AddRigAnimationElementHash(ref hash, otherParts.Neck);
+            AddRigAnimationElementHash(ref hash, otherParts.Head);
+            AddRigAnimationElementHash(ref hash, otherParts.UpperFootR);
+            AddRigAnimationElementHash(ref hash, otherParts.UpperFootL);
+            AddRigAnimationElementHash(ref hash, otherParts.LowerFootR);
+            AddRigAnimationElementHash(ref hash, otherParts.LowerFootL);
+        }
+
+        hash.Add(frame.DetachedAnchor);
+        hash.Add(frame.SwitchArms);
+        hash.Add(frame.PitchFollow);
+        hash.Add(frame.FovMultiplier);
+        hash.Add(frame.BobbingAmplitude);
+        hash.Add(frame.DetachedAnchorFollow);
+    }
+
+    private static void AddRigAnimationElementHash(ref HashCode hash, AnimationElement? element)
+    {
+        hash.Add(element.HasValue);
+        if (element is not AnimationElement value) return;
+
+        hash.Add(value.OffsetX);
+        hash.Add(value.OffsetY);
+        hash.Add(value.OffsetZ);
+        hash.Add(value.RotationX);
+        hash.Add(value.RotationY);
+        hash.Add(value.RotationZ);
     }
 
     private void AppendRigOnionSkinFrame(PlayerFrame frame, Vec4f color, List<TransformGizmoGhostModel> models)
@@ -1384,21 +1520,83 @@ public sealed partial class DebugWindowManager
 
     private void OnDebugEditorClosed()
     {
+        if (_debugEditorCloseHandled) return;
+        _debugEditorCloseHandled = true;
+
         if (_liveApplyManager.RevertOnClose && !_liveApplyManager.KeepLiveChangesOnClose)
         {
             _liveApplyManager.RevertAll();
         }
 
+        if (_modelGizmoDragging) ModelEndGizmoDrag(commit: true);
         ClearAiBehaviorLiveApplyState();
         SetEditorFrameOverride(null);
+        _behavior = null;
         _detachedEditorCamera?.SetEnabled(false);
         _rigPoseEditorEnabled = false;
         _rigOnionSkinAnimation = null;
         _rigMotionPathAnimation = null;
         InvalidateRigMotionPathCache();
+        DevToolsTextDiffView.ClearCache();
+        _animationHistory.ClearAll();
+        _vanillaHistory.ClearAll();
+        _modelUndoStack.Clear();
+        _modelRedoStack.Clear();
+        _modelPendingEditSnapshot = null;
+        _blockItemJsonTextHistory.Reset(_blockItemJsonText);
+        _blockItemJsonParseFrame = -1;
+        _blockItemJsonParsedText = null;
+        _blockItemJsonParsedRoot = null;
+        _worldgenTextHistory.Reset(_worldgenCurrentText);
+        _aiBehaviorTextHistory.Reset(_aiBehaviorCurrentText);
+        _sourceAssetIndex = null;
+        foreach (PatchCreatorAssetEntry entry in _patchCreatorAssets)
+        {
+            entry.ReleasePayload();
+        }
+        DisposeWorldgenPreviewRasterTexture();
+
+        ModelDisposePreviewResources();
+        ModelDisposeTexturePaintTexture();
+        _modelUvTextureCache.Clear();
+        _modelPreviewDirty = _modelDoc != null;
+        _modelReferenceDirty = _modelReferenceEntry != null || _modelReferenceEntityType != null;
+
+        DisposeVanillaPreviewScene();
+        _vanillaPreviewRenderer?.Dispose();
+        _vanillaPreviewRenderer = null;
+
+        InvalidateBlockItemJsonPreview();
+        _blockItemJsonPreviewRenderer?.Dispose();
+        _blockItemJsonPreviewRenderer = null;
+
+        _transformPreviewMesh?.Dispose();
+        _transformReferenceMesh?.Dispose();
+        _transformPreviewMesh = null;
+        _transformReferenceMesh = null;
+        _transformPreviewCacheKey = "";
+        _transformsPreviewRenderer?.Dispose();
+        _transformsPreviewRenderer = null;
+        _particleEffectsManager.ReleaseEditorResources();
+
         DebugPoseFreezeActive = false;
         DebugRigPoseOverrideActive = false;
     }
+
+    private void OnDebugEditorOpened()
+    {
+        _debugEditorCloseHandled = false;
+    }
+
+    private readonly record struct RigMotionPathCacheKey(
+        Animation Animation,
+        string AnimationCode,
+        int ContentHash,
+        int SampleCount,
+        int ThicknessBits,
+        bool Split,
+        int SelectedPartIndex,
+        int TargetMask);
 
     private readonly record struct RigMotionPathTarget(string Label, EnumAnimatedElement Part, bool Selected);
 

@@ -1,8 +1,34 @@
 # Performance and Memory Review
 
-Status: completed read-only review. Last updated: 2026-07-10.
+Status: completed review with implementation follow-up. Last updated: 2026-07-10.
 
-No runtime fixes were implemented as part of this review.
+The original review was read-only. The performance remediation pass described below was implemented afterward on 2026-07-10.
+
+## Implementation Follow-up
+
+| Finding | Status after remediation |
+| --- | --- |
+| F-01 startup JSON materialization | Addressed. Embedded discovery is deferred until the Particles editor is opened, restricted to runtime-definition categories, scans bytes before decoding, and unloads assets loaded only for the scan. |
+| F-02 Patch Creator retention | Addressed. The index is metadata-only; only selected/sample payloads load on demand, and non-selected payloads are released. |
+| F-03 Vanilla Blocks source duplication | Addressed. Source metadata is deduplicated and source JSON is no longer parsed per runtime variant. |
+| F-04 recovery frame work | Addressed. Capture delegates run only when the autosave deadline is due; snapshot listings are cached as payload-free metadata. |
+| F-05 texture recovery/uploads | Addressed. PNG rows use a pooled streaming buffer, base64 occurs only after a changed hash, and paint uploads use dirty subregions. |
+| F-06 particle editor graph churn | Addressed. Family/dirty/runtime representations use revision-based caches and explicit invalidation. |
+| F-07 Worldgen retention | Addressed. The index is metadata-only and the selected payload is loaded temporarily/on demand; entries awaiting content classification remain discoverable under kind and preview filters. |
+| F-08 native ImGui text buffers | Mitigated. Editable capacities now track current content with bounded headroom, major whole-document editors have managed “Paste all” actions, and very large read-only previews are capped/rendered without oversized edit buffers. The external binding still performs native marshalling for drawn widgets. |
+| F-09 particle preview mesh churn | Addressed. Billboard lists, managed mesh storage, and a dynamically sized GPU mesh are reused. |
+| F-10 histories/diffs/save previews | Mitigated. Histories now have count/character budgets, redundant serialized animation copies were replaced with hashes, close clears histories/diff caches, and source panes cache/virtualize lines. |
+| F-11 accumulating indexes/lists | Addressed for the largest offenders. Patch/Worldgen lists are clipped and metadata-only; block filtering runs only while open; pending indexer storage is released. |
+| F-12 live snapshot lifetime | Addressed. Successful revert removes snapshots, unapplied captures are released by revert-all, and teardown clears remaining entries. |
+| F-13 disposal/static roots | Addressed for reviewed resources. Managers, renderers, cameras, previews, meshes, framebuffers, caches, static instances, and the preview Harmony redirect now have explicit close/dispose ownership. |
+| F-14 pose/cache baseline | Addressed. The unused strong name cache and per-pose player reference were removed; animator ownership now uses a weak table without locked misses. |
+| F-15 runtime particle overrides | Addressed. Immutable override revisions and per-block patched-array caches replace per-tick whole-array deep cloning; unmatched blocks return before taking a block lock. |
+| F-16 animated blocks | Partially addressed. Duplicate renderer registration, queued-after-unload initialization, and partial-failure cleanup were fixed. Per-instance animator/mesh ownership remains inherent to the current feature design. |
+| F-17 AI and Block/Item parsing | Addressed. AI dirty state is computed once per frame, and Block/Item panels share one parsed document per frame. |
+| F-18 model/rig preview rebuilds | Addressed. Motion paths use a structural cache stable during playback, disabled features skip allocation, and full model preview rebuilds are deferred until continuous drags finish. |
+| F-19 cross-world roots | Addressed. Behaviors clean up on entity despawn, close releases old player references, and static manager state is cleared on disposal. |
+
+The validation plan later in this document remains useful for live in-game allocation, working-set, and VRAM confirmation.
 
 ## Executive Summary
 
@@ -590,9 +616,9 @@ The following measurements would turn this static diagnosis into exact live byte
 
 Useful tooling includes <code>dotnet-counters</code>, <code>dotnet-gcdump</code> or PerfView for managed data, ETW/native heap tooling for ImGui and compression/native allocations, and RenderDoc or driver tooling for GPU allocations.
 
-## Remediation Priority for a Later Change
+## Original Remediation Priority
 
-No fixes are included here. Based on impact and confidence, a future implementation pass should be prioritized in this order:
+The original read-only review prioritized the later implementation pass in this order:
 
 1. Stop the unconditional all-JSON particle load/decode at startup.
 2. Redesign Patch, Worldgen, and Vanilla Blocks indexes so they do not retain duplicate full text/token graphs for every candidate or variant.
@@ -608,4 +634,4 @@ No fixes are included here. Based on impact and confidence, a future implementat
 
 The initial spike has a clear primary cause: particle discovery eagerly loads the complete active JSON corpus into globally retained asset byte arrays. The largest subsequent increases come from editors that retain source strings plus parsed JSON graphs, especially Patch Creator, Worldgen, and the per-variant Vanilla Blocks index. The sharp repeated spikes are explained by frame-driven recovery and texture encoding, deep particle cloning, native ImGui buffers, and preview mesh/texture uploads. Finally, incomplete unload/disposal paths and deliberately warm editor caches explain why the process does not return to its pre-editor baseline.
 
-These findings are sufficient to guide a focused remediation pass. Exact per-subsystem live totals should be captured with the validation sequence above before changing ownership and caching semantics.
+The implementation follow-up at the start of this document records how that remediation pass addressed these findings. Exact per-subsystem live totals should still be captured with the validation sequence above to quantify the improvements under representative modpacks, editor workflows, and graphics drivers.

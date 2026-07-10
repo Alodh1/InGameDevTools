@@ -123,6 +123,7 @@ public sealed class DevToolsAssetIndexerTests
         Assert.Equal(1, completed);
         Assert.Equal(1, progressed);
         Assert.True(indexer.IsReady);
+        Assert.Empty(indexer.PendingAssets);
     }
 
     [Fact]
@@ -178,9 +179,11 @@ public sealed class DevToolsAssetIndexerTests
     {
         DevToolsAssetIndexer indexer = new(batchSize: 5);
         indexer.Begin();
+        indexer.AddAssets([Asset("a.json")], _ => true);
 
         indexer.Fail();
 
         Assert.True(indexer.IsFailed);
+        Assert.Empty(indexer.PendingAssets);
     }
 }

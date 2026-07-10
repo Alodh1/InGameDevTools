@@ -26,7 +26,14 @@ internal sealed class PreviewParticleSystem
 
     public int Count => _particles.Count;
 
-    public void Clear() => _particles.Clear();
+    public void Clear(bool releaseCapacity = false)
+    {
+        _particles.Clear();
+        if (releaseCapacity)
+        {
+            _particles.TrimExcess();
+        }
+    }
 
     /// <summary>
     /// The current in-game time speed (Calendar.SpeedOfTime / 60). The engine couples particle timing to it:
@@ -125,7 +132,13 @@ internal sealed class PreviewParticleSystem
             particle.Age += dt;
             if (particle.Age >= particle.Life)
             {
-                _particles.RemoveAt(index);
+                int lastIndex = _particles.Count - 1;
+                if (index != lastIndex)
+                {
+                    _particles[index] = _particles[lastIndex];
+                }
+
+                _particles.RemoveAt(lastIndex);
                 continue;
             }
 
@@ -157,6 +170,11 @@ internal sealed class PreviewParticleSystem
     /// </summary>
     public void CollectBillboards(List<DevToolsPreviewBillboard> output)
     {
+        if (output.Capacity < output.Count + _particles.Count)
+        {
+            output.Capacity = output.Count + _particles.Count;
+        }
+
         foreach (PreviewParticle particle in _particles)
         {
             float seq = particle.Life <= 0f ? 0f : Math.Clamp(particle.Age / particle.Life, 0f, 1f);

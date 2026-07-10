@@ -12,12 +12,14 @@ internal static class ParticleRuntimePatches
 {
     private static readonly object OverridesLock = new();
     private static readonly object PatchLock = new();
-    private static readonly Dictionary<string, SortedDictionary<int, AdvancedParticleProperties>> Overrides = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, ParticleOverrideSet> Overrides = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConditionalWeakTable<Block, object> BlockLocks = new();
+    private static readonly ConditionalWeakTable<Block, ParticleArrayCache> ParticleArrayCaches = new();
     private static readonly HashSet<string> PatchedMethods = new(StringComparer.Ordinal);
     private static ICoreAPI? Api;
     private static string? HarmonyId;
     private static bool RuntimePatched;
+    private static long OverrideRevision;
 
     public static void Patch(string harmonyId, ICoreAPI api)
     {
@@ -48,6 +50,8 @@ internal static class ParticleRuntimePatches
         lock (OverridesLock)
         {
             Overrides.Clear();
+            OverrideRevision++;
+            ParticleArrayCaches.Clear();
         }
     }
 
@@ -58,12 +62,18 @@ internal static class ParticleRuntimePatches
         string collectibleKey = collectible.Code.ToString();
         lock (OverridesLock)
         {
-            if (!Overrides.TryGetValue(collectibleKey, out SortedDictionary<int, AdvancedParticleProperties>? byIndex))
+            SortedDictionary<int, AdvancedParticleProperties> byIndex = [];
+            if (Overrides.TryGetValue(collectibleKey, out ParticleOverrideSet? existing))
             {
-                Overrides[collectibleKey] = byIndex = new SortedDictionary<int, AdvancedParticleProperties>();
+                foreach (ParticleOverrideEntry entry in existing.Entries)
+                {
+                    byIndex[entry.Index] = entry.Properties;
+                }
             }
 
             byIndex[index] = properties.Clone();
+            Overrides[collectibleKey] = CreateOverrideSet(byIndex);
+            ParticleArrayCaches.Clear();
         }
 
         EnsureRuntimePatched();
@@ -78,12 +88,25 @@ internal static class ParticleRuntimePatches
 
         lock (OverridesLock)
         {
-            if (!Overrides.TryGetValue(collectibleKey, out SortedDictionary<int, AdvancedParticleProperties>? byIndex)) return;
+            if (!Overrides.TryGetValue(collectibleKey, out ParticleOverrideSet? existing)) return;
+
+            SortedDictionary<int, AdvancedParticleProperties> byIndex = [];
+            foreach (ParticleOverrideEntry entry in existing.Entries)
+            {
+                byIndex[entry.Index] = entry.Properties;
+            }
+
             byIndex.Remove(index);
             if (byIndex.Count == 0)
             {
                 Overrides.Remove(collectibleKey);
             }
+            else
+            {
+                Overrides[collectibleKey] = CreateOverrideSet(byIndex);
+            }
+
+            ParticleArrayCaches.Clear();
         }
 
         UnpatchRuntimeIfIdle();
@@ -94,6 +117,8 @@ internal static class ParticleRuntimePatches
         lock (OverridesLock)
         {
             Overrides.Clear();
+            OverrideRevision++;
+            ParticleArrayCaches.Clear();
         }
 
         UnpatchRuntimeIfIdle();
@@ -204,40 +229,48 @@ internal static class ParticleRuntimePatches
         __state = null;
         if (__instance?.Code == null) return;
 
+        ParticleOverrideSet overrides;
+        lock (OverridesLock)
+        {
+            if (!Overrides.TryGetValue(__instance.Code.ToString(), out ParticleOverrideSet? configured) || configured.Entries.Length == 0)
+            {
+                return;
+            }
+
+            overrides = configured;
+        }
+
         object syncRoot = BlockLocks.GetValue(__instance, static _ => new object());
         bool lockTaken = false;
         Monitor.Enter(syncRoot, ref lockTaken);
 
         try
         {
-            SortedDictionary<int, AdvancedParticleProperties>? overrides;
-            lock (OverridesLock)
-            {
-                if (!Overrides.TryGetValue(__instance.Code.ToString(), out SortedDictionary<int, AdvancedParticleProperties>? configured) || configured.Count == 0)
-                {
-                    return;
-                }
-
-                overrides = new SortedDictionary<int, AdvancedParticleProperties>(configured);
-            }
-
             AdvancedParticleProperties[]? original = __instance.ParticleProperties;
-            int length = Math.Max(original?.Length ?? 0, overrides.Keys.Max() + 1);
-            AdvancedParticleProperties[] patched = new AdvancedParticleProperties[length];
-            for (int index = 0; index < length; index++)
+            ParticleArrayCache cache = ParticleArrayCaches.GetValue(__instance, static _ => new ParticleArrayCache());
+            if (cache.Revision != overrides.Revision || !ReferenceEquals(cache.Original, original))
             {
-                if (original != null && index < original.Length && original[index] != null)
+                int length = Math.Max(original?.Length ?? 0, overrides.MaxIndex + 1);
+                AdvancedParticleProperties[] patched = new AdvancedParticleProperties[length];
+                if (original != null)
                 {
-                    patched[index] = original[index].Clone();
+                    Array.Copy(original, patched, original.Length);
                 }
+
+                // The unmodified slots deliberately retain vanilla's provider references. The engine would
+                // use those same objects without this patch. Only authored overrides need isolated clones,
+                // and those clones can be reused while the per-block lock serializes the emitter callback.
+                foreach (ParticleOverrideEntry entry in overrides.Entries)
+                {
+                    patched[entry.Index] = entry.Properties.Clone();
+                }
+
+                cache.Original = original;
+                cache.Revision = overrides.Revision;
+                cache.Patched = patched;
             }
 
-            foreach ((int index, AdvancedParticleProperties properties) in overrides)
-            {
-                patched[index] = properties.Clone();
-            }
-
-            __instance.ParticleProperties = patched;
+            __instance.ParticleProperties = cache.Patched;
             __state = new ParticleEmitterState(original, syncRoot);
             lockTaken = false;
         }
@@ -289,5 +322,29 @@ internal static class ParticleRuntimePatches
     {
         public AdvancedParticleProperties[]? Original { get; } = original;
         public object SyncRoot { get; } = syncRoot;
+    }
+
+    private static ParticleOverrideSet CreateOverrideSet(SortedDictionary<int, AdvancedParticleProperties> byIndex)
+    {
+        ParticleOverrideEntry[] entries = byIndex
+            .Select(pair => new ParticleOverrideEntry(pair.Key, pair.Value))
+            .ToArray();
+        return new ParticleOverrideSet(++OverrideRevision, entries, entries[^1].Index);
+    }
+
+    private sealed class ParticleOverrideSet(long revision, ParticleOverrideEntry[] entries, int maxIndex)
+    {
+        public long Revision { get; } = revision;
+        public ParticleOverrideEntry[] Entries { get; } = entries;
+        public int MaxIndex { get; } = maxIndex;
+    }
+
+    private readonly record struct ParticleOverrideEntry(int Index, AdvancedParticleProperties Properties);
+
+    private sealed class ParticleArrayCache
+    {
+        public AdvancedParticleProperties[]? Original;
+        public long Revision = -1;
+        public AdvancedParticleProperties[] Patched = [];
     }
 }

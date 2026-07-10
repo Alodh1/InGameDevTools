@@ -19,11 +19,17 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
     private IShaderProgram? _previewQuadParticleShader;
     private IShaderProgram? _billboardShader;
     private readonly HashSet<string> _missingParticleUniformsLogged = new(StringComparer.Ordinal);
+    private readonly BillboardBatchBuffer _billboardBuffer = new();
+    private readonly int[] _restoreViewport = new int[4];
+    private readonly float[] _restoreClearColor = new float[4];
+    private bool _ownsParticleSpawnRedirect;
+    private bool _disposed;
 
     public DevToolsPreview3DRenderer(ICoreClientAPI api)
     {
         _api = api;
-        EngineParticleSpawnRedirect.EnsurePatched(api);
+        EngineParticleSpawnRedirect.Acquire(api);
+        _ownsParticleSpawnRedirect = true;
     }
 
     private static readonly IReadOnlyList<DevToolsPreviewBillboard> NoBillboards = Array.Empty<DevToolsPreviewBillboard>();
@@ -65,8 +71,7 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         IRenderAPI render = _api.Render;
         FrameBufferRef? restoreFrameBuffer = render.CurrentFrameBuffer;
         IShaderProgram? previousShader = render.CurrentActiveShader;
-        int[] restoreViewport = new int[4];
-        GL.GetInteger(GetPName.Viewport, restoreViewport);
+        GL.GetInteger(GetPName.Viewport, _restoreViewport);
         bool restoreDepthTest = GL.IsEnabled(EnableCap.DepthTest);
         GL.GetInteger(GetPName.DepthFunc, out int restoreDepthFunc);
         GL.GetBoolean(GetPName.DepthWritemask, out bool restoreDepthMask);
@@ -81,8 +86,7 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         GL.GetInteger(GetPName.ActiveTexture, out int restoreActiveTexture);
         GL.ActiveTexture(TextureUnit.Texture0);
         GL.GetInteger(GetPName.TextureBinding2D, out int restoreTexture2D);
-        float[] restoreClearColor = new float[4];
-        GL.GetFloat(GetPName.ColorClearValue, restoreClearColor);
+        GL.GetFloat(GetPName.ColorClearValue, _restoreClearColor);
         IShaderProgram? activeShader = null;
 
         try
@@ -161,9 +165,9 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         {
             activeShader?.Stop();
             render.CurrentFrameBuffer = restoreFrameBuffer;
-            render.GlViewport(restoreViewport[0], restoreViewport[1], restoreViewport[2], restoreViewport[3]);
+            render.GlViewport(_restoreViewport[0], _restoreViewport[1], _restoreViewport[2], _restoreViewport[3]);
             previousShader?.Use();
-            GL.ClearColor(restoreClearColor[0], restoreClearColor[1], restoreClearColor[2], restoreClearColor[3]);
+            GL.ClearColor(_restoreClearColor[0], _restoreClearColor[1], _restoreClearColor[2], _restoreClearColor[3]);
             GL.DepthFunc((DepthFunction)restoreDepthFunc);
             render.GLDepthMask(restoreDepthMask);
             if (restoreCullFace) render.GlEnableCullFace();
@@ -273,7 +277,7 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         OpenTK.Mathematics.Vector3 right = camera.Right;
         OpenTK.Mathematics.Vector3 up = camera.Up;
 
-        MeshData mesh = new(count * 4, count * 6);
+        (MeshData mesh, MeshRef meshRef) = _billboardBuffer.EnsureCapacity(render, count);
         mesh.SetVerticesCount(count * 4);
         mesh.SetIndicesCount(count * 6);
 
@@ -307,15 +311,8 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
             mesh.Indices[indexPos++] = baseVertex + 3;
         }
 
-        MeshRef meshRef = render.UploadMesh(mesh);
-        try
-        {
-            render.RenderMesh(meshRef);
-        }
-        finally
-        {
-            meshRef.Dispose();
-        }
+        render.UpdateMesh(meshRef, mesh);
+        render.RenderMesh(meshRef);
     }
 
     private static void AddBillboardVertex(MeshData mesh, ref int vertex, OpenTK.Mathematics.Vector3 position, float u, float v, byte r, byte g, byte b, byte a)
@@ -447,8 +444,81 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         DestroyFrameBuffer();
         ResetParticles();
+        _billboardBuffer.Dispose();
+        _missingParticleUniformsLogged.Clear();
+        if (_ownsParticleSpawnRedirect)
+        {
+            EngineParticleSpawnRedirect.Release(_api);
+            _ownsParticleSpawnRedirect = false;
+        }
+    }
+
+    private sealed class BillboardBatchBuffer : IDisposable
+    {
+        private MeshData? _mesh;
+        private MeshRef? _meshRef;
+        private int _billboardCapacity;
+
+        public (MeshData Mesh, MeshRef MeshRef) EnsureCapacity(IRenderAPI render, int billboardCount)
+        {
+            if (_mesh != null && _meshRef is { Disposed: false, Initialized: true } && _billboardCapacity >= billboardCount)
+            {
+                return (_mesh, _meshRef);
+            }
+
+            DisposeMeshRef();
+            _billboardCapacity = GrowCapacity(billboardCount);
+            int vertexCapacity = checked(_billboardCapacity * 4);
+            int indexCapacity = checked(_billboardCapacity * 6);
+            _mesh = new MeshData(vertexCapacity, indexCapacity, withNormals: false, withUv: true, withRgba: true, withFlags: false);
+            _meshRef = render.AllocateEmptyMesh(
+                checked(vertexCapacity * 3 * sizeof(float)),
+                0,
+                checked(vertexCapacity * 2 * sizeof(float)),
+                checked(vertexCapacity * 4),
+                0,
+                checked(indexCapacity * sizeof(int)),
+                null,
+                null,
+                null,
+                null,
+                EnumDrawMode.Triangles,
+                staticDraw: false);
+            return (_mesh, _meshRef);
+        }
+
+        public void Dispose()
+        {
+            DisposeMeshRef();
+            _mesh = null;
+            _billboardCapacity = 0;
+        }
+
+        private void DisposeMeshRef()
+        {
+            if (_meshRef is { Disposed: false })
+            {
+                _meshRef.Dispose();
+            }
+
+            _meshRef = null;
+        }
+
+        private static int GrowCapacity(int requested)
+        {
+            int capacity = 256;
+            while (capacity < requested)
+            {
+                capacity = checked(capacity * 2);
+            }
+
+            return capacity;
+        }
     }
 
     private EngineParticlePreview EnsureParticlePreview()
@@ -747,29 +817,53 @@ internal sealed class DevToolsPreview3DRenderer : IDisposable
         private const string HarmonyId = "ingamedevtools.preview-particles";
         private static readonly object PatchLock = new();
         private static bool _patched;
+        private static int _owners;
         [ThreadStatic] private static EngineParticlePreview? _activePreview;
 
-        public static void EnsurePatched(ICoreClientAPI api)
+        public static void Acquire(ICoreClientAPI api)
         {
             lock (PatchLock)
             {
+                _owners++;
                 if (_patched) return;
 
-                Harmony harmony = new(HarmonyId);
-                System.Reflection.MethodInfo? method = AccessTools.Method(
-                    typeof(ClientMain),
-                    nameof(ClientMain.SpawnParticles),
-                    [typeof(IParticlePropertiesProvider), typeof(IPlayer)]);
-                if (method == null)
+                try
                 {
-                    throw new InvalidOperationException("ClientMain.SpawnParticles(IParticlePropertiesProvider, IPlayer) was not found.");
-                }
+                    Harmony harmony = new(HarmonyId);
+                    System.Reflection.MethodInfo? method = AccessTools.Method(
+                        typeof(ClientMain),
+                        nameof(ClientMain.SpawnParticles),
+                        [typeof(IParticlePropertiesProvider), typeof(IPlayer)]);
+                    if (method == null)
+                    {
+                        throw new InvalidOperationException("ClientMain.SpawnParticles(IParticlePropertiesProvider, IPlayer) was not found.");
+                    }
 
-                harmony.Patch(
-                    method,
-                    prefix: new HarmonyMethod(typeof(EngineParticleSpawnRedirect), nameof(SpawnParticlesPrefix)));
-                _patched = true;
-                api.Logger.VerboseDebug("InGameDevTools: engine particle preview spawn redirect installed.");
+                    harmony.Patch(
+                        method,
+                        prefix: new HarmonyMethod(typeof(EngineParticleSpawnRedirect), nameof(SpawnParticlesPrefix)));
+                    _patched = true;
+                    api.Logger.VerboseDebug("InGameDevTools: engine particle preview spawn redirect installed.");
+                }
+                catch
+                {
+                    _owners--;
+                    throw;
+                }
+            }
+        }
+
+        public static void Release(ICoreClientAPI api)
+        {
+            lock (PatchLock)
+            {
+                if (_owners > 0) _owners--;
+                if (_owners > 0 || !_patched) return;
+
+                new Harmony(HarmonyId).UnpatchAll(HarmonyId);
+                _patched = false;
+                _activePreview = null;
+                api.Logger.VerboseDebug("InGameDevTools: engine particle preview spawn redirect removed.");
             }
         }
 

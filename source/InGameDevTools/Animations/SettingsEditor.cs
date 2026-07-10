@@ -569,7 +569,7 @@ public sealed partial class DebugWindowManager
             _settingsImportJson = ImGui.GetClipboardText();
         }
 
-        ImGui.InputTextMultiline("##settings-theme-json", ref _settingsImportJson, 256 * 1024, new NVector2(-float.Epsilon, 120f), ImGuiInputTextFlags.AllowTabInput);
+        ImGui.InputTextMultiline("##settings-theme-json", ref _settingsImportJson, DevToolsImGuiTextBuffer.Capacity(_settingsImportJson), new NVector2(-float.Epsilon, 120f), ImGuiInputTextFlags.AllowTabInput);
         if (ImGui.Button(DevToolsLang.Label("ui.settings.importTheme", "Import theme", "settings-import-theme")))
         {
             try

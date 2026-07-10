@@ -798,7 +798,7 @@ public sealed partial class DebugWindowManager
             _vanillaExtraJsonBuffers[bufferKey] = buffer;
         }
 
-        ImGui.InputTextMultiline($"##vanilla-extra-json-{bufferKey}", ref buffer, 256 * 1024, new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
+        ImGui.InputTextMultiline($"##vanilla-extra-json-{bufferKey}", ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
         _vanillaExtraJsonBuffers[bufferKey] = buffer;
 
         if (ImGui.Button($"Apply##vanilla-extra-apply-{bufferKey}"))

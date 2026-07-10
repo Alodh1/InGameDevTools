@@ -155,6 +155,7 @@ public sealed partial class DebugWindowManager
 
             _blockOptions.Clear();
             _allBlockDomains.Clear();
+            Dictionary<string, VanillaBlockSourceInfo> sourcesByLocation = new(StringComparer.OrdinalIgnoreCase);
 
             foreach (Block block in api.World.Blocks ?? [])
             {
@@ -163,7 +164,7 @@ public sealed partial class DebugWindowManager
 
                 string code = block.Code.ToString();
                 string domain = block.Code.Domain ?? "game";
-                VanillaBlockSourceInfo? source = BuildBlockSourceInfo(block);
+                VanillaBlockSourceInfo? source = BuildBlockSourceInfo(block, sourcesByLocation);
                 string label = ImGuiLayoutHelper.CompactAssetCode(code);
                 string assetPath = source?.AssetPath ?? $"blocktypes/{EnsureJsonFilePath(block.Code.Path)}";
                 string search = $"{label} {code} {domain} {assetPath} {block.Shape.Base}";
@@ -1533,14 +1534,23 @@ public sealed partial class DebugWindowManager
             return block.Shape?.Base?.Clone().WithPathPrefixOnce("shapes/").WithPathAppendixOnce(".json");
         }
 
-        private static VanillaBlockSourceInfo? BuildBlockSourceInfo(Block block)
+        private static VanillaBlockSourceInfo? BuildBlockSourceInfo(
+            Block block,
+            Dictionary<string, VanillaBlockSourceInfo> sourcesByLocation)
         {
             IAsset? asset = FindCollectibleSourceAsset(block);
             if (asset?.Location == null) return null;
-            return new(
-                asset.Location,
-                asset.Location.Path.Replace('\\', '/'),
-                TryParseJsonObject(ReadAssetText(asset)));
+
+            string assetPath = asset.Location.Path.Replace('\\', '/');
+            string key = $"{asset.Location.Domain}:{assetPath}";
+            if (sourcesByLocation.TryGetValue(key, out VanillaBlockSourceInfo? source))
+            {
+                return source;
+            }
+
+            source = new VanillaBlockSourceInfo(asset.Location, assetPath);
+            sourcesByLocation[key] = source;
+            return source;
         }
 
         private static JObject? TryLoadJson(ICoreClientAPI api, AssetLocation? location)

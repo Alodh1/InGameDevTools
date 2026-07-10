@@ -87,8 +87,10 @@ public sealed class DevToolsBackupRecoveryTests
         manager.TrackText("Models", "game:foo", "foo", "target", "first", dirty: true, TimeSpan.Zero);
         manager.TrackText("Models", "game:foo", "foo", "target", "second", dirty: true, TimeSpan.Zero);
 
-        DevToolsRecoverySnapshot snapshot = Assert.Single(manager.ListSnapshots());
-        Assert.Equal("second", snapshot.Text);
+        DevToolsRecoverySnapshot metadata = Assert.Single(manager.ListSnapshots());
+        Assert.Null(metadata.Text);
+        Assert.True(manager.TryLoadSnapshot(metadata.RecoveryKey, out DevToolsRecoverySnapshot? snapshot));
+        Assert.Equal("second", snapshot!.Text);
     }
 
     [Fact]
@@ -122,6 +124,105 @@ public sealed class DevToolsBackupRecoveryTests
         Assert.Equal(1, removed);
         DevToolsRecoverySnapshot remaining = Assert.Single(manager.ListSnapshots());
         Assert.Equal("Worldgen", remaining.Editor);
+    }
+
+    [Fact]
+    public void Recovery_LazyCaptureRunsOnlyWhenAutosaveIsDue()
+    {
+        using TempDir temp = new();
+        DateTimeOffset now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        DevToolsRecoveryManager manager = new(temp.PathFor("recovery"), () => now);
+        int captures = 0;
+
+        string Capture()
+        {
+            captures++;
+            return "current draft";
+        }
+
+        manager.TrackText("Models", "game:foo", "foo", "target", Capture, dirty: true, TimeSpan.FromSeconds(5));
+        now = now.AddSeconds(4);
+        manager.TrackText("Models", "game:foo", "foo", "target", Capture, dirty: true, TimeSpan.FromSeconds(5));
+
+        Assert.Equal(0, captures);
+        Assert.Empty(manager.ListSnapshots());
+
+        now = now.AddSeconds(1);
+        manager.TrackText("Models", "game:foo", "foo", "target", Capture, dirty: true, TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, captures);
+        DevToolsRecoverySnapshot metadata = Assert.Single(manager.ListSnapshots());
+        Assert.True(manager.TryLoadSnapshot(metadata.RecoveryKey, out DevToolsRecoverySnapshot? snapshot));
+        Assert.Equal("current draft", snapshot!.Text);
+    }
+
+    [Fact]
+    public void Recovery_FlushPendingCapturesDraftBeforeDeadline()
+    {
+        using TempDir temp = new();
+        DevToolsRecoveryManager manager = new(temp.PathFor("recovery"));
+        int captures = 0;
+
+        manager.TrackText(
+            "Models",
+            "game:foo",
+            "foo",
+            "target",
+            () =>
+            {
+                captures++;
+                return "shutdown draft";
+            },
+            dirty: true,
+            TimeSpan.FromMinutes(1));
+
+        Assert.Equal(0, captures);
+        manager.FlushPending();
+
+        Assert.Equal(1, captures);
+        DevToolsRecoverySnapshot metadata = Assert.Single(manager.ListSnapshots());
+        Assert.True(manager.TryLoadSnapshot(metadata.RecoveryKey, out DevToolsRecoverySnapshot? snapshot));
+        Assert.Equal("shutdown draft", snapshot!.Text);
+    }
+
+    [Fact]
+    public void Recovery_SnapshotListIsCachedUntilContentsChange()
+    {
+        using TempDir temp = new();
+        DevToolsRecoveryManager manager = new(temp.PathFor("recovery"));
+
+        manager.TrackText("Models", "game:foo", "foo", "target", "first", dirty: true, TimeSpan.Zero);
+        IReadOnlyList<DevToolsRecoverySnapshot> first = manager.ListSnapshots();
+
+        Assert.Same(first, manager.ListSnapshots());
+
+        manager.TrackText("Models", "game:foo", "foo", "target", "second", dirty: true, TimeSpan.Zero);
+        IReadOnlyList<DevToolsRecoverySnapshot> second = manager.ListSnapshots();
+
+        Assert.NotSame(first, second);
+        DevToolsRecoverySnapshot metadata = Assert.Single(second);
+        Assert.True(manager.TryLoadSnapshot(metadata.RecoveryKey, out DevToolsRecoverySnapshot? snapshot));
+        Assert.Equal("second", snapshot!.Text);
+    }
+
+    [Fact]
+    public void Recovery_CleanDocumentCancelsLazyCapture()
+    {
+        using TempDir temp = new();
+        DevToolsRecoveryManager manager = new(temp.PathFor("recovery"));
+        int captures = 0;
+        Func<string> capture = () =>
+        {
+            captures++;
+            return "draft";
+        };
+
+        manager.TrackText("Models", "game:foo", "foo", "target", capture, dirty: true, TimeSpan.FromMinutes(1));
+        manager.TrackText("Models", "game:foo", "foo", "target", capture, dirty: false, TimeSpan.FromMinutes(1));
+        manager.FlushPending();
+
+        Assert.Equal(0, captures);
+        Assert.Empty(manager.ListSnapshots());
     }
 
     private sealed class TempDir : IDisposable

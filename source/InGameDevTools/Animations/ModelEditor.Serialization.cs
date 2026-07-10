@@ -439,6 +439,18 @@ public sealed partial class DebugWindowManager
             _modelStatus = "Shape JSON copied to clipboard.";
         }
         ImGui.SameLine();
+        if (ImGui.Button("Paste all##model-json-paste"))
+        {
+            _modelJsonBuffer = ImGui.GetClipboardText();
+            _modelJsonEditing = true;
+            _modelJsonError = "";
+            _modelStatus = $"Replaced the shape JSON buffer with {_modelJsonBuffer.Length:N0} clipboard character(s).";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Replace the whole JSON buffer from the clipboard without the native edit-buffer size limit.");
+        }
+        ImGui.SameLine();
         if (ImGui.Button("Format##model-json-format"))
         {
             if (DevToolsJsonTextTools.TryFormat(_modelJsonBuffer, out string formattedJson, out string formatError))
@@ -463,7 +475,11 @@ public sealed partial class DebugWindowManager
         }
 
         NVector2 available = ImGui.GetContentRegionAvail();
-        ImGui.InputTextMultiline("##model-json-text", ref _modelJsonBuffer, 4_000_000, new NVector2(-1f, Math.Max(160f, available.Y - 4f)));
+        ImGui.InputTextMultiline(
+            "##model-json-text",
+            ref _modelJsonBuffer,
+            DevToolsImGuiTextBuffer.Capacity(_modelJsonBuffer, minimum: 64 * 1024, headroom: 64 * 1024),
+            new NVector2(-1f, Math.Max(160f, available.Y - 4f)));
         _modelJsonEditing = ImGui.IsItemActive();
     }
 

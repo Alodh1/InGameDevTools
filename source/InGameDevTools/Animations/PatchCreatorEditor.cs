@@ -14,6 +14,8 @@ namespace InGameDevTools.Animations;
 
 public sealed partial class DebugWindowManager
 {
+    private const int PatchCreatorSourcePreviewCharacterLimit = 64 * 1024;
+
     private static readonly string[] PatchCreatorKnownCategories =
     [
         "blocktypes",
@@ -49,6 +51,8 @@ public sealed partial class DebugWindowManager
     private string _patchCreatorFilter = "";
     private string _patchCreatorDomainFilter = "";
     private string _patchCreatorCategoryFilter = "";
+    private string[] _patchCreatorDomainOptions = ["All domains"];
+    private string[] _patchCreatorCategoryOptions = ["All categories"];
     private int _patchCreatorAssetIndex;
     private int _patchCreatorOutputFormat;
     private int _patchCreatorTargetMode;
@@ -253,7 +257,7 @@ public sealed partial class DebugWindowManager
 
     private void ExecutePatchCreatorImport(PatchCreatorAssetEntry entry)
     {
-        if (entry.Root == null)
+        if (!EnsurePatchCreatorAssetLoaded(entry) || entry.Root == null)
         {
             _patchCreatorStatus = $"Cannot import invalid patch JSON: {entry.ParseError}";
             return;
@@ -313,6 +317,8 @@ public sealed partial class DebugWindowManager
         _patchCreatorIndexer.Begin();
         _patchCreatorAssets.Clear();
         _visiblePatchCreatorAssets.Clear();
+        _patchCreatorDomainOptions = ["All domains"];
+        _patchCreatorCategoryOptions = ["All categories"];
         _patchCreatorAssetIndex = 0;
 
         // Authored patch files first so the user's saved copies win the duplicate check.
@@ -358,14 +364,72 @@ public sealed partial class DebugWindowManager
 
     private void IndexPatchCreatorAsset(IAsset asset)
     {
-        string sourceText = ReadAssetText(asset);
-        TryParsePatchCreatorJson(sourceText, out JToken? root, out string parseError);
-        _patchCreatorAssets.Add(new PatchCreatorAssetEntry(asset, sourceText, root, parseError));
+        _patchCreatorAssets.Add(new PatchCreatorAssetEntry(asset));
+    }
+
+    private bool EnsurePatchCreatorAssetLoaded(PatchCreatorAssetEntry entry)
+    {
+        if (entry.PayloadLoaded) return true;
+        if (entry.JsonState == PatchCreatorJsonState.Invalid) return false;
+
+        bool wasLoaded = entry.Asset.IsLoaded();
+        try
+        {
+            if (!wasLoaded && !entry.Asset.Origin.TryLoadAsset(entry.Asset))
+            {
+                throw new InvalidOperationException("The asset origin could not load the selected file.");
+            }
+
+            string sourceText = ReadAssetText(entry.Asset);
+            TryParsePatchCreatorJson(sourceText, out JToken? root, out string parseError);
+            entry.SetPayload(sourceText, root, parseError);
+            return root != null;
+        }
+        catch (Exception exception)
+        {
+            entry.SetPayload("", null, exception.Message);
+            _patchCreatorDiagnostics.Exception($"Could not load {entry.Key}", exception);
+            return false;
+        }
+        finally
+        {
+            if (!wasLoaded && !entry.Asset.IsPatched)
+            {
+                entry.Asset.Data = null!;
+            }
+        }
+    }
+
+    private void ReleasePatchCreatorPayloadsExcept(PatchCreatorAssetEntry selected, string? retainedKey = null)
+    {
+        foreach (PatchCreatorAssetEntry entry in _patchCreatorAssets)
+        {
+            if (ReferenceEquals(entry, selected) ||
+                (!string.IsNullOrWhiteSpace(retainedKey) && entry.Key.Equals(retainedKey, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            entry.ReleasePayload();
+        }
     }
 
     private void CompletePatchCreatorIndexing()
     {
         _patchCreatorAssets.Sort((left, right) => string.Compare(left.SortKey, right.SortKey, StringComparison.OrdinalIgnoreCase));
+        _patchCreatorDomainOptions = _patchCreatorAssets
+            .Select(entry => entry.Domain)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(domain => domain.Equals("game", StringComparison.OrdinalIgnoreCase) ? "" : domain, StringComparer.OrdinalIgnoreCase)
+            .Prepend("All domains")
+            .ToArray();
+        _patchCreatorCategoryOptions = _patchCreatorAssets
+            .Select(entry => entry.Category)
+            .Where(category => !string.IsNullOrWhiteSpace(category))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(category => category, StringComparer.OrdinalIgnoreCase)
+            .Prepend("All categories")
+            .ToArray();
         RebuildVisiblePatchCreatorAssets();
         _patchCreatorStatus = $"Indexed {_patchCreatorAssets.Count} JSON asset(s).";
         SyncPatchCreatorSelection();
@@ -430,7 +494,7 @@ public sealed partial class DebugWindowManager
         bool changed = false;
         changed |= ImGui.Combo("Browse##patch-creator-browser-mode", ref _patchCreatorBrowserMode, PatchCreatorBrowserModeLabels, PatchCreatorBrowserModeLabels.Length);
         changed |= ImGui.InputText("Filter##patch-creator-filter", ref _patchCreatorFilter, 256);
-        changed |= ImGuiLayoutHelper.DrawDomainCombo("Domain##patch-creator-domain", ref _patchCreatorDomainFilter, _patchCreatorAssets.Select(entry => entry.Domain));
+        changed |= DrawPatchCreatorDomainCombo();
         changed |= DrawPatchCreatorCategoryCombo();
         if (changed)
         {
@@ -446,43 +510,71 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.BeginChild("##patch-creator-asset-list", new NVector2(-float.Epsilon, -float.Epsilon), true))
         {
-            for (int i = 0; i < _visiblePatchCreatorAssets.Count; i++)
-            {
-                PatchCreatorAssetEntry entry = _visiblePatchCreatorAssets[i];
-                string suffix = entry.Root == null ? " !" : "";
-                if (entry.Authored) suffix += " [authored]";
-                if (ImGui.Selectable($"{entry.Domain}:{entry.AssetPath}{suffix}##patch-creator-asset-{i}", i == _patchCreatorAssetIndex))
-                {
-                    _patchCreatorAssetIndex = i;
-                    SyncPatchCreatorSelection();
-                }
-                if (ImGui.IsItemHovered())
-                {
-                    string kind = entry.IsPatchFile ? "patch file" : "target JSON";
-                    ImGui.SetTooltip($"{kind}\n{entry.Category}\n{entry.Domain}:{entry.AssetPath}\n{(entry.Root == null ? entry.ParseError : "valid JSON")}");
-                }
-            }
+            DrawClippedPatchCreatorAssetRows();
         }
         ImGui.EndChild();
         ImGui.EndChild();
     }
 
+    private void DrawClippedPatchCreatorAssetRows()
+    {
+        float rowHeight = Math.Max(1f, ImGui.GetTextLineHeightWithSpacing());
+        float visibleHeight = Math.Max(rowHeight, ImGui.GetContentRegionAvail().Y);
+        float scrollY = Math.Max(0f, ImGui.GetScrollY());
+        int first = Math.Clamp((int)Math.Floor(scrollY / rowHeight) - 2, 0, _visiblePatchCreatorAssets.Count);
+        int visibleCount = Math.Max(1, (int)Math.Ceiling(visibleHeight / rowHeight) + 5);
+        int last = Math.Clamp(first + visibleCount, first, _visiblePatchCreatorAssets.Count);
+
+        if (first > 0)
+        {
+            ImGui.Dummy(new NVector2(1f, first * rowHeight));
+        }
+
+        for (int i = first; i < last; i++)
+        {
+            PatchCreatorAssetEntry entry = _visiblePatchCreatorAssets[i];
+            string suffix = entry.JsonState == PatchCreatorJsonState.Invalid ? " !" : "";
+            if (entry.Authored) suffix += " [authored]";
+            if (ImGui.Selectable($"{entry.Domain}:{entry.AssetPath}{suffix}##patch-creator-asset-{i}", i == _patchCreatorAssetIndex))
+            {
+                _patchCreatorAssetIndex = i;
+                SyncPatchCreatorSelection();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                string kind = entry.IsPatchFile ? "patch file" : "target JSON";
+                ImGui.SetTooltip($"{kind}\n{entry.Category}\n{entry.Domain}:{entry.AssetPath}\n{entry.JsonStatusText}");
+            }
+        }
+
+        if (last < _visiblePatchCreatorAssets.Count)
+        {
+            ImGui.Dummy(new NVector2(1f, (_visiblePatchCreatorAssets.Count - last) * rowHeight));
+        }
+    }
+
     private bool DrawPatchCreatorCategoryCombo()
     {
-        string[] categories = _patchCreatorAssets
-            .Select(entry => entry.Category)
-            .Where(category => !string.IsNullOrWhiteSpace(category))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(category => category, StringComparer.OrdinalIgnoreCase)
-            .Prepend("All categories")
-            .ToArray();
         int current = string.IsNullOrWhiteSpace(_patchCreatorCategoryFilter)
             ? 0
-            : Math.Max(0, Array.FindIndex(categories, category => category.Equals(_patchCreatorCategoryFilter, StringComparison.OrdinalIgnoreCase)));
-        bool changed = ImGui.Combo("Category##patch-creator-category", ref current, categories, categories.Length);
+            : Math.Max(0, Array.FindIndex(_patchCreatorCategoryOptions, category => category.Equals(_patchCreatorCategoryFilter, StringComparison.OrdinalIgnoreCase)));
+        bool changed = ImGui.Combo("Category##patch-creator-category", ref current, _patchCreatorCategoryOptions, _patchCreatorCategoryOptions.Length);
         if (changed)
         {
-            _patchCreatorCategoryFilter = current <= 0 ? "" : categories[current];
+            _patchCreatorCategoryFilter = current <= 0 ? "" : _patchCreatorCategoryOptions[current];
+        }
+        return changed;
+    }
+
+    private bool DrawPatchCreatorDomainCombo()
+    {
+        int current = string.IsNullOrWhiteSpace(_patchCreatorDomainFilter)
+            ? 0
+            : Math.Max(0, Array.FindIndex(_patchCreatorDomainOptions, domain => domain.Equals(_patchCreatorDomainFilter, StringComparison.OrdinalIgnoreCase)));
+        bool changed = ImGui.Combo("Domain##patch-creator-domain", ref current, _patchCreatorDomainOptions, _patchCreatorDomainOptions.Length);
+        if (changed)
+        {
+            _patchCreatorDomainFilter = current <= 0 ? "" : _patchCreatorDomainOptions[current];
         }
         return changed;
     }
@@ -490,7 +582,7 @@ public sealed partial class DebugWindowManager
     private void DrawPatchCreatorPathPanel(NVector2 size)
     {
         ImGui.BeginChild("##patch-creator-path", size, true);
-        PatchCreatorAssetEntry? entry = SelectedPatchCreatorSampleAsset;
+        PatchCreatorAssetEntry? entry = _patchCreatorBrowserMode == 1 ? SelectedPatchCreatorAsset : SelectedPatchCreatorSampleAsset;
         ImGui.SeparatorText(_patchCreatorBrowserMode == 1 ? "Patch file" : "Target path");
 
         if (entry == null)
@@ -500,6 +592,8 @@ public sealed partial class DebugWindowManager
             return;
         }
 
+        EnsurePatchCreatorAssetLoaded(entry);
+
         if (entry.IsPatchFile)
         {
             DrawPatchCreatorPatchFilePanel(entry);
@@ -508,7 +602,8 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.TextWrapped($"Sample: {entry.Domain}:{entry.AssetPath}");
-        if (entry.Root == null)
+        JToken? root = entry.Root;
+        if (root == null)
         {
             ImGui.TextColored(new NVector4(1f, 0.35f, 0.25f, 1f), $"Invalid JSON: {entry.ParseError}");
             ImGui.EndChild();
@@ -531,9 +626,16 @@ public sealed partial class DebugWindowManager
         if (ImGui.Button("Use selected path##patch-creator-use-path"))
         {
             _patchCreatorPath = _patchCreatorSelectedPath;
-            if (!string.IsNullOrWhiteSpace(_patchCreatorSelectedTokenJson))
+            string selectedTokenJson = _patchCreatorSelectedTokenJson;
+            if (string.IsNullOrWhiteSpace(selectedTokenJson) &&
+                _patchCreatorSelectedPath.Length == 0 &&
+                entry.Root != null)
             {
-                _patchCreatorValueJson = _patchCreatorSelectedTokenJson;
+                selectedTokenJson = DevToolsPatchJson.ToString(entry.Root, Formatting.Indented);
+            }
+            if (!string.IsNullOrWhiteSpace(selectedTokenJson))
+            {
+                _patchCreatorValueJson = selectedTokenJson;
             }
         }
         ImGui.SameLine();
@@ -545,7 +647,7 @@ public sealed partial class DebugWindowManager
         ImGui.SeparatorText("JSON tree");
         if (ImGui.BeginChild("##patch-creator-json-tree", new NVector2(-float.Epsilon, -float.Epsilon), true))
         {
-            DrawPatchCreatorJsonTree(entry.Root, "", "$");
+            DrawPatchCreatorJsonTree(root, "", "$");
         }
         ImGui.EndChild();
         ImGui.EndChild();
@@ -553,6 +655,7 @@ public sealed partial class DebugWindowManager
 
     private void DrawPatchCreatorPatchFilePanel(PatchCreatorAssetEntry entry)
     {
+        EnsurePatchCreatorAssetLoaded(entry);
         ImGui.TextWrapped($"Patch: {entry.Domain}:{entry.AssetPath}");
         ImGui.TextWrapped(entry.IsJsonPatchesFile ? "Detected format: JsonPatchesLib" : "Detected format: Vanilla patches");
         if (entry.Root == null)
@@ -578,8 +681,15 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SeparatorText("Source preview");
-        string source = entry.SourceText;
-        ImGui.InputTextMultiline("##patch-creator-source-preview", ref source, (uint)Math.Max(4096, source.Length + 1), new NVector2(-float.Epsilon, -float.Epsilon), ImGuiInputTextFlags.ReadOnly);
+        if (entry.SourcePreviewTruncated)
+        {
+            ImGui.TextDisabled($"Showing the first {PatchCreatorSourcePreviewCharacterLimit:N0} of {entry.SourceText.Length:N0} characters. Copy source still copies the complete file.");
+        }
+        if (ImGui.BeginChild("##patch-creator-source-preview", new NVector2(-float.Epsilon, -float.Epsilon), true, ImGuiWindowFlags.HorizontalScrollbar))
+        {
+            ImGui.TextUnformatted(entry.SourcePreview);
+        }
+        ImGui.EndChild();
     }
 
     private void DrawPatchCreatorJsonTree(JToken token, string path, string label)
@@ -725,7 +835,7 @@ public sealed partial class DebugWindowManager
         if (rawTemplate)
         {
             ImGui.TextUnformatted("Raw operation JSON");
-            ImGui.InputTextMultiline("##patch-creator-raw-operation-json", ref _patchCreatorRawOperationJson, 512 * 1024, new NVector2(-float.Epsilon, 160f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline("##patch-creator-raw-operation-json", ref _patchCreatorRawOperationJson, DevToolsImGuiTextBuffer.Capacity(_patchCreatorRawOperationJson, growthLimit: 512 * 1024), new NVector2(-float.Epsilon, 160f), ImGuiInputTextFlags.AllowTabInput);
             if (ImGui.Button("Build raw from fields##patch-creator-build-raw"))
             {
                 if (TryCreateStructuredPatchCreatorOperation(out DevToolsPatchOperationDraft? structured, out string rawError))
@@ -756,7 +866,7 @@ public sealed partial class DebugWindowManager
             if (PatchCreatorOpNeedsValue(op) || (op.Equals("remove", StringComparison.OrdinalIgnoreCase) && CurrentPatchCreatorOutputFormat == DevToolsPatchOutputFormat.JsonPatchesLib))
             {
                 ImGui.TextUnformatted(op.Equals("expression", StringComparison.OrdinalIgnoreCase) ? "Expression" : "Value JSON");
-                ImGui.InputTextMultiline("##patch-creator-value-json", ref _patchCreatorValueJson, 256 * 1024, new NVector2(-float.Epsilon, 92f), ImGuiInputTextFlags.AllowTabInput);
+                ImGui.InputTextMultiline("##patch-creator-value-json", ref _patchCreatorValueJson, DevToolsImGuiTextBuffer.Capacity(_patchCreatorValueJson, growthLimit: 256 * 1024), new NVector2(-float.Epsilon, 92f), ImGuiInputTextFlags.AllowTabInput);
             }
         }
 
@@ -821,7 +931,7 @@ public sealed partial class DebugWindowManager
         if (_patchCreatorConditionMode == 4)
         {
             ImGui.TextUnformatted("isValue JSON");
-            changed |= ImGui.InputTextMultiline("##patch-creator-condition-is-value", ref _patchCreatorConditionValueJson, 64 * 1024, new NVector2(-float.Epsilon, 58f), ImGuiInputTextFlags.AllowTabInput);
+            changed |= ImGui.InputTextMultiline("##patch-creator-condition-is-value", ref _patchCreatorConditionValueJson, DevToolsImGuiTextBuffer.Capacity(_patchCreatorConditionValueJson, growthLimit: 64 * 1024), new NVector2(-float.Epsilon, 58f), ImGuiInputTextFlags.AllowTabInput);
         }
 
         if (changed)
@@ -851,7 +961,7 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.TreeNode("Raw condition JSON##patch-creator-condition-raw"))
         {
-            ImGui.InputTextMultiline("##patch-creator-condition-json", ref _patchCreatorConditionJson, 64 * 1024, new NVector2(-float.Epsilon, 70f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline("##patch-creator-condition-json", ref _patchCreatorConditionJson, DevToolsImGuiTextBuffer.Capacity(_patchCreatorConditionJson, growthLimit: 64 * 1024), new NVector2(-float.Epsilon, 70f), ImGuiInputTextFlags.AllowTabInput);
             ImGui.TreePop();
         }
     }
@@ -999,7 +1109,7 @@ public sealed partial class DebugWindowManager
             }
 
             ImGui.TextUnformatted("Raw dependsOn JSON");
-            ImGui.InputTextMultiline("##patch-creator-dependson-json", ref _patchCreatorDependsOnJson, 128 * 1024, new NVector2(-float.Epsilon, 80f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline("##patch-creator-dependson-json", ref _patchCreatorDependsOnJson, DevToolsImGuiTextBuffer.Capacity(_patchCreatorDependsOnJson, growthLimit: 128 * 1024), new NVector2(-float.Epsilon, 80f), ImGuiInputTextFlags.AllowTabInput);
         }
         finally
         {
@@ -1028,7 +1138,7 @@ public sealed partial class DebugWindowManager
         try
         {
             ImGui.TextWrapped("Unknown/custom operation keys are emitted alongside the structured fields.");
-            ImGui.InputTextMultiline("##patch-creator-extra-json", ref _patchCreatorExtraJson, 128 * 1024, new NVector2(-float.Epsilon, 90f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline("##patch-creator-extra-json", ref _patchCreatorExtraJson, DevToolsImGuiTextBuffer.Capacity(_patchCreatorExtraJson, growthLimit: 128 * 1024), new NVector2(-float.Epsilon, 90f), ImGuiInputTextFlags.AllowTabInput);
         }
         finally
         {
@@ -1137,7 +1247,7 @@ public sealed partial class DebugWindowManager
         ImGui.Combo("Preview side##patch-creator-preview-side", ref _patchCreatorPreviewSideIndex, PatchCreatorPreviewSideLabels, PatchCreatorPreviewSideLabels.Length);
         if (ImGui.TreeNode("Preview settings JSON##patch-creator-preview-settings"))
         {
-            ImGui.InputTextMultiline("##patch-creator-preview-settings-json", ref _patchCreatorPreviewSettingsJson, 64 * 1024, new NVector2(-float.Epsilon, 80f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline("##patch-creator-preview-settings-json", ref _patchCreatorPreviewSettingsJson, DevToolsImGuiTextBuffer.Capacity(_patchCreatorPreviewSettingsJson, growthLimit: 64 * 1024), new NVector2(-float.Epsilon, 80f), ImGuiInputTextFlags.AllowTabInput);
             ImGui.TreePop();
         }
 
@@ -1184,7 +1294,17 @@ public sealed partial class DebugWindowManager
         _patchCreatorPreviewMode = string.IsNullOrWhiteSpace(appliedPreview) ? 0 : Math.Clamp(_patchCreatorPreviewMode, 0, previewModes.Length - 1);
         ImGui.Combo("Preview##patch-creator-preview-mode", ref _patchCreatorPreviewMode, previewModes, previewModes.Length);
         string previewText = _patchCreatorPreviewMode == 1 && !string.IsNullOrWhiteSpace(appliedPreview) ? appliedPreview : patchPreview;
-        ImGui.InputTextMultiline("##patch-creator-preview-json", ref previewText, (uint)Math.Max(4096, previewText.Length + 1024), new NVector2(-float.Epsilon, Math.Max(150f, ImGui.GetContentRegionAvail().Y - 30f)), ImGuiInputTextFlags.ReadOnly);
+        bool previewTruncated = previewText.Length > PatchCreatorSourcePreviewCharacterLimit;
+        if (previewTruncated)
+        {
+            ImGui.TextDisabled($"Showing the first {PatchCreatorSourcePreviewCharacterLimit:N0} of {previewText.Length:N0} preview characters.");
+            previewText = previewText[..PatchCreatorSourcePreviewCharacterLimit];
+        }
+        if (ImGui.BeginChild("##patch-creator-preview-json", new NVector2(-float.Epsilon, Math.Max(150f, ImGui.GetContentRegionAvail().Y - 30f)), true, ImGuiWindowFlags.HorizontalScrollbar))
+        {
+            ImGui.TextUnformatted(previewText);
+        }
+        ImGui.EndChild();
         _patchCreatorDiagnostics.Draw("patch-creator", showDiagnostics);
     }
 
@@ -1203,7 +1323,7 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.TextWrapped("Edit or paste the desired final JSON. Generated operations are conservative add/remove/replace operations.");
-        ImGui.InputTextMultiline("##patch-creator-diff-json", ref _patchCreatorDiffJson, 2 * 1024 * 1024, new NVector2(-float.Epsilon, 150f), ImGuiInputTextFlags.AllowTabInput);
+        ImGui.InputTextMultiline("##patch-creator-diff-json", ref _patchCreatorDiffJson, DevToolsImGuiTextBuffer.Capacity(_patchCreatorDiffJson), new NVector2(-float.Epsilon, 150f), ImGuiInputTextFlags.AllowTabInput);
         if (ImGui.Button("Reset to sample##patch-creator-diff-reset"))
         {
             _patchCreatorDiffJson = DevToolsPatchJson.ToString(entry.Root, Formatting.Indented);
@@ -1940,16 +2060,18 @@ public sealed partial class DebugWindowManager
     private void SyncPatchCreatorSelection()
     {
         PatchCreatorAssetEntry? entry = SelectedPatchCreatorAsset;
-        if (entry?.Root == null) return;
+        if (entry == null || !EnsurePatchCreatorAssetLoaded(entry) || entry.Root == null) return;
         if (entry.IsPatchFile)
         {
+            ReleasePatchCreatorPayloadsExcept(entry, _patchCreatorSampleAssetKey);
             return;
         }
 
         _patchCreatorSampleAssetKey = entry.Key;
+        ReleasePatchCreatorPayloadsExcept(entry);
         _patchCreatorSelectedPath = "";
-        _patchCreatorSelectedTokenJson = DevToolsPatchJson.ToString(entry.Root, Formatting.Indented);
-        _patchCreatorDiffJson = DevToolsPatchJson.ToString(entry.Root, Formatting.Indented);
+        _patchCreatorSelectedTokenJson = "";
+        _patchCreatorDiffJson = "";
         if (_patchCreatorTargetMode == 0)
         {
             _patchCreatorFilePattern = GetPatchCreatorBuilderFile(entry);
@@ -1989,13 +2111,21 @@ public sealed partial class DebugWindowManager
         Vanilla
     }
 
+    private enum PatchCreatorJsonState
+    {
+        Unknown,
+        Valid,
+        Invalid
+    }
+
     private sealed class PatchCreatorAssetEntry
     {
-        public PatchCreatorAssetEntry(IAsset asset, string sourceText, JToken? root, string parseError)
+        private string? _sourceText;
+        private string _sourcePreview = "";
+
+        public PatchCreatorAssetEntry(IAsset asset)
         {
-            SourceText = sourceText;
-            Root = root;
-            ParseError = parseError;
+            Asset = asset;
             Domain = asset.Location.Domain ?? "game";
             AssetPath = asset.Location.Path.Replace('\\', '/');
             Category = GetPatchCreatorCategory(AssetPath);
@@ -2004,11 +2134,17 @@ public sealed partial class DebugWindowManager
                 Category.Equals("jsonpatches", StringComparison.OrdinalIgnoreCase);
             IsJsonPatchesFile = Category.Equals("jsonpatches", StringComparison.OrdinalIgnoreCase);
             Authored = asset.Origin?.GetType().Name.Contains("ToolAuthoredAssetOrigin", StringComparison.OrdinalIgnoreCase) == true;
+            SearchText = $"{Domain}:{AssetPath} {Category}";
         }
 
-        public string SourceText { get; }
-        public JToken? Root { get; }
-        public string ParseError { get; }
+        public IAsset Asset { get; }
+        public string SourceText => _sourceText ?? "";
+        public string SourcePreview => _sourcePreview;
+        public bool SourcePreviewTruncated => _sourceText != null && _sourceText.Length > _sourcePreview.Length;
+        public JToken? Root { get; private set; }
+        public string ParseError { get; private set; } = "";
+        public PatchCreatorJsonState JsonState { get; private set; }
+        public bool PayloadLoaded => Root != null;
         public string Domain { get; }
         public string AssetPath { get; }
         public string Category { get; }
@@ -2017,7 +2153,33 @@ public sealed partial class DebugWindowManager
         public bool IsJsonPatchesFile { get; }
         public bool Authored { get; }
         public string SortKey => $"{Category}:{Domain}:{AssetPath}";
-        public string SearchText => $"{Domain}:{AssetPath} {Category} {SourceText}";
+        public string SearchText { get; }
+        public string JsonStatusText => JsonState switch
+        {
+            PatchCreatorJsonState.Valid => "valid JSON",
+            PatchCreatorJsonState.Invalid => $"invalid JSON: {ParseError}",
+            _ => "JSON is loaded when selected"
+        };
+
+        public void SetPayload(string sourceText, JToken? root, string parseError)
+        {
+            Root = root;
+            ParseError = parseError;
+            JsonState = root == null ? PatchCreatorJsonState.Invalid : PatchCreatorJsonState.Valid;
+            _sourceText = root != null && IsPatchFile ? sourceText : null;
+            _sourcePreview = _sourceText == null
+                ? ""
+                : _sourceText.Length <= PatchCreatorSourcePreviewCharacterLimit
+                    ? _sourceText
+                    : _sourceText[..PatchCreatorSourcePreviewCharacterLimit];
+        }
+
+        public void ReleasePayload()
+        {
+            Root = null;
+            _sourceText = null;
+            _sourcePreview = "";
+        }
 
         private static string GetPatchCreatorCategory(string assetPath)
         {

@@ -18,6 +18,7 @@ public sealed partial class DebugWindowManager
     private static readonly string[] ModelGeneratorToolLabels = ["None", "Prism helper", "Creature generator", "PlayerModel generator", "Clothing generator", "Tool / weapon generator"];
     private const int ModelBrowserMaxVisibleEntries = 600;
     private const int ModelHistoryLimit = 120;
+    private const long ModelHistoryCharacterBudget = 16_000_000;
     private const int ModelCutMaxPiecesPerElement = 512;
     private const string ModelNewDocumentTemplateLocation = "game:shapes/block/basic/cube.json";
 
@@ -2378,7 +2379,7 @@ public sealed partial class DebugWindowManager
             _modelMetadataBuffers[bufferKey] = buffer;
         }
 
-        ImGui.InputTextMultiline($"##model-extra-json-{bufferKey}", ref buffer, 256 * 1024, new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
+        ImGui.InputTextMultiline($"##model-extra-json-{bufferKey}", ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
         _modelMetadataBuffers[bufferKey] = buffer;
 
         if (ImGui.Button($"Apply##model-extra-apply-{bufferKey}"))
@@ -4460,11 +4461,7 @@ public sealed partial class DebugWindowManager
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
             if (!string.Equals(current, _modelPendingEditSnapshot, StringComparison.Ordinal))
             {
-                _modelUndoStack.Add(ModelCaptureHistoryEntry(label, _modelPendingEditSnapshot));
-                if (_modelUndoStack.Count > ModelHistoryLimit)
-                {
-                    _modelUndoStack.RemoveAt(0);
-                }
+                ModelPushHistory(_modelUndoStack, ModelCaptureHistoryEntry(label, _modelPendingEditSnapshot));
                 _modelRedoStack.Clear();
             }
         }
@@ -4478,6 +4475,18 @@ public sealed partial class DebugWindowManager
         }
     }
 
+    private static void ModelPushHistory(List<ModelHistoryEntry> stack, ModelHistoryEntry entry)
+    {
+        stack.Add(entry);
+        long retainedCharacters = stack.Sum(historyEntry => (long)historyEntry.Json.Length);
+        while (stack.Count > 1 &&
+               (stack.Count > ModelHistoryLimit || retainedCharacters > ModelHistoryCharacterBudget))
+        {
+            retainedCharacters -= stack[0].Json.Length;
+            stack.RemoveAt(0);
+        }
+    }
+
     private void ModelUndo()
     {
         if (_modelDoc == null || _modelUndoStack.Count == 0) return;
@@ -4487,7 +4496,7 @@ public sealed partial class DebugWindowManager
         try
         {
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
-            _modelRedoStack.Add(ModelCaptureHistoryEntry(entry.Label, current));
+            ModelPushHistory(_modelRedoStack, ModelCaptureHistoryEntry(entry.Label, current));
             ModelRestoreFromHistory(entry);
             _modelStatus = $"Undid: {entry.Label}.";
         }
@@ -4506,7 +4515,7 @@ public sealed partial class DebugWindowManager
         try
         {
             string current = ModelSerializeDocument(_modelDoc, includeInvisible: true, indented: false);
-            _modelUndoStack.Add(ModelCaptureHistoryEntry(entry.Label, current));
+            ModelPushHistory(_modelUndoStack, ModelCaptureHistoryEntry(entry.Label, current));
             ModelRestoreFromHistory(entry);
             _modelStatus = $"Redid: {entry.Label}.";
         }

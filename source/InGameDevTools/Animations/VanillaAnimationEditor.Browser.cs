@@ -761,21 +761,14 @@ public sealed partial class DebugWindowManager
 
         IReadOnlyList<VanillaBlockOption> options = _vanillaIndex.GetBlockOptions();
         string blockFilter = _vanillaBlockFilter.Trim();
-        List<int> visible = [];
-        for (int index = 0; index < options.Count; index++)
-        {
-            if (!ImGuiLayoutHelper.MatchesDomain(_vanillaDomainFilter, options[index].Domain)) continue;
-            if (string.IsNullOrWhiteSpace(blockFilter) || options[index].SearchText.Contains(blockFilter, StringComparison.OrdinalIgnoreCase))
-            {
-                visible.Add(index);
-            }
-        }
-
         string preview = _vanillaIndex.SelectedBlockLabel ?? "Select block";
         if (ImGui.BeginCombo("Block##vanilla-block", preview))
         {
-            foreach (int index in visible)
+            for (int index = 0; index < options.Count; index++)
             {
+                if (!ImGuiLayoutHelper.MatchesDomain(_vanillaDomainFilter, options[index].Domain)) continue;
+                if (!string.IsNullOrWhiteSpace(blockFilter) && !options[index].SearchText.Contains(blockFilter, StringComparison.OrdinalIgnoreCase)) continue;
+
                 bool selected = _vanillaIndex.IsSelectedBlockOption(options[index]);
                 if (ImGui.Selectable($"{options[index].Label}##vanilla-block-{index}", selected))
                 {

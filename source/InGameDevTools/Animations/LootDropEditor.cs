@@ -644,7 +644,7 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.TreeNode($"Attributes JSON##loot-drop-attrs-{index}"))
         {
-            changed |= ImGui.InputTextMultiline($"##loot-drop-attrs-text-{index}", ref draft.AttributesJson, 64 * 1024, new NVector2(-float.Epsilon, 100f), ImGuiInputTextFlags.AllowTabInput);
+            changed |= ImGui.InputTextMultiline($"##loot-drop-attrs-text-{index}", ref draft.AttributesJson, DevToolsImGuiTextBuffer.Capacity(draft.AttributesJson), new NVector2(-float.Epsilon, 100f), ImGuiInputTextFlags.AllowTabInput);
             if (!string.IsNullOrWhiteSpace(draft.AttributesJson) && TryParseJsonToken(draft.AttributesJson) == null)
             {
                 ImGui.TextColored(new NVector4(1f, 0.38f, 0.32f, 1f), "Attributes JSON is malformed.");
@@ -731,7 +731,12 @@ public sealed partial class DebugWindowManager
         }
 
         ImGui.SeparatorText("Trade JSON");
-        if (ImGui.InputTextMultiline("##loot-trade-json", ref _lootDropTradeJson, 1024 * 1024, new NVector2(-float.Epsilon, Math.Max(180f, ImGui.GetContentRegionAvail().Y)), ImGuiInputTextFlags.AllowTabInput))
+        if (ImGui.InputTextMultiline(
+                "##loot-trade-json",
+                ref _lootDropTradeJson,
+                DevToolsImGuiTextBuffer.Capacity(_lootDropTradeJson, minimum: 64 * 1024, headroom: 64 * 1024, growthLimit: 1024 * 1024),
+                new NVector2(-float.Epsilon, Math.Max(180f, ImGui.GetContentRegionAvail().Y)),
+                ImGuiInputTextFlags.AllowTabInput))
         {
             OnLootDropDraftChanged();
         }
@@ -832,7 +837,7 @@ public sealed partial class DebugWindowManager
                 buffer = item["attributes"]?.ToString(Formatting.Indented) ?? "{}";
             }
 
-            ImGui.InputTextMultiline($"##loot-trade-attrs-text-{propertyName}-{index}", ref buffer, 64 * 1024, new NVector2(-float.Epsilon, 104f), ImGuiInputTextFlags.AllowTabInput);
+            ImGui.InputTextMultiline($"##loot-trade-attrs-text-{propertyName}-{index}", ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-float.Epsilon, 104f), ImGuiInputTextFlags.AllowTabInput);
             _lootDropJsonFieldBuffers[bufferKey] = buffer;
 
             if (ImGui.Button($"Apply attributes##loot-trade-apply-attrs-{propertyName}-{index}"))
@@ -999,7 +1004,7 @@ public sealed partial class DebugWindowManager
             buffer = item[fieldName]?.ToString(Formatting.Indented) ?? "null";
         }
 
-        ImGui.InputTextMultiline($"##loot-trade-advanced-json-{listPropertyName}-{index}-{fieldName}", ref buffer, 128 * 1024, new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
+        ImGui.InputTextMultiline($"##loot-trade-advanced-json-{listPropertyName}-{index}-{fieldName}", ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput);
         _lootDropJsonFieldBuffers[bufferKey] = buffer;
 
         bool changed = false;

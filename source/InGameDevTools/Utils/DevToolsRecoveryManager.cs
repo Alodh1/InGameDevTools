@@ -1,5 +1,4 @@
 using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 
 namespace InGameDevTools.Utils;
 
@@ -8,7 +7,11 @@ internal sealed class DevToolsRecoveryManager
     private const string LatestFileName = "latest.json";
     private readonly string _root;
     private readonly Func<DateTimeOffset> _now;
-    private readonly Dictionary<string, PendingRecoverySnapshot> _pending = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, PendingRecoveryCapture> _pending = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DevToolsRecoverySnapshot> _snapshots = new(StringComparer.Ordinal);
+    private IReadOnlyList<DevToolsRecoverySnapshot> _snapshotList = Array.Empty<DevToolsRecoverySnapshot>();
+    private bool _snapshotCacheLoaded;
+    private bool _snapshotListDirty = true;
 
     public DevToolsRecoveryManager(string root, Func<DateTimeOffset>? now = null)
     {
@@ -28,16 +31,31 @@ internal sealed class DevToolsRecoveryManager
         bool dirty,
         TimeSpan delay)
     {
-        string recoveryKey = BuildRecoveryKey(editor, documentKey);
-        if (!dirty)
-        {
-            _pending.Remove(recoveryKey);
-            Discard(recoveryKey);
-            return;
-        }
+        TrackText(editor, documentKey, documentLabel, targetPath, () => text, dirty, delay);
+    }
 
-        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(text);
-        TrackPayload(editor, documentKey, documentLabel, targetPath, "text", text, null, bytes, delay);
+    public void TrackText(
+        string editor,
+        string documentKey,
+        string documentLabel,
+        string targetPath,
+        Func<string> captureText,
+        bool dirty,
+        TimeSpan delay)
+    {
+        ArgumentNullException.ThrowIfNull(captureText);
+        TrackCapture(
+            editor,
+            documentKey,
+            documentLabel,
+            targetPath,
+            dirty,
+            delay,
+            () =>
+            {
+                string text = captureText();
+                return new CapturedRecoveryPayload("text", text, null, System.Text.Encoding.UTF8.GetBytes(text));
+            });
     }
 
     public void TrackBinary(
@@ -49,69 +67,101 @@ internal sealed class DevToolsRecoveryManager
         bool dirty,
         TimeSpan delay)
     {
-        string recoveryKey = BuildRecoveryKey(editor, documentKey);
-        if (!dirty)
-        {
-            _pending.Remove(recoveryKey);
-            Discard(recoveryKey);
-            return;
-        }
+        TrackBinary(editor, documentKey, documentLabel, targetPath, () => bytes, dirty, delay);
+    }
 
-        TrackPayload(editor, documentKey, documentLabel, targetPath, "binary-base64", null, Convert.ToBase64String(bytes), bytes, delay);
+    public void TrackBinary(
+        string editor,
+        string documentKey,
+        string documentLabel,
+        string targetPath,
+        Func<byte[]> captureBytes,
+        bool dirty,
+        TimeSpan delay)
+    {
+        ArgumentNullException.ThrowIfNull(captureBytes);
+        TrackCapture(
+            editor,
+            documentKey,
+            documentLabel,
+            targetPath,
+            dirty,
+            delay,
+            () =>
+            {
+                byte[] bytes = captureBytes();
+                return new CapturedRecoveryPayload("binary-base64", null, null, bytes);
+            });
     }
 
     public void FlushPending()
     {
-        foreach (PendingRecoverySnapshot pending in _pending.Values.ToList())
+        DateTimeOffset now = _now();
+        foreach (PendingRecoveryCapture pending in _pending.Values.ToArray())
         {
-            WriteSnapshot(pending.Snapshot);
-            _pending.Remove(pending.Snapshot.RecoveryKey);
+            TryCaptureAndWrite(pending, now);
         }
+
+        _pending.Clear();
     }
 
     public IReadOnlyList<DevToolsRecoverySnapshot> ListSnapshots()
     {
-        if (!Directory.Exists(_root)) return [];
-
-        List<DevToolsRecoverySnapshot> snapshots = [];
-        foreach (string path in Directory.EnumerateFiles(_root, LatestFileName, SearchOption.AllDirectories))
+        EnsureSnapshotCacheLoaded();
+        if (_snapshotListDirty)
         {
-            try
-            {
-                DevToolsRecoverySnapshot? snapshot = JsonConvert.DeserializeObject<DevToolsRecoverySnapshot>(File.ReadAllText(path));
-                if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.RecoveryKey)) continue;
-                snapshots.Add(snapshot);
-            }
-            catch
-            {
-                // Corrupt recovery files should not break the editor.
-            }
+            _snapshotList = _snapshots.Values
+                .OrderByDescending(snapshot => snapshot.UpdatedUtc)
+                .ToArray();
+            _snapshotListDirty = false;
         }
 
-        return snapshots
-            .OrderByDescending(snapshot => snapshot.UpdatedUtc)
-            .ToArray();
+        return _snapshotList;
+    }
+
+    public bool TryLoadSnapshot(string recoveryKey, out DevToolsRecoverySnapshot? snapshot)
+    {
+        snapshot = null;
+        if (string.IsNullOrWhiteSpace(recoveryKey)) return false;
+
+        string path = Path.Combine(FolderForRecoveryKey(recoveryKey), LatestFileName);
+        try
+        {
+            if (!File.Exists(path)) return false;
+            snapshot = JsonConvert.DeserializeObject<DevToolsRecoverySnapshot>(File.ReadAllText(path));
+            return snapshot != null &&
+                string.Equals(snapshot.RecoveryKey, recoveryKey, StringComparison.Ordinal);
+        }
+        catch
+        {
+            snapshot = null;
+            return false;
+        }
     }
 
     public bool Discard(string recoveryKey)
     {
         if (string.IsNullOrWhiteSpace(recoveryKey)) return false;
         _pending.Remove(recoveryKey);
+        EnsureSnapshotCacheLoaded();
+
         string folder = FolderForRecoveryKey(recoveryKey);
+        bool folderExisted = Directory.Exists(folder);
         try
         {
-            if (Directory.Exists(folder))
+            if (folderExisted)
             {
                 Directory.Delete(folder, recursive: true);
-                return true;
             }
+
+            bool removed = _snapshots.Remove(recoveryKey);
+            if (removed) _snapshotListDirty = true;
+            return folderExisted || removed;
         }
         catch
         {
             return false;
         }
-
-        return false;
     }
 
     public int DiscardWhere(Func<DevToolsRecoverySnapshot, bool> predicate)
@@ -141,45 +191,91 @@ internal sealed class DevToolsRecoveryManager
         return $"{editor.Trim()}::{documentKey.Trim()}";
     }
 
-    private void TrackPayload(
+    private void TrackCapture(
         string editor,
         string documentKey,
         string documentLabel,
         string targetPath,
-        string payloadKind,
-        string? text,
-        string? binaryBase64,
-        byte[] payloadBytes,
-        TimeSpan delay)
+        bool dirty,
+        TimeSpan delay,
+        Func<CapturedRecoveryPayload> capture)
     {
         string recoveryKey = BuildRecoveryKey(editor, documentKey);
-        string contentHash = DevToolsFileBackupManager.Sha256Hex(payloadBytes);
-        DateTimeOffset now = _now();
-
-        if (_pending.TryGetValue(recoveryKey, out PendingRecoverySnapshot? existing))
+        if (!dirty)
         {
-            if (existing.Snapshot.ContentSha256 == contentHash && now < existing.WriteAfterUtc) return;
-
-            existing.Snapshot = CreateSnapshot(recoveryKey, editor, documentLabel, targetPath, payloadKind, text, binaryBase64, contentHash, now);
-            if (now >= existing.WriteAfterUtc)
+            bool wasPending = _pending.Remove(recoveryKey);
+            EnsureSnapshotCacheLoaded();
+            if (wasPending || _snapshots.ContainsKey(recoveryKey))
             {
-                WriteSnapshot(existing.Snapshot);
-                existing.WriteAfterUtc = now + delay;
+                Discard(recoveryKey);
             }
             return;
         }
 
-        DevToolsRecoverySnapshot current = CreateSnapshot(recoveryKey, editor, documentLabel, targetPath, payloadKind, text, binaryBase64, contentHash, now);
-        PendingRecoverySnapshot pending = new(current, now + delay);
-        _pending[recoveryKey] = pending;
-        if (delay <= TimeSpan.Zero)
+        DateTimeOffset now = _now();
+        TimeSpan safeDelay = delay > TimeSpan.Zero ? delay : TimeSpan.Zero;
+        if (!_pending.TryGetValue(recoveryKey, out PendingRecoveryCapture? pending))
         {
-            WriteSnapshot(current);
-            _pending.Remove(recoveryKey);
+            pending = new PendingRecoveryCapture(
+                recoveryKey,
+                editor,
+                documentLabel,
+                targetPath,
+                capture,
+                now + safeDelay);
+            _pending[recoveryKey] = pending;
+        }
+        else
+        {
+            pending.Editor = editor;
+            pending.DocumentLabel = documentLabel;
+            pending.TargetPath = targetPath;
+            pending.Capture = capture;
+        }
+
+        if (now < pending.WriteAfterUtc) return;
+
+        TryCaptureAndWrite(pending, now);
+        pending.WriteAfterUtc = now + safeDelay;
+    }
+
+    private bool TryCaptureAndWrite(PendingRecoveryCapture pending, DateTimeOffset now)
+    {
+        try
+        {
+            CapturedRecoveryPayload payload = pending.Capture();
+            string contentHash = DevToolsFileBackupManager.Sha256Hex(payload.Bytes);
+            EnsureSnapshotCacheLoaded();
+            if (_snapshots.TryGetValue(pending.RecoveryKey, out DevToolsRecoverySnapshot? persisted) &&
+                string.Equals(persisted.ContentSha256, contentHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string? binaryBase64 = payload.PayloadKind == "binary-base64"
+                ? Convert.ToBase64String(payload.Bytes)
+                : payload.BinaryBase64;
+            DevToolsRecoverySnapshot snapshot = CreateSnapshot(
+                pending.RecoveryKey,
+                pending.Editor,
+                pending.DocumentLabel,
+                pending.TargetPath,
+                payload.PayloadKind,
+                payload.Text,
+                binaryBase64,
+                contentHash,
+                now);
+            WriteSnapshot(snapshot);
+            return true;
+        }
+        catch
+        {
+            // Recovery must never throw out of an editor draw or shutdown path.
+            return false;
         }
     }
 
-    private DevToolsRecoverySnapshot CreateSnapshot(
+    private static DevToolsRecoverySnapshot CreateSnapshot(
         string recoveryKey,
         string editor,
         string documentLabel,
@@ -212,6 +308,52 @@ internal sealed class DevToolsRecoveryManager
         string tempPath = path + ".tmp";
         File.WriteAllText(tempPath, JsonConvert.SerializeObject(snapshot, Formatting.Indented));
         File.Move(tempPath, path, overwrite: true);
+
+        EnsureSnapshotCacheLoaded();
+        _snapshots[snapshot.RecoveryKey] = WithoutPayload(snapshot);
+        _snapshotListDirty = true;
+    }
+
+    private void EnsureSnapshotCacheLoaded()
+    {
+        if (_snapshotCacheLoaded) return;
+        _snapshotCacheLoaded = true;
+        if (!Directory.Exists(_root)) return;
+
+        foreach (string path in Directory.EnumerateFiles(_root, LatestFileName, SearchOption.AllDirectories))
+        {
+            try
+            {
+                DevToolsRecoverySnapshot? snapshot = JsonConvert.DeserializeObject<DevToolsRecoverySnapshot>(File.ReadAllText(path));
+                if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.RecoveryKey)) continue;
+
+                if (!_snapshots.TryGetValue(snapshot.RecoveryKey, out DevToolsRecoverySnapshot? existing) ||
+                    snapshot.UpdatedUtc >= existing.UpdatedUtc)
+                {
+                    _snapshots[snapshot.RecoveryKey] = WithoutPayload(snapshot);
+                }
+            }
+            catch
+            {
+                // Corrupt recovery files should not break the editor.
+            }
+        }
+
+        _snapshotListDirty = true;
+    }
+
+    private static DevToolsRecoverySnapshot WithoutPayload(DevToolsRecoverySnapshot snapshot)
+    {
+        return new DevToolsRecoverySnapshot
+        {
+            RecoveryKey = snapshot.RecoveryKey,
+            Editor = snapshot.Editor,
+            DocumentLabel = snapshot.DocumentLabel,
+            TargetPath = snapshot.TargetPath,
+            PayloadKind = snapshot.PayloadKind,
+            ContentSha256 = snapshot.ContentSha256,
+            UpdatedUtc = snapshot.UpdatedUtc
+        };
     }
 
     private string FolderForRecoveryKey(string recoveryKey)
@@ -220,11 +362,27 @@ internal sealed class DevToolsRecoveryManager
         return Path.Combine(_root, hash[..2], hash);
     }
 
-    private sealed class PendingRecoverySnapshot(DevToolsRecoverySnapshot snapshot, DateTimeOffset writeAfterUtc)
+    private sealed class PendingRecoveryCapture(
+        string recoveryKey,
+        string editor,
+        string documentLabel,
+        string targetPath,
+        Func<CapturedRecoveryPayload> capture,
+        DateTimeOffset writeAfterUtc)
     {
-        public DevToolsRecoverySnapshot Snapshot { get; set; } = snapshot;
+        public string RecoveryKey { get; } = recoveryKey;
+        public string Editor { get; set; } = editor;
+        public string DocumentLabel { get; set; } = documentLabel;
+        public string TargetPath { get; set; } = targetPath;
+        public Func<CapturedRecoveryPayload> Capture { get; set; } = capture;
         public DateTimeOffset WriteAfterUtc { get; set; } = writeAfterUtc;
     }
+
+    private sealed record CapturedRecoveryPayload(
+        string PayloadKind,
+        string? Text,
+        string? BinaryBase64,
+        byte[] Bytes);
 }
 
 internal sealed class DevToolsRecoverySnapshot

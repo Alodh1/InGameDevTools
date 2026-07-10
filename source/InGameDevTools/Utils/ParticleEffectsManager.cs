@@ -25,7 +25,7 @@ public struct ParticleEffectsPacket
     public float Intensity { get; set; }
 }
 
-public class ParticleEffectsManager
+public class ParticleEffectsManager : IDisposable
 {
     public const string ParticleEffectsFileName = "particle-effects.json";
     public const string CustomEffectsFileName = "ingamedevtools-custom-particles.json";
@@ -52,11 +52,14 @@ public class ParticleEffectsManager
     public void LoadAssets()
     {
         _particleEffects.Clear();
+        _particleFamiliesDirty = true;
+        InvalidateParticlePropertyCaches();
         ClearPreviewReferenceModelCache();
+        ParticleEditor.ClearCachedState();
         _scanDiagnostics = new ParticleAssetScanDiagnostics();
+        _runtimeParticleAssetsLoaded = false;
+        _embeddedParticleAssetsLoaded = false;
         LoadNamedParticleEffectAssets(_api);
-        LoadRuntimeParticleAssets(_api);
-        LoadEmbeddedParticleAssets(_api);
         LoadCustomParticleEffects(_api);
 
         if (_verboseParticleScanLog)
@@ -108,6 +111,11 @@ public class ParticleEffectsManager
         foreach (IAsset asset in api.Assets.AllAssets.Values)
         {
             _scanDiagnostics.AllAssets++;
+            if (!LooksLikeEmbeddedParticleAsset(asset))
+            {
+                continue;
+            }
+
             string location = asset.Location?.ToString() ?? "";
             if (string.IsNullOrWhiteSpace(location))
             {
@@ -121,18 +129,22 @@ public class ParticleEffectsManager
 
         foreach (IAsset asset in assetsByLocation.Values)
         {
-            if (!LooksLikeJsonAsset(asset))
-            {
-                AddVerboseSample(_scanDiagnostics.SkippedSamples, $"skip non-json candidate: {asset.Location}");
-                continue;
-            }
-
             _scanDiagnostics.JsonCandidateAssets++;
 
-            IAsset loadedAsset = asset;
+            bool wasLoaded = asset.IsLoaded();
             try
             {
-                loadedAsset = api.Assets.TryGet(asset.Location, true) ?? asset;
+                if (!wasLoaded)
+                {
+                    if (!asset.Origin.TryLoadAsset(asset))
+                    {
+                        _scanDiagnostics.TextReadFailures++;
+                        AddVerboseSample(_scanDiagnostics.SkippedSamples, $"load failed: {asset.Location}");
+                        continue;
+                    }
+
+                    _scanDiagnostics.TemporarilyLoadedJsonAssets++;
+                }
             }
             catch (Exception exception)
             {
@@ -142,29 +154,18 @@ public class ParticleEffectsManager
                 continue;
             }
 
-            string text;
             try
             {
-                text = loadedAsset.ToText();
-            }
-            catch (Exception exception)
-            {
-                _scanDiagnostics.TextReadFailures++;
-                _diagnostics.Warning($"Particle asset text read failed: {asset.Location}", exception.ToString());
-                AddVerboseSample(_scanDiagnostics.SkippedSamples, $"text read failed: {asset.Location} ({exception.Message})");
-                continue;
-            }
+                byte[] data = asset.Data;
+                if (!ContainsAsciiIgnoreCase(data, "particleProperties"))
+                {
+                    AddVerboseSample(_scanDiagnostics.SkippedSamples, $"no particleProperties: {asset.Location}");
+                    continue;
+                }
 
-            if (!text.Contains("particleProperties", StringComparison.OrdinalIgnoreCase))
-            {
-                AddVerboseSample(_scanDiagnostics.SkippedSamples, $"no particleProperties: {asset.Location}");
-                continue;
-            }
+                _scanDiagnostics.AssetsWithParticleProperties++;
+                string text = System.Text.Encoding.UTF8.GetString(data);
 
-            _scanDiagnostics.AssetsWithParticleProperties++;
-
-            try
-            {
                 if (!DevToolsJson.TryParseToken(text, out JToken? root, out string error) || root == null)
                 {
                     _scanDiagnostics.ParseFailures++;
@@ -191,7 +192,39 @@ public class ParticleEffectsManager
                 _diagnostics.Exception($"Embedded particle asset parse failed for {asset.Location}", exception);
                 LoggerUtil.Warn(api, this, $"Error on parsing embedded particle assets for '{asset.Location}':\n{exception}");
             }
+            finally
+            {
+                // Match the engine's own UnloadUnpatchedAssets behavior. Assets that were already loaded
+                // remain untouched; scan-only bytes are released immediately instead of accumulating in
+                // the global asset registry for the rest of the session.
+                if (!wasLoaded && !asset.IsPatched)
+                {
+                    asset.Data = null!;
+                }
+            }
         }
+    }
+
+    private static bool ContainsAsciiIgnoreCase(ReadOnlySpan<byte> data, string value)
+    {
+        if (data.Length < value.Length) return false;
+
+        for (int offset = 0; offset <= data.Length - value.Length; offset++)
+        {
+            int index = 0;
+            for (; index < value.Length; index++)
+            {
+                byte actual = data[offset + index];
+                char expected = value[index];
+                if (actual >= (byte)'A' && actual <= (byte)'Z') actual += (byte)('a' - 'A');
+                if (expected >= 'A' && expected <= 'Z') expected = (char)(expected + ('a' - 'A'));
+                if (actual != (byte)expected) break;
+            }
+
+            if (index == value.Length) return true;
+        }
+
+        return false;
     }
 
     private void LoadRuntimeParticleAssets(ICoreAPI api)
@@ -302,6 +335,8 @@ public class ParticleEffectsManager
             }
 
             _particleEffects[finalKey] = new ParticleEffectEntry(finalKey, source, sourceKind, particleProperties);
+            _particleFamiliesDirty = true;
+            InvalidateParticlePropertyCaches();
             return true;
         }
         catch (Exception exception)
@@ -325,6 +360,8 @@ public class ParticleEffectsManager
             }
 
             _particleEffects[finalKey] = new ParticleEffectEntry(finalKey, source, sourceKind, particleProperties);
+            _particleFamiliesDirty = true;
+            InvalidateParticlePropertyCaches();
             return true;
         }
         catch (Exception exception)
@@ -335,24 +372,27 @@ public class ParticleEffectsManager
         }
     }
 
-    private static bool LooksLikeJsonAsset(IAsset asset)
+    private static bool LooksLikeEmbeddedParticleAsset(IAsset asset)
     {
-        string name = asset.Name ?? "";
         string path = asset.Location?.Path ?? "";
-        if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        return IsEmbeddedParticleAssetPath(path);
+    }
+
+    internal static bool IsEmbeddedParticleAssetPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) ||
+            !path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
         {
-            return true;
+            return false;
         }
 
         string firstPathPart = path.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
-        return firstPathPart.Equals("blocktypes", StringComparison.OrdinalIgnoreCase) ||
+        bool supportedCategory =
+            firstPathPart.Equals("blocktypes", StringComparison.OrdinalIgnoreCase) ||
             firstPathPart.Equals("itemtypes", StringComparison.OrdinalIgnoreCase) ||
             firstPathPart.Equals("entities", StringComparison.OrdinalIgnoreCase) ||
-            firstPathPart.Equals("config", StringComparison.OrdinalIgnoreCase) ||
-            firstPathPart.Equals("recipes", StringComparison.OrdinalIgnoreCase) ||
-            firstPathPart.Equals("worldproperties", StringComparison.OrdinalIgnoreCase) ||
-            firstPathPart.Equals("patches", StringComparison.OrdinalIgnoreCase);
+            firstPathPart.Equals("config", StringComparison.OrdinalIgnoreCase);
+        return supportedCategory;
     }
 
     private static string BuildParticleSource(AssetLocation location)
@@ -484,12 +524,20 @@ public class ParticleEffectsManager
     public AdvancedParticleProperties Get(string code, string domain)
     {
         string key = $"{domain}:{code}";
-        if (!_particleEffects.TryGetValue(key, out ParticleEffectEntry? entry)) throw new InvalidOperationException($"Particle effect '{key}' not found");
+        if (!_particleEffects.TryGetValue(key, out ParticleEffectEntry? entry))
+        {
+            EnsureParticleEditorAssetsLoaded();
+        }
+        if (!_particleEffects.TryGetValue(key, out entry)) throw new InvalidOperationException($"Particle effect '{key}' not found");
         return entry.Properties;
     }
     public AdvancedParticleProperties Get(string code)
     {
-        if (!_particleEffects.TryGetValue(code, out ParticleEffectEntry? entry)) throw new InvalidOperationException($"Particle effect '{code}' not found");
+        if (!_particleEffects.TryGetValue(code, out ParticleEffectEntry? entry))
+        {
+            EnsureParticleEditorAssetsLoaded();
+        }
+        if (!_particleEffects.TryGetValue(code, out entry)) throw new InvalidOperationException($"Particle effect '{code}' not found");
         return entry.Properties;
     }
     public void Spawn(EntityPlayer player, string code, Vector3 position, Vector3 velocity, float intensity)
@@ -528,6 +576,7 @@ public class ParticleEffectsManager
 
     public void DrawEditor(string id, float deltaSeconds, float uiScale, DebugWindowManager.DevToolsLiveApplyManager? liveApplyManager = null, bool showDiagnostics = false)
     {
+        EnsureParticleEditorAssetsLoaded();
         List<ParticleEffectFamily> families = BuildParticleFamilies();
         ParticleEffectFamily[] visibleFamilies = families
             .Where(family => ImGuiLayoutHelper.MatchesDomain(_particleDomainFilter, family.Domain))
@@ -631,12 +680,16 @@ public class ParticleEffectsManager
         else
         {
             AdvancedParticleProperties particleProperties = selectedEmitter.Properties;
-            JToken before = ParticlePropertiesToToken(particleProperties);
+            bool captureChange = HasParticleEditorInputThisFrame();
+            JToken? before = captureChange ? ParticlePropertiesToToken(particleProperties) : null;
             ParticleEditor.Draw($"{id}-{selectedFamily.Key}-{_selectedParticleEmitterIndex}", particleProperties);
-            JToken after = ParticlePropertiesToToken(particleProperties);
-            if (!JToken.DeepEquals(before, after))
+            if (before != null)
             {
-                ApplyParticleEditorChange(selectedFamily, selectedVariant, _selectedParticleEmitterIndex, before, after, liveApplyManager);
+                JToken after = ParticlePropertiesToToken(particleProperties);
+                if (!JToken.DeepEquals(before, after))
+                {
+                    ApplyParticleEditorChange(selectedFamily, selectedVariant, _selectedParticleEmitterIndex, before, after, liveApplyManager);
+                }
             }
         }
 
@@ -647,6 +700,31 @@ public class ParticleEffectsManager
         }
         _diagnostics.Draw($"{id}-diagnostics", showDiagnostics);
         ImGui.EndChild();
+    }
+
+    private static bool HasParticleEditorInputThisFrame()
+    {
+        ImGuiIOPtr io = ImGui.GetIO();
+        if (ImGui.IsMouseDown(ImGuiMouseButton.Left) ||
+            ImGui.IsMouseClicked(ImGuiMouseButton.Right) ||
+            io.InputQueueCharacters.Size > 0)
+        {
+            return true;
+        }
+
+        return ImGui.IsKeyDown(ImGuiKey.Backspace) ||
+            ImGui.IsKeyDown(ImGuiKey.Delete) ||
+            ImGui.IsKeyDown(ImGuiKey.LeftArrow) ||
+            ImGui.IsKeyDown(ImGuiKey.RightArrow) ||
+            ImGui.IsKeyDown(ImGuiKey.UpArrow) ||
+            ImGui.IsKeyDown(ImGuiKey.DownArrow) ||
+            ImGui.IsKeyPressed(ImGuiKey.Enter) ||
+            ImGui.IsKeyPressed(ImGuiKey.Space) ||
+            (io.KeyCtrl && (
+                ImGui.IsKeyPressed(ImGuiKey.V) ||
+                ImGui.IsKeyPressed(ImGuiKey.X) ||
+                ImGui.IsKeyPressed(ImGuiKey.Z) ||
+                ImGui.IsKeyPressed(ImGuiKey.Y)));
     }
 
     private bool MatchesParticleFilter(ParticleEffectFamily family)
@@ -838,6 +916,7 @@ public class ParticleEffectsManager
             return;
         }
 
+        InvalidateParticlePropertyCaches();
         ClearParticleLiveHashesForEmitter(family, variant, emitterIndex);
         ResetPreview(variant.ReferenceKey);
         string runtimeStatus = ApplyParticleResetLiveEmitter(family, variant, emitterIndex, liveApplyManager);
@@ -856,6 +935,7 @@ public class ParticleEffectsManager
             return;
         }
 
+        InvalidateParticlePropertyCaches();
         ClearParticleLiveHashesForVariant(family, variant);
         ResetPreview(variant.ReferenceKey);
         string runtimeStatus = ApplyParticleResetLiveVariant(variant, liveApplyManager);
@@ -872,6 +952,7 @@ public class ParticleEffectsManager
             return;
         }
 
+        InvalidateParticlePropertyCaches();
         ClearParticleLiveHashesForFamily(family);
         ResetPreview(selectedVariant.ReferenceKey);
         string runtimeStatus = ApplyParticleResetLiveFamily(family, liveApplyManager);
@@ -894,6 +975,11 @@ public class ParticleEffectsManager
 
     private List<ParticleEffectFamily> BuildParticleFamilies()
     {
+        if (!_particleFamiliesDirty)
+        {
+            return _particleFamilies;
+        }
+
         Dictionary<string, ParticleEffectFamilyBuilder> builders = new(StringComparer.OrdinalIgnoreCase);
         foreach (ParticleEffectEntry entry in _particleEffects.Values)
         {
@@ -906,10 +992,12 @@ public class ParticleEffectsManager
             builder.Add(member);
         }
 
-        return builders.Values
+        _particleFamilies = builders.Values
             .Select(builder => builder.Build())
             .OrderBy(family => family.DisplayKey, StringComparer.OrdinalIgnoreCase)
             .ToList();
+        _particleFamiliesDirty = false;
+        return _particleFamilies;
     }
 
     private ParticleEffectMember BuildParticleEffectMember(ParticleEffectEntry entry)
@@ -1010,6 +1098,68 @@ public class ParticleEffectsManager
         _layout.Reset();
     }
 
+    private void EnsureParticleEditorAssetsLoaded()
+    {
+        if (_disposed || (_runtimeParticleAssetsLoaded && _embeddedParticleAssetsLoaded)) return;
+        if (!_runtimeParticleAssetsLoaded)
+        {
+            _runtimeParticleAssetsLoaded = true;
+            LoadRuntimeParticleAssets(_api);
+        }
+        if (!_embeddedParticleAssetsLoaded)
+        {
+            _embeddedParticleAssetsLoaded = true;
+            LoadEmbeddedParticleAssets(_api);
+        }
+        _particleFamiliesDirty = true;
+        InvalidateParticlePropertyCaches();
+        if (_verboseParticleScanLog)
+        {
+            LogParticleScanDiagnostics(_api);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        ClearParticleLiveApplyState();
+        ReleaseEditorResources();
+        _particleEffects.Clear();
+    }
+
+    public void ReleaseEditorResources()
+    {
+        ClearPreviewReferenceModelCache();
+        _previewRenderer3D?.Dispose();
+        _previewRenderer3D = null;
+        _previewParticles.Clear(releaseCapacity: true);
+        _previewBillboards.Clear();
+        _previewBillboards.TrimExcess();
+        _previewMeshInstances.Clear();
+        _previewMeshInstances.TrimExcess();
+        InvalidateParticlePropertyCaches();
+        _particleFamilies.Clear();
+        _particleFamilies.TrimExcess();
+        _particleFamiliesDirty = true;
+        ParticleEditor.ClearCachedState();
+    }
+
+    private void InvalidateParticlePropertyCaches()
+    {
+        unchecked
+        {
+            _particlePropertiesRevision++;
+        }
+
+        _runtimePreviewCacheBlock = null;
+        _runtimePreviewCacheVariant = null;
+        _runtimePreviewCacheOriginal = null;
+        _runtimePreviewCachePatched = null;
+        _runtimePreviewCacheRevision = -1;
+    }
+
     private void ClearPreviewReferenceModelCache()
     {
         foreach (ParticlePreviewPlacement placement in _previewPlacementCache.Values)
@@ -1018,6 +1168,7 @@ public class ParticleEffectsManager
         }
 
         _previewPlacementCache.Clear();
+        _previewPlacementCacheOrder.Clear();
     }
 
     private DevToolsPreview3DRenderer EnsurePreviewRenderer3D()
@@ -1144,6 +1295,9 @@ public class ParticleEffectsManager
         {
             _particleEffects.Remove(key);
         }
+
+        _particleFamiliesDirty = true;
+        InvalidateParticlePropertyCaches();
 
         SaveCustomParticleEffects();
         ClearPreviewReferenceModelCache();
@@ -1302,8 +1456,16 @@ public class ParticleEffectsManager
     {
         if (liveApplyManager == null) return;
 
-        List<ParticleEffectEntry> targets = GetParticleLiveTargets(family, variant, emitterIndex).ToList();
-        bool available = targets.Count > 0 && targets.All(entry => GetParticleLiveTargetKey(entry, out CollectibleObject? collectible, out int index).Length > 0 && collectible != null && index >= 0);
+        bool available = false;
+        foreach (ParticleEffectEntry entry in GetParticleLiveTargets(family, variant, emitterIndex))
+        {
+            available = true;
+            if (GetParticleLiveTargetKey(entry, out CollectibleObject? collectible, out int index).Length == 0 || collectible == null || index < 0)
+            {
+                available = false;
+                break;
+            }
+        }
         string scopeKey = GetParticleLiveScopeKey(family, variant, emitterIndex);
         if (available && liveApplyManager.AutoApply)
         {
@@ -1318,6 +1480,7 @@ public class ParticleEffectsManager
             {
                 liveApplyManager.LastStatus = liveApplyManager.Revert(scopeKey);
                 _particleLiveAppliedHashes.Remove(scopeKey);
+                _particleLiveAppliedRevisions.Remove(scopeKey);
                 ClearParticleRuntimeOverrides(scopeKey);
             }
         }
@@ -1348,14 +1511,22 @@ public class ParticleEffectsManager
     public void ClearParticleLiveApplyState()
     {
         _particleLiveAppliedHashes.Clear();
+        _particleLiveAppliedRevisions.Clear();
         _particleLiveOverrideKeysByScope.Clear();
         ParticleRuntimePatches.ClearOverrides();
     }
 
     private string ApplySelectedParticleLive(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex, DebugWindowManager.DevToolsLiveApplyManager liveApplyManager, bool force = false)
     {
-        List<ParticleEffectEntry> targets = GetParticleLiveTargets(family, variant, emitterIndex).ToList();
         string scopeKey = GetParticleLiveScopeKey(family, variant, emitterIndex);
+        if (!force &&
+            _particleLiveAppliedRevisions.TryGetValue(scopeKey, out int appliedRevision) &&
+            appliedRevision == _particlePropertiesRevision)
+        {
+            return liveApplyManager.LastStatus;
+        }
+
+        List<ParticleEffectEntry> targets = GetParticleLiveTargets(family, variant, emitterIndex).ToList();
         return ApplyParticleLiveEntries(
             scopeKey,
             family.DisplayKey,
@@ -1402,6 +1573,7 @@ public class ParticleEffectsManager
             string.Equals(appliedHash, desiredHash, StringComparison.Ordinal) &&
             string.Equals(currentRuntimeHash, desiredHash, StringComparison.Ordinal))
         {
+            _particleLiveAppliedRevisions[scopeKey] = _particlePropertiesRevision;
             return liveApplyManager.LastStatus;
         }
 
@@ -1419,6 +1591,7 @@ public class ParticleEffectsManager
             },
             $"Applied ParticleProperties[{emitterIndex}] to {runtimeTargets.Count} {displayName} variant(s).");
         _particleLiveAppliedHashes[scopeKey] = desiredHash;
+        _particleLiveAppliedRevisions[scopeKey] = _particlePropertiesRevision;
         return status;
     }
 
@@ -1517,9 +1690,11 @@ public class ParticleEffectsManager
     private void ClearParticleLiveHashesForEmitter(ParticleEffectFamily family, ParticleEffectVariant variant, int emitterIndex)
     {
         _particleLiveAppliedHashes.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
+        _particleLiveAppliedRevisions.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
         foreach (ParticleEffectVariant memberVariant in family.Variants)
         {
             _particleLiveAppliedHashes.Remove(GetParticleVariantLiveScopeKey(memberVariant, emitterIndex));
+            _particleLiveAppliedRevisions.Remove(GetParticleVariantLiveScopeKey(memberVariant, emitterIndex));
         }
     }
 
@@ -1529,6 +1704,8 @@ public class ParticleEffectsManager
         {
             _particleLiveAppliedHashes.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
             _particleLiveAppliedHashes.Remove(GetParticleVariantLiveScopeKey(variant, emitterIndex));
+            _particleLiveAppliedRevisions.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
+            _particleLiveAppliedRevisions.Remove(GetParticleVariantLiveScopeKey(variant, emitterIndex));
         }
     }
 
@@ -1537,9 +1714,11 @@ public class ParticleEffectsManager
         for (int emitterIndex = 0; emitterIndex < family.MaxEmitterCount; emitterIndex++)
         {
             _particleLiveAppliedHashes.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
+            _particleLiveAppliedRevisions.Remove(GetParticleFamilyLiveScopeKey(family, emitterIndex));
             foreach (ParticleEffectVariant variant in family.Variants)
             {
                 _particleLiveAppliedHashes.Remove(GetParticleVariantLiveScopeKey(variant, emitterIndex));
+                _particleLiveAppliedRevisions.Remove(GetParticleVariantLiveScopeKey(variant, emitterIndex));
             }
         }
     }
@@ -1674,6 +1853,8 @@ public class ParticleEffectsManager
     {
         int changed = 0;
         int skipped = 0;
+        ParticleEffectEntry? editedEntry = variant.GetEmitter(emitterIndex);
+        editedEntry?.RefreshModifiedState();
         IEnumerable<ParticleEffectVariant> targetVariants = _particleVariantOnlyEdit ? [variant] : family.Variants;
         foreach (ParticleEffectVariant targetVariant in targetVariants)
         {
@@ -1698,6 +1879,8 @@ public class ParticleEffectsManager
 
             changed++;
         }
+
+        InvalidateParticlePropertyCaches();
 
         _particleStatus = _particleVariantOnlyEdit
             ? $"Edited ParticleProperties[{emitterIndex}] for {variant.DisplayKey}."
@@ -1869,6 +2052,7 @@ public class ParticleEffectsManager
     }
 
     private const float RuntimePreviewTickIntervalSeconds = 0.033f;
+    private const int MaxPreviewPlacementCacheEntries = 12;
 
     private string _particleFilter = "";
     private bool _previewLoop = true;
@@ -1908,15 +2092,30 @@ public class ParticleEffectsManager
     private string _createStatus = "";
     private readonly DevToolsEditorDiagnostics _diagnostics = new("Particles");
     private readonly Dictionary<string, ParticlePreviewPlacement> _previewPlacementCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Queue<string> _previewPlacementCacheOrder = new();
     private readonly Dictionary<string, string> _particleLiveAppliedHashes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _particleLiveAppliedRevisions = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _particleLiveOverrideKeysByScope = new(StringComparer.OrdinalIgnoreCase);
     private DevToolsPreview3DRenderer? _previewRenderer3D;
     private readonly PreviewParticleSystem _previewParticles = new();
+    private readonly List<DevToolsPreviewBillboard> _previewBillboards = new(1024);
+    private readonly List<DevToolsPreviewMeshInstance> _previewMeshInstances = new(1);
     private readonly ICoreAPI _api;
     private readonly Dictionary<string, ParticleEffectEntry> _particleEffects = new(StringComparer.OrdinalIgnoreCase);
+    private List<ParticleEffectFamily> _particleFamilies = [];
+    private bool _particleFamiliesDirty = true;
+    private int _particlePropertiesRevision;
+    private Block? _runtimePreviewCacheBlock;
+    private ParticleEffectVariant? _runtimePreviewCacheVariant;
+    private AdvancedParticleProperties[]? _runtimePreviewCacheOriginal;
+    private AdvancedParticleProperties[]? _runtimePreviewCachePatched;
+    private int _runtimePreviewCacheRevision = -1;
     private ParticleAssetScanDiagnostics _scanDiagnostics = new();
     private bool _verboseParticleScanLog;
     private readonly IClientNetworkChannel? _clientChannel;
+    private bool _runtimeParticleAssetsLoaded;
+    private bool _embeddedParticleAssetsLoaded;
+    private bool _disposed;
     private const string _networkChannelId = "InGameDevTools:particle-effects";
 
     private string _particleDomainFilter = "";
@@ -1959,7 +2158,7 @@ public class ParticleEffectsManager
         public ParticleEffectSourceKind SourceKind { get; }
         public AdvancedParticleProperties Properties { get; private set; }
         public AdvancedParticleProperties OriginalProperties { get; }
-        public bool IsModified => !ParticlePropertiesMatch(Properties, OriginalProperties);
+        public bool IsModified { get; private set; }
         public string SourceKindLabel => SourceKind switch
         {
             ParticleEffectSourceKind.NamedConfig => "Named config",
@@ -1972,11 +2171,18 @@ public class ParticleEffectsManager
         public void ReplaceProperties(AdvancedParticleProperties properties)
         {
             Properties = CloneNormalizedParticleProperties(properties);
+            RefreshModifiedState();
         }
 
         public void ResetToOriginal()
         {
             Properties = CloneNormalizedParticleProperties(OriginalProperties);
+            IsModified = false;
+        }
+
+        public void RefreshModifiedState()
+        {
+            IsModified = !ParticlePropertiesMatch(Properties, OriginalProperties);
         }
     }
 
@@ -1985,6 +2191,7 @@ public class ParticleEffectsManager
         public int AllAssets;
         public int UniqueAssets;
         public int JsonCandidateAssets;
+        public int TemporarilyLoadedJsonAssets;
         public int TextReadFailures;
         public int AssetsWithParticleProperties;
         public int RuntimeBlocksScanned;
@@ -2003,7 +2210,7 @@ public class ParticleEffectsManager
 
         public string Summary(int totalEffects)
         {
-            return $"Loaded {totalEffects} effects. Registry: {RuntimeBlocksWithParticleProperties}/{RuntimeBlocksScanned} blocks, {RuntimeItemsWithParticleProperties}/{RuntimeItemsScanned} items. Assets: {AllAssets} scanned ({UniqueAssets} unique), {JsonCandidateAssets} JSON candidates, {AssetsWithParticleProperties} raw particle assets, {NamedConfigAssets} named configs, {DuplicateKeys} duplicate keys.";
+            return $"Loaded {totalEffects} effects. Registry: {RuntimeBlocksWithParticleProperties}/{RuntimeBlocksScanned} blocks, {RuntimeItemsWithParticleProperties}/{RuntimeItemsScanned} items. Assets: {AllAssets} scanned ({UniqueAssets} unique), {JsonCandidateAssets} JSON candidates ({TemporarilyLoadedJsonAssets} loaded temporarily), {AssetsWithParticleProperties} raw particle assets, {NamedConfigAssets} named configs, {DuplicateKeys} duplicate keys.";
         }
     }
 
@@ -2268,27 +2475,27 @@ public class ParticleEffectsManager
         ParticlePreviewPlacement placement = GetPreviewPlacement(key);
         ParticleReferenceModel? referenceModel = _previewShowReferenceModel ? placement.ReferenceModel : null;
         Vector3 previewOrigin = placement.ParticleOrigin;
-        List<DevToolsPreviewMeshInstance> meshInstances = [];
+        _previewMeshInstances.Clear();
         if (referenceModel?.Mesh != null)
         {
             Matrixf identity = new();
             identity.Identity();
-            meshInstances.Add(new DevToolsPreviewMeshInstance(referenceModel.Mesh, identity));
+            _previewMeshInstances.Add(new DevToolsPreviewMeshInstance(referenceModel.Mesh, identity));
         }
 
         // Particles are simulated on the CPU but rendered as camera-facing billboards into the same offscreen
         // framebuffer as the reference model (additive soft quads / opaque cubes), so the preview matches the
         // in-game look. The draw-list path can't do additive blending (VSImGui rejects ImGui draw callbacks).
-        List<DevToolsPreviewBillboard> billboards = [];
-        _previewParticles.CollectBillboards(billboards);
+        _previewBillboards.Clear();
+        _previewParticles.CollectBillboards(_previewBillboards);
 
         DevToolsPreview3DRenderer previewRenderer = EnsurePreviewRenderer3D();
         int textureId = previewRenderer.RenderToTexture(
             max.X - min.X,
             max.Y - min.Y,
             previewCamera,
-            meshInstances,
-            billboards,
+            _previewMeshInstances,
+            _previewBillboards,
             out string? skipReason);
         if (textureId > 0)
         {
@@ -2428,6 +2635,15 @@ public class ParticleEffectsManager
 
         ParticlePreviewPlacement placement = BuildPreviewPlacement(entry);
         _previewPlacementCache[cacheKey] = placement;
+        _previewPlacementCacheOrder.Enqueue(cacheKey);
+        while (_previewPlacementCache.Count > MaxPreviewPlacementCacheEntries && _previewPlacementCacheOrder.TryDequeue(out string? expiredKey))
+        {
+            if (_previewPlacementCache.Remove(expiredKey, out ParticlePreviewPlacement? expired))
+            {
+                expired.Dispose();
+            }
+        }
+
         return placement;
     }
 
@@ -3135,6 +3351,15 @@ public class ParticleEffectsManager
     private AdvancedParticleProperties[] BuildRuntimePreviewParticleProperties(Block block, ParticleEffectVariant selectedVariant)
     {
         AdvancedParticleProperties[]? original = block.ParticleProperties;
+        if (ReferenceEquals(_runtimePreviewCacheBlock, block) &&
+            ReferenceEquals(_runtimePreviewCacheVariant, selectedVariant) &&
+            ReferenceEquals(_runtimePreviewCacheOriginal, original) &&
+            _runtimePreviewCacheRevision == _particlePropertiesRevision &&
+            _runtimePreviewCachePatched != null)
+        {
+            return _runtimePreviewCachePatched;
+        }
+
         int length = Math.Max(original?.Length ?? 0, selectedVariant.Emitters.Count);
         AdvancedParticleProperties[] patched = new AdvancedParticleProperties[length];
         for (int index = 0; index < length; index++)
@@ -3154,6 +3379,11 @@ public class ParticleEffectsManager
                 : CloneNormalizedParticleProperties(source);
         }
 
+        _runtimePreviewCacheBlock = block;
+        _runtimePreviewCacheVariant = selectedVariant;
+        _runtimePreviewCacheOriginal = original;
+        _runtimePreviewCacheRevision = _particlePropertiesRevision;
+        _runtimePreviewCachePatched = patched;
         return patched;
     }
 
@@ -3355,8 +3585,8 @@ public class ParticleEffectsManager
         public List<ParticleEffectEntry?> Emitters { get; } = emitters;
         public string SearchText { get; } = searchText;
         public int EmitterCount => Emitters.Count;
-        public IReadOnlyList<ParticleEffectEntry> EmittersWithParticles => Emitters.Where(entry => entry != null).Cast<ParticleEffectEntry>().ToList();
-        public int ModifiedEmitterCount => Emitters.Count(entry => entry?.IsModified == true);
+        public IReadOnlyList<ParticleEffectEntry> EmittersWithParticles { get; } = emitters.Where(entry => entry != null).Cast<ParticleEffectEntry>().ToArray();
+        public int ModifiedEmitterCount => EmittersWithParticles.Count(entry => entry.IsModified);
         public bool IsModified => ModifiedEmitterCount > 0;
 
         public ParticleEffectEntry? GetEmitter(int index)
@@ -3637,11 +3867,14 @@ public class ParticleEffectsManager
 
 public static class ParticleEditor
 {
+    private const int MaxCachedEditorEntries = 32;
     private static bool _includeVelocityEvolveInJsonOutput;
     private static readonly Dictionary<string, string> _jsonEditBuffers = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> _jsonEditStatuses = new(StringComparer.Ordinal);
+    private static readonly Queue<string> _jsonCacheOrder = new();
     private static readonly Dictionary<string, string> _advancedProviderBuffers = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> _advancedProviderStatuses = new(StringComparer.Ordinal);
+    private static readonly Queue<string> _advancedProviderCacheOrder = new();
     private static readonly HashSet<string> _firstClassParticleMembers = new(StringComparer.OrdinalIgnoreCase)
     {
         "ParticleModel",
@@ -3674,6 +3907,64 @@ public static class ParticleEditor
         "SecondaryParticles",
         "DeathParticles"
     };
+    private static readonly System.Reflection.MemberInfo[] _advancedParticleProviderMembers = GetAdvancedParticleProviderMembers()
+        .Where(member => !_firstClassParticleMembers.Contains(member.Name))
+        .OrderBy(member => member.Name, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    public static void ClearCachedState()
+    {
+        _jsonEditBuffers.Clear();
+        _jsonEditStatuses.Clear();
+        _jsonCacheOrder.Clear();
+        _advancedProviderBuffers.Clear();
+        _advancedProviderStatuses.Clear();
+        _advancedProviderCacheOrder.Clear();
+    }
+
+    private static void SetJsonBuffer(string key, string value)
+    {
+        if (!_jsonEditBuffers.ContainsKey(key))
+        {
+            _jsonCacheOrder.Enqueue(key);
+        }
+
+        _jsonEditBuffers[key] = value;
+        TrimEditorCache(_jsonCacheOrder, _jsonEditBuffers, _jsonEditStatuses);
+    }
+
+    private static void SetJsonStatus(string key, string value)
+    {
+        _jsonEditStatuses[key] = value;
+    }
+
+    private static void SetAdvancedProviderBuffer(string key, string value)
+    {
+        if (!_advancedProviderBuffers.ContainsKey(key))
+        {
+            _advancedProviderCacheOrder.Enqueue(key);
+        }
+
+        _advancedProviderBuffers[key] = value;
+        TrimEditorCache(_advancedProviderCacheOrder, _advancedProviderBuffers, _advancedProviderStatuses);
+    }
+
+    private static void SetAdvancedProviderStatus(string key, string value)
+    {
+        _advancedProviderStatuses[key] = value;
+    }
+
+    private static void TrimEditorCache(
+        Queue<string> order,
+        Dictionary<string, string> buffers,
+        Dictionary<string, string> statuses)
+    {
+        while (buffers.Count > MaxCachedEditorEntries && order.TryDequeue(out string? expired))
+        {
+            buffers.Remove(expired);
+            statuses.Remove(expired);
+        }
+    }
 
     public static void Draw(string id, AdvancedParticleProperties particleProperties)
     {
@@ -3697,34 +3988,25 @@ public static class ParticleEditor
         if (!ImGui.CollapsingHeader($"JSON:##{id}")) return;
         ImGui.Indent();
 
-        JsonSerializerSettings settings = new()
-        {
-            NullValueHandling = NullValueHandling.Ignore
-        };
-
-        JsonSerializer serializer = JsonSerializer.Create(settings);
-        JToken json = JToken.FromObject(particleProperties, serializer);
-
         ImGui.Checkbox($"Include VelocityEvolve in copied JSON##{id}", ref _includeVelocityEvolveInJsonOutput);
         if (_includeVelocityEvolveInJsonOutput)
         {
             ImGui.TextColored(new System.Numerics.Vector4(1f, 0.78f, 0.35f, 1f), "VelocityEvolve can crash VS 1.22 clients when network-spawned; include only for compatible authored assets.");
         }
-        else
-        {
-            RemovePropertyRecursive(json, "VelocityEvolve");
-            RemovePropertyRecursive(json, "velocityEvolve");
-        }
 
-        string output = json.ToString(Formatting.Indented);
         if (!_jsonEditBuffers.TryGetValue(id, out string? editBuffer))
         {
-            editBuffer = output;
-            _jsonEditBuffers[id] = editBuffer;
+            editBuffer = SerializeParticleEditorJson(particleProperties);
+            SetJsonBuffer(id, editBuffer);
         }
 
-        ImGui.InputTextMultiline($"##{id}", ref editBuffer, 2 * 1024 * 1024, new(500, 300), ImGuiInputTextFlags.AllowTabInput);
-        _jsonEditBuffers[id] = editBuffer;
+        ImGui.InputTextMultiline(
+            $"##{id}",
+            ref editBuffer,
+            DevToolsImGuiTextBuffer.Capacity(editBuffer, minimum: 64 * 1024, headroom: 64 * 1024, growthLimit: 2 * 1024 * 1024),
+            new(500, 300),
+            ImGuiInputTextFlags.AllowTabInput);
+        SetJsonBuffer(id, editBuffer);
         if (_jsonEditStatuses.TryGetValue(id, out string? status) && !string.IsNullOrWhiteSpace(status))
         {
             ImGui.TextWrapped(status);
@@ -3732,20 +4014,20 @@ public static class ParticleEditor
 
         if (ImGui.Button($"Load current JSON##{id}"))
         {
-            _jsonEditBuffers[id] = output;
-            _jsonEditStatuses[id] = "Loaded current particle JSON into the editor.";
+            SetJsonBuffer(id, SerializeParticleEditorJson(particleProperties));
+            SetJsonStatus(id, "Loaded current particle JSON into the editor.");
         }
         ImGui.SameLine();
         if (ImGui.Button($"Format JSON##{id}"))
         {
             if (DevToolsJsonTextTools.TryFormat(editBuffer, out string formatted, out string formatError))
             {
-                _jsonEditBuffers[id] = formatted;
-                _jsonEditStatuses[id] = "Formatted particle JSON.";
+                SetJsonBuffer(id, formatted);
+                SetJsonStatus(id, "Formatted particle JSON.");
             }
             else
             {
-                _jsonEditStatuses[id] = $"Format failed: {formatError}";
+                SetJsonStatus(id, $"Format failed: {formatError}");
             }
         }
         ImGui.SameLine();
@@ -3757,18 +4039,12 @@ public static class ParticleEditor
             {
                 EnsureParticleEditorDefaults(editedProperties);
                 CopyParticleProperties(particleProperties, editedProperties);
-                JToken updated = JToken.FromObject(particleProperties, JsonSerializer.Create(settings));
-                if (!_includeVelocityEvolveInJsonOutput)
-                {
-                    RemovePropertyRecursive(updated, "VelocityEvolve");
-                    RemovePropertyRecursive(updated, "velocityEvolve");
-                }
-                _jsonEditBuffers[id] = updated.ToString(Formatting.Indented);
-                _jsonEditStatuses[id] = "Applied particle JSON.";
+                SetJsonBuffer(id, SerializeParticleEditorJson(particleProperties));
+                SetJsonStatus(id, "Applied particle JSON.");
             }
             else
             {
-                _jsonEditStatuses[id] = $"Apply failed: {parseError}";
+                SetJsonStatus(id, $"Apply failed: {parseError}");
             }
         }
         ImGui.SameLine();
@@ -3777,6 +4053,22 @@ public static class ParticleEditor
             ImGui.SetClipboardText(_jsonEditBuffers[id]);
         }
         ImGui.Unindent();
+    }
+
+    private static string SerializeParticleEditorJson(AdvancedParticleProperties particleProperties)
+    {
+        JsonSerializerSettings settings = new()
+        {
+            NullValueHandling = NullValueHandling.Ignore
+        };
+        JToken json = JToken.FromObject(particleProperties, JsonSerializer.Create(settings));
+        if (!_includeVelocityEvolveInJsonOutput)
+        {
+            RemovePropertyRecursive(json, "VelocityEvolve");
+            RemovePropertyRecursive(json, "velocityEvolve");
+        }
+
+        return json.ToString(Formatting.Indented);
     }
 
     private static void CopyParticleProperties(AdvancedParticleProperties target, AdvancedParticleProperties source)
@@ -4037,20 +4329,15 @@ public static class ParticleEditor
 
     private static void AdvancedProviderFieldsEditor(string id, AdvancedParticleProperties particleProperties)
     {
-        List<System.Reflection.MemberInfo> members = GetAdvancedParticleProviderMembers()
-            .Where(member => !_firstClassParticleMembers.Contains(member.Name))
-            .OrderBy(member => member.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (!ImGui.CollapsingHeader($"Advanced provider fields ({members.Count})##{id}")) return;
+        if (!ImGui.CollapsingHeader($"Advanced provider fields ({_advancedParticleProviderMembers.Length})##{id}")) return;
         ImGui.Indent();
 
-        if (members.Count == 0)
+        if (_advancedParticleProviderMembers.Length == 0)
         {
             ImGui.TextDisabled("All serialized provider fields are covered by named editors.");
         }
 
-        foreach (System.Reflection.MemberInfo member in members)
+        foreach (System.Reflection.MemberInfo member in _advancedParticleProviderMembers)
         {
             ImGui.PushID($"particle-advanced-provider-{id}-{member.Name}");
             DrawAdvancedParticleProviderMember(id, particleProperties, member);
@@ -4144,22 +4431,21 @@ public static class ParticleEditor
     private static void DrawAdvancedParticleProviderJsonMember(string id, AdvancedParticleProperties particleProperties, System.Reflection.MemberInfo member, Type memberType, object? value)
     {
         string bufferKey = $"{id}:{member.Name}";
-        JsonSerializerSettings settings = new()
-        {
-            NullValueHandling = NullValueHandling.Ignore
-        };
-        JsonSerializer serializer = JsonSerializer.Create(settings);
-        string current = value == null ? "null" : JToken.FromObject(value, serializer).ToString(Formatting.Indented);
+        if (!ImGui.TreeNodeEx($"{member.Name} JSON##particle-advanced-json-node", ImGuiTreeNodeFlags.None)) return;
+
         if (!_advancedProviderBuffers.TryGetValue(bufferKey, out string? buffer))
         {
-            buffer = current;
-            _advancedProviderBuffers[bufferKey] = buffer;
+            buffer = SerializeAdvancedProviderValue(value);
+            SetAdvancedProviderBuffer(bufferKey, buffer);
         }
 
-        if (!ImGui.TreeNodeEx($"{member.Name} JSON##particle-advanced-json-node", ImGuiTreeNodeFlags.DefaultOpen)) return;
-
-        ImGui.InputTextMultiline("##particle-advanced-json", ref buffer, 256 * 1024, new(500, 120), ImGuiInputTextFlags.AllowTabInput);
-        _advancedProviderBuffers[bufferKey] = buffer;
+        ImGui.InputTextMultiline(
+            "##particle-advanced-json",
+            ref buffer,
+            DevToolsImGuiTextBuffer.Capacity(buffer, minimum: 16 * 1024, headroom: 16 * 1024, growthLimit: 256 * 1024),
+            new(500, 120),
+            ImGuiInputTextFlags.AllowTabInput);
+        SetAdvancedProviderBuffer(bufferKey, buffer);
 
         if (_advancedProviderStatuses.TryGetValue(bufferKey, out string? status) && !string.IsNullOrWhiteSpace(status))
         {
@@ -4168,20 +4454,20 @@ public static class ParticleEditor
 
         if (ImGui.Button("Load current##particle-advanced-load"))
         {
-            _advancedProviderBuffers[bufferKey] = current;
-            _advancedProviderStatuses[bufferKey] = "Loaded current provider field JSON.";
+            SetAdvancedProviderBuffer(bufferKey, SerializeAdvancedProviderValue(value));
+            SetAdvancedProviderStatus(bufferKey, "Loaded current provider field JSON.");
         }
         ImGui.SameLine();
         if (ImGui.Button("Format##particle-advanced-format"))
         {
             if (DevToolsJsonTextTools.TryFormat(buffer, out string formatted, out string formatError))
             {
-                _advancedProviderBuffers[bufferKey] = formatted;
-                _advancedProviderStatuses[bufferKey] = "Formatted provider field JSON.";
+                SetAdvancedProviderBuffer(bufferKey, formatted);
+                SetAdvancedProviderStatus(bufferKey, "Formatted provider field JSON.");
             }
             else
             {
-                _advancedProviderStatuses[bufferKey] = $"Format failed: {formatError}";
+                SetAdvancedProviderStatus(bufferKey, $"Format failed: {formatError}");
             }
         }
         ImGui.SameLine();
@@ -4191,21 +4477,26 @@ public static class ParticleEditor
             {
                 try
                 {
+                    JsonSerializerSettings settings = new()
+                    {
+                        NullValueHandling = NullValueHandling.Ignore
+                    };
+                    JsonSerializer serializer = JsonSerializer.Create(settings);
                     object? replacement = token.Type == JTokenType.Null ? null : token.ToObject(memberType, serializer);
                     SetParticleProviderMemberValue(member, particleProperties, replacement);
-                    _advancedProviderBuffers[bufferKey] = replacement == null
+                    SetAdvancedProviderBuffer(bufferKey, replacement == null
                         ? "null"
-                        : JToken.FromObject(replacement, serializer).ToString(Formatting.Indented);
-                    _advancedProviderStatuses[bufferKey] = "Applied provider field JSON.";
+                        : JToken.FromObject(replacement, serializer).ToString(Formatting.Indented));
+                    SetAdvancedProviderStatus(bufferKey, "Applied provider field JSON.");
                 }
                 catch (Exception exception)
                 {
-                    _advancedProviderStatuses[bufferKey] = $"Apply failed: {exception.Message}";
+                    SetAdvancedProviderStatus(bufferKey, $"Apply failed: {exception.Message}");
                 }
             }
             else
             {
-                _advancedProviderStatuses[bufferKey] = $"Apply failed: {parseError}";
+                SetAdvancedProviderStatus(bufferKey, $"Apply failed: {parseError}");
             }
         }
 
@@ -4215,12 +4506,23 @@ public static class ParticleEditor
             if (ImGui.Button("Clear##particle-advanced-clear"))
             {
                 SetParticleProviderMemberValue(member, particleProperties, null);
-                _advancedProviderBuffers[bufferKey] = "null";
-                _advancedProviderStatuses[bufferKey] = "Cleared provider field.";
+                SetAdvancedProviderBuffer(bufferKey, "null");
+                SetAdvancedProviderStatus(bufferKey, "Cleared provider field.");
             }
         }
 
         ImGui.TreePop();
+    }
+
+    private static string SerializeAdvancedProviderValue(object? value)
+    {
+        if (value == null) return "null";
+
+        JsonSerializerSettings settings = new()
+        {
+            NullValueHandling = NullValueHandling.Ignore
+        };
+        return JToken.FromObject(value, JsonSerializer.Create(settings)).ToString(Formatting.Indented);
     }
 
     private static Type GetParticleProviderMemberType(System.Reflection.MemberInfo member)

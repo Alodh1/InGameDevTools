@@ -81,10 +81,10 @@ public sealed partial class DebugWindowManager
 
             try
             {
+                string label = entry.Label;
                 entry.Snapshot.Revert();
-                entry.Applied = false;
-                entry.LastError = "";
-                LastStatus = $"Reverted live changes for {entry.Label}.";
+                _entries.Remove(key);
+                LastStatus = $"Reverted live changes for {label}.";
                 return LastStatus;
             }
             catch (Exception exception)
@@ -99,14 +99,18 @@ public sealed partial class DebugWindowManager
         {
             int reverted = 0;
             List<string> failures = [];
-            foreach (LivePatchEntry entry in _entries.Values.ToList())
+            foreach ((string key, LivePatchEntry entry) in _entries.ToList())
             {
-                if (!entry.Applied) continue;
+                if (!entry.Applied)
+                {
+                    _entries.Remove(key);
+                    continue;
+                }
+
                 try
                 {
                     entry.Snapshot.Revert();
-                    entry.Applied = false;
-                    entry.LastError = "";
+                    _entries.Remove(key);
                     reverted++;
                 }
                 catch (Exception exception)
@@ -120,6 +124,12 @@ public sealed partial class DebugWindowManager
                 ? $"Reverted {reverted} live target(s)."
                 : $"Reverted {reverted} live target(s), {failures.Count} failed: {string.Join("; ", failures)}";
             return LastStatus;
+        }
+
+        public void Clear()
+        {
+            _entries.Clear();
+            LastStatus = "";
         }
 
         public string GetStatus(string key, bool available)

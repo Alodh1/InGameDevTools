@@ -34,27 +34,23 @@ public sealed partial class DebugWindowManager
 
     private sealed class WorldgenAssetEntry
     {
-        public WorldgenAssetEntry(IAsset asset, string sourceText, JToken? root, string parseError)
+        public WorldgenAssetEntry(IAsset asset)
         {
             Asset = asset;
-            SourceText = sourceText;
-            Root = root;
-            ParseError = parseError;
             Domain = asset.Location.Domain ?? "game";
             AssetPath = asset.Location.Path.Replace('\\', '/');
-            Kind = ClassifyWorldgenAssetKind(AssetPath, root);
+            Kind = ClassifyWorldgenAssetKind(AssetPath, null);
+            SearchText = $"{Domain}:{AssetPath} {KindLabel}";
         }
 
         public IAsset Asset { get; }
-        public string SourceText { get; }
-        public JToken? Root { get; }
-        public string ParseError { get; }
         public string Domain { get; }
         public string AssetPath { get; }
-        public WorldgenAssetKind Kind { get; }
+        public WorldgenAssetKind Kind { get; private set; }
+        public bool IsContentClassified { get; private set; }
         public string Key => Asset.Location.ToString();
         public string SortKey => $"{KindLabel}:{Domain}:{AssetPath}";
-        public string SearchText => $"{Domain}:{AssetPath} {KindLabel} {SourceText}";
+        public string SearchText { get; private set; }
         public string KindLabel => Kind switch
         {
             WorldgenAssetKind.Deposits => "Deposits",
@@ -63,6 +59,15 @@ public sealed partial class DebugWindowManager
             WorldgenAssetKind.RockStrata => "Rock strata",
             _ => "Other"
         };
+
+        public void UpdateKind(JToken? root)
+        {
+            if (root == null) return;
+
+            Kind = ClassifyWorldgenAssetKind(AssetPath, root);
+            IsContentClassified = true;
+            SearchText = $"{Domain}:{AssetPath} {KindLabel}";
+        }
     }
 
     private sealed record WorldgenDraftState(string Text, int RowIndex, bool IsValid, string ValidationStatus);

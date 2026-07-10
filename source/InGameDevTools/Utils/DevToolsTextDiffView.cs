@@ -22,6 +22,11 @@ internal static class DevToolsTextDiffView
 
     private static readonly Dictionary<string, CacheEntry> Cache = new(StringComparer.Ordinal);
 
+    public static void ClearCache()
+    {
+        Cache.Clear();
+    }
+
     public static void Draw(string id, string originalText, string currentText, float height)
     {
         CacheEntry entry = GetOrUpdate(id, originalText, currentText);

@@ -353,12 +353,13 @@ public sealed partial class DebugWindowManager
         }
 
         _aiBehaviorEntryIndex = Math.Clamp(_aiBehaviorEntryIndex, 0, _visibleAiBehaviorEntries.Count - 1);
+        bool selectedTextDirty = IsAiBehaviorTextDirty(_aiBehaviorCurrentText, _aiBehaviorOriginalText);
         if (ImGui.BeginChild("##entity-ai-source-list", new NVector2(-float.Epsilon, -float.Epsilon), true))
         {
             for (int index = 0; index < _visibleAiBehaviorEntries.Count; index++)
             {
                 AiBehaviorEntry entry = _visibleAiBehaviorEntries[index];
-                bool dirty = IsAiBehaviorEntryDirty(entry, _aiBehaviorLoadedKey, IsAiBehaviorTextDirty(_aiBehaviorCurrentText, _aiBehaviorOriginalText));
+                bool dirty = IsAiBehaviorEntryDirty(entry, _aiBehaviorLoadedKey, selectedTextDirty);
                 string marker = dirty ? "*" : "";
                 string label = $"{entry.DisplayCode}{marker}##entity-ai-entry-{index}";
                 if (ImGui.Selectable(label, index == _aiBehaviorEntryIndex))
@@ -529,7 +530,7 @@ public sealed partial class DebugWindowManager
             if (ImGui.CollapsingHeader("Selected task JSON##task-json"))
             {
                 string taskText = task.ToString(Formatting.Indented);
-                if (ImGui.InputTextMultiline("##selected-task-json", ref taskText, 256 * 1024, new NVector2(-float.Epsilon, 220f), ImGuiInputTextFlags.AllowTabInput))
+                if (ImGui.InputTextMultiline("##selected-task-json", ref taskText, DevToolsImGuiTextBuffer.Capacity(taskText), new NVector2(-float.Epsilon, 220f), ImGuiInputTextFlags.AllowTabInput))
                 {
                     try
                     {
@@ -774,7 +775,7 @@ public sealed partial class DebugWindowManager
         bool changed = false;
         ImGui.TextDisabled("Existing custom parameters are edited in the discovered typed parameter section above.");
         ImGui.InputTextWithHint("##entity-ai-other-name", "parameter name", ref _aiBehaviorNewOtherParameterName, 128);
-        ImGui.InputTextMultiline("##entity-ai-other-json", ref _aiBehaviorNewOtherParameterJson, 64 * 1024, new NVector2(-float.Epsilon, 82f), ImGuiInputTextFlags.AllowTabInput);
+        ImGui.InputTextMultiline("##entity-ai-other-json", ref _aiBehaviorNewOtherParameterJson, DevToolsImGuiTextBuffer.Capacity(_aiBehaviorNewOtherParameterJson), new NVector2(-float.Epsilon, 82f), ImGuiInputTextFlags.AllowTabInput);
         if (ImGui.Button("Add parameter##entity-ai-other-add"))
         {
             string propertyName = _aiBehaviorNewOtherParameterName.Trim();
@@ -1007,7 +1008,7 @@ public sealed partial class DebugWindowManager
             default:
             {
                 string json = value.ToString(Formatting.Indented);
-                if (ImGui.InputTextMultiline($"##json-{property.Name}", ref json, 256 * 1024, new NVector2(-float.Epsilon, 90f), ImGuiInputTextFlags.AllowTabInput))
+                if (ImGui.InputTextMultiline($"##json-{property.Name}", ref json, DevToolsImGuiTextBuffer.Capacity(json), new NVector2(-float.Epsilon, 90f), ImGuiInputTextFlags.AllowTabInput))
                 {
                     if (DevToolsJson.TryParseToken(json, out JToken? token, out string error) && token != null)
                     {
@@ -1805,7 +1806,12 @@ public sealed partial class DebugWindowManager
         }
 
         int textCapacity = Math.Max(_aiBehaviorCurrentText.Length + 8192, 2 * 1024 * 1024);
-        if (ImGui.InputTextMultiline("##entity-ai-json-text", ref _aiBehaviorCurrentText, (uint)textCapacity, new NVector2(-float.Epsilon, Math.Max(180f, ImGui.GetContentRegionAvail().Y - 24f)), ImGuiInputTextFlags.AllowTabInput))
+        if (ImGui.InputTextMultiline(
+                "##entity-ai-json-text",
+                ref _aiBehaviorCurrentText,
+                DevToolsImGuiTextBuffer.Capacity(_aiBehaviorCurrentText, minimum: 64 * 1024, headroom: 64 * 1024, growthLimit: textCapacity),
+                new NVector2(-float.Epsilon, Math.Max(180f, ImGui.GetContentRegionAvail().Y - 24f)),
+                ImGuiInputTextFlags.AllowTabInput))
         {
             _aiBehaviorTextHistory.Record(_aiBehaviorCurrentText, ImGui.GetTime());
             ValidateAiBehaviorCurrentText();

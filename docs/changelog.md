@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reduced DevTools memory spikes and editor-frame allocation by making particle discovery and JSON indexes lazy, gating recovery/texture encoding, reusing preview buffers, bounding histories, and releasing cached/runtime resources on close and disposal.
+
 - Added an optional MeshLib model-editor mode with validated triangle/quad `noncuboid` authoring, component/topology/UV tools, cuboid conversion, true-mesh primitives, and reflective preview/live-apply integration.
 
 - Fixed the DevTools window closing behavior when leaving a world, and moved the animation, creature, and Prism generators into the main editor window as embedded panels.

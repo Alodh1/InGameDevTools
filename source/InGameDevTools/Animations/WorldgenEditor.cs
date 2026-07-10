@@ -121,6 +121,7 @@ public sealed partial class DebugWindowManager
     private bool _worldgenIndexIncludedServerAssets;
     private string _worldgenFilter = "";
     private string _worldgenDomainFilter = "";
+    private string[] _worldgenDomainOptions = ["All domains"];
     private int _worldgenKindFilter;
     private int _worldgenEntryIndex;
     private int _worldgenRowIndex;
@@ -129,6 +130,7 @@ public sealed partial class DebugWindowManager
     private bool _worldgenDirtyOnly;
     private string _worldgenLoadedKey = "";
     private string _worldgenOriginalText = "";
+    private string _worldgenCleanText = "";
     private string _worldgenCurrentText = "";
     private string _worldgenStatus = "Worldgen editor ready.";
     private bool _worldgenTextValid;
@@ -268,6 +270,7 @@ public sealed partial class DebugWindowManager
         _worldgenIndexIncludedServerAssets = false;
         _worldgenEntries.Clear();
         _visibleWorldgenEntries.Clear();
+        _worldgenDomainOptions = ["All domains"];
         _worldgenEntryIndex = 0;
         _worldgenRowIndex = 0;
 
@@ -275,6 +278,7 @@ public sealed partial class DebugWindowManager
         {
             _worldgenLoadedKey = "";
             _worldgenOriginalText = "";
+            _worldgenCleanText = "";
             _worldgenCurrentText = "";
             _worldgenTextValid = false;
             _worldgenValidationStatus = "No worldgen asset loaded.";
@@ -315,6 +319,12 @@ public sealed partial class DebugWindowManager
     private void CompleteWorldgenIndexing()
     {
         _worldgenEntries.Sort((left, right) => string.Compare(left.SortKey, right.SortKey, StringComparison.OrdinalIgnoreCase));
+        _worldgenDomainOptions = _worldgenEntries
+            .Select(entry => entry.Domain)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(domain => domain.Equals("game", StringComparison.OrdinalIgnoreCase) ? "" : domain, StringComparer.OrdinalIgnoreCase)
+            .Prepend("All domains")
+            .ToArray();
         RebuildVisibleWorldgenEntries();
         _worldgenStatus = $"Indexed {_worldgenEntries.Count} worldgen JSON asset(s).";
         if (_visibleWorldgenEntries.Count > 0 && string.IsNullOrWhiteSpace(_worldgenLoadedKey))
@@ -331,9 +341,7 @@ public sealed partial class DebugWindowManager
 
     private void IndexWorldgenAsset(IAsset asset)
     {
-        string sourceText = ReadAssetText(asset);
-        TryParseJsonToken(sourceText, out JToken? root, out string parseError);
-        _worldgenEntries.Add(new WorldgenAssetEntry(asset, sourceText, root, parseError));
+        _worldgenEntries.Add(new WorldgenAssetEntry(asset));
     }
 
     private static bool IsWorldgenJsonAsset(IAsset? asset)
@@ -355,7 +363,8 @@ public sealed partial class DebugWindowManager
         {
             if (!string.IsNullOrWhiteSpace(filter) && !entry.SearchText.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
             if (!ImGuiLayoutHelper.MatchesDomain(_worldgenDomainFilter, entry.Domain)) continue;
-            if (_worldgenKindFilter > 0 && entry.Kind != FilterIndexToWorldgenKind(_worldgenKindFilter)) continue;
+            if (_worldgenKindFilter > 0 &&
+                !MatchesWorldgenKindFilter(entry.Kind, entry.IsContentClassified, FilterIndexToWorldgenKind(_worldgenKindFilter))) continue;
             if (_worldgenDirtyOnly && !IsWorldgenEntryDirty(entry)) continue;
             if (!IsWorldgenEntryCompatibleWithCurrentPreview(entry, out _)) continue;
             _visibleWorldgenEntries.Add(entry);
@@ -383,7 +392,7 @@ public sealed partial class DebugWindowManager
 
         bool filterChanged = false;
         filterChanged |= ImGui.InputText("Filter##worldgen-filter", ref _worldgenFilter, 256);
-        filterChanged |= ImGuiLayoutHelper.DrawDomainCombo("Domain##worldgen-domain", ref _worldgenDomainFilter, _worldgenEntries.Select(entry => entry.Domain));
+        filterChanged |= DrawWorldgenDomainCombo();
         filterChanged |= ImGui.Combo("Kind##worldgen-kind", ref _worldgenKindFilter, WorldgenKindFilterLabels, WorldgenKindFilterLabels.Length);
         filterChanged |= ImGui.Checkbox("Dirty only##worldgen-dirty-only", ref _worldgenDirtyOnly);
         ImGui.TextDisabled(SanitizeWorldgenPreviewText(GetWorldgenPreviewAssetRestrictionStatus(), 90));
@@ -413,27 +422,62 @@ public sealed partial class DebugWindowManager
 
         if (ImGui.BeginChild("##worldgen-entry-list", new NVector2(-float.Epsilon, -float.Epsilon), true))
         {
-            for (int i = 0; i < _visibleWorldgenEntries.Count; i++)
-            {
-                WorldgenAssetEntry entry = _visibleWorldgenEntries[i];
-                bool dirty = IsWorldgenEntryDirty(entry);
-                bool compatible = IsWorldgenEntryCompatibleWithCurrentPreview(entry, out string compatibilityReason);
-                string label = $"{entry.KindLabel}: {entry.Domain}:{entry.AssetPath}{(dirty ? " *" : "")}##worldgen-entry-{i}";
-                if (!compatible) ImGui.BeginDisabled();
-                if (ImGui.Selectable(label, i == _worldgenEntryIndex) && compatible)
-                {
-                    _worldgenEntryIndex = i;
-                    LoadWorldgenEntry(entry);
-                }
-                if (!compatible) ImGui.EndDisabled();
-                if (ImGui.IsItemHovered())
-                {
-                    ImGui.SetTooltip($"{entry.Domain}:{entry.AssetPath}\n{entry.KindLabel}\n{(dirty ? "Modified draft" : "Unmodified")}\n{compatibilityReason}");
-                }
-            }
+            DrawClippedWorldgenEntryRows();
         }
         ImGui.EndChild();
         ImGui.EndChild();
+    }
+
+    private bool DrawWorldgenDomainCombo()
+    {
+        int current = string.IsNullOrWhiteSpace(_worldgenDomainFilter)
+            ? 0
+            : Math.Max(0, Array.FindIndex(_worldgenDomainOptions, domain => domain.Equals(_worldgenDomainFilter, StringComparison.OrdinalIgnoreCase)));
+        bool changed = ImGui.Combo("Domain##worldgen-domain", ref current, _worldgenDomainOptions, _worldgenDomainOptions.Length);
+        if (changed)
+        {
+            _worldgenDomainFilter = current <= 0 ? "" : _worldgenDomainOptions[current];
+        }
+        return changed;
+    }
+
+    private void DrawClippedWorldgenEntryRows()
+    {
+        float rowHeight = Math.Max(1f, ImGui.GetTextLineHeightWithSpacing());
+        float visibleHeight = Math.Max(rowHeight, ImGui.GetContentRegionAvail().Y);
+        float scrollY = Math.Max(0f, ImGui.GetScrollY());
+        int first = Math.Clamp((int)Math.Floor(scrollY / rowHeight) - 2, 0, _visibleWorldgenEntries.Count);
+        int visibleCount = Math.Max(1, (int)Math.Ceiling(visibleHeight / rowHeight) + 5);
+        int last = Math.Clamp(first + visibleCount, first, _visibleWorldgenEntries.Count);
+
+        if (first > 0)
+        {
+            ImGui.Dummy(new NVector2(1f, first * rowHeight));
+        }
+
+        for (int i = first; i < last; i++)
+        {
+            WorldgenAssetEntry entry = _visibleWorldgenEntries[i];
+            bool dirty = IsWorldgenEntryDirty(entry);
+            bool compatible = IsWorldgenEntryCompatibleWithCurrentPreview(entry, out string compatibilityReason);
+            string label = $"{entry.KindLabel}: {entry.Domain}:{entry.AssetPath}{(dirty ? " *" : "")}##worldgen-entry-{i}";
+            if (!compatible) ImGui.BeginDisabled();
+            if (ImGui.Selectable(label, i == _worldgenEntryIndex) && compatible)
+            {
+                _worldgenEntryIndex = i;
+                LoadWorldgenEntry(entry);
+            }
+            if (!compatible) ImGui.EndDisabled();
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip($"{entry.Domain}:{entry.AssetPath}\n{entry.KindLabel}\n{(dirty ? "Modified draft" : "Unmodified")}\n{compatibilityReason}");
+            }
+        }
+
+        if (last < _visibleWorldgenEntries.Count)
+        {
+            ImGui.Dummy(new NVector2(1f, (_visibleWorldgenEntries.Count - last) * rowHeight));
+        }
     }
 
     private void DrawWorldgenEditorPanel(NVector2 size)
@@ -549,7 +593,7 @@ public sealed partial class DebugWindowManager
         if (ImGui.CollapsingHeader("Selected row JSON##worldgen-row-json"))
         {
             string rowText = row.ToString(Formatting.Indented);
-            if (ImGui.InputTextMultiline("##worldgen-row-json-text", ref rowText, 256 * 1024, new NVector2(-float.Epsilon, 180f), ImGuiInputTextFlags.AllowTabInput))
+            if (ImGui.InputTextMultiline("##worldgen-row-json-text", ref rowText, DevToolsImGuiTextBuffer.Capacity(rowText, growthLimit: 256 * 1024), new NVector2(-float.Epsilon, 180f), ImGuiInputTextFlags.AllowTabInput))
             {
                 try
                 {
@@ -1310,7 +1354,7 @@ public sealed partial class DebugWindowManager
         string value = row[propertyName]?.ToString(Formatting.Indented) ?? "{}";
         if (!ImGui.CollapsingHeader(label)) return false;
 
-        if (!ImGui.InputTextMultiline($"##worldgen-object-json-{propertyName}", ref value, 256 * 1024, new NVector2(-float.Epsilon, 160f), ImGuiInputTextFlags.AllowTabInput)) return false;
+        if (!ImGui.InputTextMultiline($"##worldgen-object-json-{propertyName}", ref value, DevToolsImGuiTextBuffer.Capacity(value, growthLimit: 256 * 1024), new NVector2(-float.Epsilon, 160f), ImGuiInputTextFlags.AllowTabInput)) return false;
 
         try
         {
@@ -1356,8 +1400,7 @@ public sealed partial class DebugWindowManager
                 Math.Clamp(ImGui.GetContentRegionAvail().Y * 0.45f, 120f, 320f));
         }
 
-        int textCapacity = Math.Max(_worldgenCurrentText.Length + 8192, 2 * 1024 * 1024);
-        if (ImGui.InputTextMultiline("##worldgen-json-text", ref _worldgenCurrentText, (uint)textCapacity, new NVector2(-float.Epsilon, Math.Max(180f, ImGui.GetContentRegionAvail().Y - 24f)), ImGuiInputTextFlags.AllowTabInput))
+        if (ImGui.InputTextMultiline("##worldgen-json-text", ref _worldgenCurrentText, DevToolsImGuiTextBuffer.Capacity(_worldgenCurrentText), new NVector2(-float.Epsilon, Math.Max(180f, ImGui.GetContentRegionAvail().Y - 24f)), ImGuiInputTextFlags.AllowTabInput))
         {
             _worldgenTextHistory.Record(_worldgenCurrentText, ImGui.GetTime());
             ValidateWorldgenCurrentText();
@@ -1404,7 +1447,7 @@ public sealed partial class DebugWindowManager
         ImGui.SameLine();
         if (ImGui.Button("Revert draft##worldgen-revert"))
         {
-            _worldgenCurrentText = _worldgenOriginalText;
+            _worldgenCurrentText = _worldgenCleanText;
             _worldgenDraftStates.Remove(entry.Key);
             ValidateWorldgenCurrentText();
             _worldgenStatus = $"Reverted draft for {entry.Domain}:{entry.AssetPath}.";
@@ -2228,7 +2271,7 @@ public sealed partial class DebugWindowManager
             return true;
         }
 
-        return IsWorldgenEntryCompatibleWithPreviewMode(entry.Kind, _worldgenPreviewMode, out reason);
+        return IsWorldgenEntryCompatibleWithPreviewMode(entry.Kind, entry.IsContentClassified, _worldgenPreviewMode, out reason);
     }
 
     private string GetWorldgenPreviewAssetRestrictionStatus()
@@ -2244,12 +2287,22 @@ public sealed partial class DebugWindowManager
             : $"Asset filter: {modeLabel} does not require a selected asset kind.";
     }
 
-    private static bool IsWorldgenEntryCompatibleWithPreviewMode(WorldgenAssetKind kind, int previewMode, out string reason)
+    private static bool IsWorldgenEntryCompatibleWithPreviewMode(
+        WorldgenAssetKind kind,
+        bool isContentClassified,
+        int previewMode,
+        out string reason)
     {
         string modeLabel = WorldgenPreviewModeLabels[Math.Clamp(previewMode, 0, WorldgenPreviewModeLabels.Length - 1)];
         if (!GetWorldgenPreviewCompatibleKindText(previewMode, out string compatibleKinds))
         {
             reason = $"Compatible: {modeLabel} preview does not use the selected asset.";
+            return true;
+        }
+
+        if (kind == WorldgenAssetKind.Other && !isContentClassified)
+        {
+            reason = $"Eligible: content classification is pending; selecting this asset will check compatibility with {modeLabel}.";
             return true;
         }
 
@@ -6076,8 +6129,8 @@ public sealed partial class DebugWindowManager
             WorldgenPreviewModeOre => GetSelectedWorldgenRowContext(WorldgenAssetKind.Deposits),
             WorldgenPreviewModeBlockPatch => GetSelectedWorldgenRowContext(WorldgenAssetKind.BlockPatches),
             WorldgenPreviewModeLandform => GetSelectedWorldgenRowContext(WorldgenAssetKind.Landforms),
-            WorldgenPreviewModeTerrainShape => SelectedWorldgenEntry?.Root?.ToString(Formatting.None) + ":" + _worldgenRowIndex + ":" + _worldgenCurrentText,
-            WorldgenPreviewModeRockStrata => SelectedWorldgenEntry?.Root?.ToString(Formatting.None) + ":" + _worldgenRowIndex + ":" + _worldgenCurrentText,
+            WorldgenPreviewModeTerrainShape => SelectedWorldgenEntry?.Key + ":" + _worldgenRowIndex + ":" + _worldgenCurrentText,
+            WorldgenPreviewModeRockStrata => SelectedWorldgenEntry?.Key + ":" + _worldgenRowIndex + ":" + _worldgenCurrentText,
             _ => ""
         };
     }
@@ -6490,7 +6543,33 @@ public sealed partial class DebugWindowManager
     {
         RememberWorldgenDraft();
         _worldgenLoadedKey = entry.Key;
-        _worldgenOriginalText = entry.SourceText;
+        bool wasLoaded = entry.Asset.IsLoaded();
+        try
+        {
+            if (!wasLoaded && !entry.Asset.Origin.TryLoadAsset(entry.Asset))
+            {
+                throw new InvalidOperationException("The asset origin could not load the selected file.");
+            }
+
+            _worldgenOriginalText = ReadAssetText(entry.Asset);
+        }
+        catch (Exception exception)
+        {
+            _worldgenOriginalText = "";
+            _worldgenStatus = $"Could not load {entry.Domain}:{entry.AssetPath}: {exception.Message}";
+            _worldgenDiagnostics.Exception($"Could not load {entry.Key}", exception);
+        }
+        finally
+        {
+            if (!wasLoaded && !entry.Asset.IsPatched)
+            {
+                entry.Asset.Data = null!;
+            }
+        }
+
+        TryParseJsonToken(_worldgenOriginalText, out JToken? sourceRoot, out _);
+        entry.UpdateKind(sourceRoot);
+        _worldgenCleanText = sourceRoot == null ? _worldgenOriginalText : sourceRoot.ToString(Formatting.Indented);
 
         if (_worldgenDraftStates.TryGetValue(entry.Key, out WorldgenDraftState? draft))
         {
@@ -6499,7 +6578,7 @@ public sealed partial class DebugWindowManager
         }
         else
         {
-            _worldgenCurrentText = entry.Root == null ? entry.SourceText : entry.Root.ToString(Formatting.Indented);
+            _worldgenCurrentText = _worldgenCleanText;
             _worldgenRowIndex = 0;
         }
 
@@ -6520,7 +6599,7 @@ public sealed partial class DebugWindowManager
     {
         if (string.IsNullOrWhiteSpace(_worldgenLoadedKey)) return;
 
-        bool dirty = IsWorldgenTextDirty(_worldgenCurrentText, _worldgenOriginalText);
+        bool dirty = IsWorldgenTextDirty(_worldgenCurrentText, _worldgenCleanText);
         if (dirty)
         {
             _worldgenDraftStates[_worldgenLoadedKey] = new WorldgenDraftState(_worldgenCurrentText, _worldgenRowIndex, _worldgenTextValid, _worldgenValidationStatus);
@@ -6533,22 +6612,12 @@ public sealed partial class DebugWindowManager
 
     private bool IsWorldgenEntryDirty(WorldgenAssetEntry entry)
     {
-        if (_worldgenLoadedKey.Equals(entry.Key, StringComparison.OrdinalIgnoreCase))
-        {
-            return IsWorldgenTextDirty(_worldgenCurrentText, _worldgenOriginalText);
-        }
-
         return _worldgenDraftStates.ContainsKey(entry.Key);
     }
 
-    private static bool IsWorldgenTextDirty(string currentText, string originalText)
+    private static bool IsWorldgenTextDirty(string currentText, string cleanText)
     {
-        if (TryParseJsonToken(currentText, out JToken? current, out _) && TryParseJsonToken(originalText, out JToken? original, out _) && current != null && original != null)
-        {
-            return !JToken.DeepEquals(current, original);
-        }
-
-        return !string.Equals(currentText, originalText, StringComparison.Ordinal);
+        return !string.Equals(currentText, cleanText, StringComparison.Ordinal);
     }
 
     private void SetWorldgenCurrentRoot(JToken root)
@@ -6811,7 +6880,7 @@ public sealed partial class DebugWindowManager
 
             string relativePath = Path.Combine("assets", entry.Domain, entry.AssetPath.Replace('/', Path.DirectorySeparatorChar));
             string outputPath = GetToolAuthoredAssetPath("worldgen", relativePath);
-            string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : entry.SourceText;
+            string oldText = File.Exists(outputPath) ? File.ReadAllText(outputPath) : _worldgenOriginalText;
             string newText = root.ToString(Formatting.Indented);
             SourceSaveRequest request = new(
                 outputPath,
@@ -6884,6 +6953,15 @@ public sealed partial class DebugWindowManager
             4 => WorldgenAssetKind.RockStrata,
             _ => WorldgenAssetKind.Other
         };
+    }
+
+    private static bool MatchesWorldgenKindFilter(
+        WorldgenAssetKind entryKind,
+        bool isContentClassified,
+        WorldgenAssetKind filterKind)
+    {
+        return entryKind == filterKind ||
+            (entryKind == WorldgenAssetKind.Other && !isContentClassified);
     }
 
     private static WorldgenAssetKind ClassifyWorldgenAssetKind(string assetPath, JToken? root)

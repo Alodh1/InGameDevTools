@@ -51,6 +51,12 @@ public sealed class FirstPersonAnimationsBehavior : EntityBehavior, IDisposable
         }
     }
 
+    public override void OnEntityDespawn(EntityDespawnData despawn)
+    {
+        Dispose();
+        base.OnEntityDespawn(despawn);
+    }
+
     private void Activate()
     {
         if (_api?.World?.Player?.Entity?.EntityId != _player.EntityId) return;
@@ -143,6 +149,12 @@ public sealed class ThirdPersonAnimationsBehavior : EntityBehavior, IDisposable
             AnimationPatches.AnimationBehaviors.Remove(_player.EntityId);
         }
         AnimationPatches.ActiveEntities.Remove(_player.EntityId);
+    }
+
+    public override void OnEntityDespawn(EntityDespawnData despawn)
+    {
+        Dispose();
+        base.OnEntityDespawn(despawn);
     }
 
     private void Activate()

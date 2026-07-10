@@ -85,6 +85,7 @@ internal sealed class DevToolsAssetIndexer(int batchSize)
                 {
                     State = IndexState.Ready;
                     complete();
+                    ReleasePendingAssets();
                 },
                 progress);
             return true;
@@ -92,6 +93,7 @@ internal sealed class DevToolsAssetIndexer(int batchSize)
         catch (Exception exception)
         {
             State = IndexState.Failed;
+            ReleasePendingAssets();
             error = exception;
             return false;
         }
@@ -101,5 +103,14 @@ internal sealed class DevToolsAssetIndexer(int batchSize)
     public void Fail()
     {
         State = IndexState.Failed;
+        ReleasePendingAssets();
+    }
+
+    private void ReleasePendingAssets()
+    {
+        PendingAssets.Clear();
+        PendingAssets.TrimExcess();
+        _indexedLocations.Clear();
+        _indexedLocations.TrimExcess();
     }
 }

@@ -38,7 +38,6 @@ public sealed class InGameDevToolsModSystem : ModSystem
 
     public override void StartPre(ICoreAPI api)
     {
-        ExtendedElementPose.NameHashCache = new(api, "in-game devtools element pose name hash cache", 500000, 11 * 60 * 1000, threadSafe: true);
         if (api.Side == EnumAppSide.Client)
         {
             ExtractBundledFonts(api);
@@ -119,6 +118,8 @@ public sealed class InGameDevToolsModSystem : ModSystem
     public override void Dispose()
     {
         _debugWindowManager?.Dispose();
+        _animationsManager?.Dispose();
+        _particleEffectsManager?.Dispose();
 
         if (_api != null)
         {
@@ -134,8 +135,6 @@ public sealed class InGameDevToolsModSystem : ModSystem
         DetachedEditorCameraPatches.Unpatch(DetachedCameraHarmonyId);
         ParticleRuntimePatches.Unpatch(ParticleRuntimeHarmonyId);
         PlayerRenderingPatches.Api = null;
-        ExtendedElementPose.NameHashCache?.Dispose();
-        ExtendedElementPose.NameHashCache = null;
         ActiveServerApi = null;
 
         _debugWindowManager = null;

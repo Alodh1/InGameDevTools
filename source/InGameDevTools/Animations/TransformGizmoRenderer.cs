@@ -68,6 +68,12 @@ internal sealed class TransformGizmoRenderer : IRenderer
     private static readonly int Blue = ColorUtil.ColorFromRgba(45, 120, 255, 255);
     private static readonly int Yellow = ColorUtil.ColorFromRgba(255, 230, 40, 255);
     private static readonly int Highlight = ColorUtil.ColorFromRgba(255, 180, 45, 255);
+    private static readonly TransformGizmoAxis[] DrawableAxes =
+    [
+        TransformGizmoAxis.X,
+        TransformGizmoAxis.Y,
+        TransformGizmoAxis.Z
+    ];
 
     private readonly ICoreClientAPI _api;
     private readonly DebugWindowManager _debugManager;
@@ -105,8 +111,10 @@ internal sealed class TransformGizmoRenderer : IRenderer
         if (stage != EnumRenderStage.Opaque) return;
 
         bool hasHighlight = _debugManager.TryGetRigPartHighlightCorners(out Vec3d[] highlightCorners);
-        bool hasOnionSkins = _debugManager.TryGetRigOnionSkinModels(out IReadOnlyList<TransformGizmoGhostModel> onionSkinModels);
-        bool hasMotionPaths = _debugManager.TryGetRigMotionPaths(out IReadOnlyList<TransformGizmoMotionPath> motionPaths);
+        IReadOnlyList<TransformGizmoGhostModel> onionSkinModels = Array.Empty<TransformGizmoGhostModel>();
+        bool hasOnionSkins = _debugManager.RigOnionSkinsVisible && _debugManager.TryGetRigOnionSkinModels(out onionSkinModels);
+        IReadOnlyList<TransformGizmoMotionPath> motionPaths = Array.Empty<TransformGizmoMotionPath>();
+        bool hasMotionPaths = _debugManager.RigMotionPathsVisible && _debugManager.TryGetRigMotionPaths(out motionPaths);
         GizmoState state = default;
         bool hasGizmo = ShouldDraw && TryBuildState(out state);
         if (!hasHighlight && !hasOnionSkins && !hasMotionPaths && !hasGizmo) return;
@@ -579,7 +587,7 @@ internal sealed class TransformGizmoRenderer : IRenderer
         double best = PickDistance;
         TransformGizmoAxis picked = TransformGizmoAxis.None;
 
-        foreach (TransformGizmoAxis axis in new[] { TransformGizmoAxis.X, TransformGizmoAxis.Y, TransformGizmoAxis.Z })
+        foreach (TransformGizmoAxis axis in DrawableAxes)
         {
             Vec3d end = Add(state.Center, Scale(GetWorldAxis(state, axis), AxisLength));
             if (!Project(state.Center, out Vec2d a) || !Project(end, out Vec2d b)) continue;
@@ -599,7 +607,7 @@ internal sealed class TransformGizmoRenderer : IRenderer
         double best = PickDistance;
         TransformGizmoAxis picked = TransformGizmoAxis.None;
 
-        foreach (TransformGizmoAxis axis in new[] { TransformGizmoAxis.X, TransformGizmoAxis.Y, TransformGizmoAxis.Z })
+        foreach (TransformGizmoAxis axis in DrawableAxes)
         {
             GetCircleBasis(state, axis, out Vec3d u, out Vec3d v);
             Vec3d first = Add(state.Center, Scale(u, AxisLength));

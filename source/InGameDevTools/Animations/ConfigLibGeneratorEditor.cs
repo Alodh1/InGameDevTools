@@ -779,7 +779,7 @@ public sealed partial class DebugWindowManager
         }
 
         string defaultJson = setting.DefaultJson;
-        if (ImGui.InputTextMultiline($"Default JSON##configlib-default-json-{index}", ref defaultJson, 256 * 1024, new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput))
+        if (ImGui.InputTextMultiline($"Default JSON##configlib-default-json-{index}", ref defaultJson, DevToolsImGuiTextBuffer.Capacity(defaultJson), new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput))
         {
             setting.DefaultJson = defaultJson;
             MarkConfigLibDocumentDirty("Updated default JSON.");
@@ -908,7 +908,7 @@ public sealed partial class DebugWindowManager
         }
 
         string valuesJson = setting.ValuesJson;
-        if (ImGui.InputTextMultiline($"Values JSON##configlib-values-json-{index}", ref valuesJson, 64 * 1024, new NVector2(-float.Epsilon, 74f), ImGuiInputTextFlags.AllowTabInput))
+        if (ImGui.InputTextMultiline($"Values JSON##configlib-values-json-{index}", ref valuesJson, DevToolsImGuiTextBuffer.Capacity(valuesJson), new NVector2(-float.Epsilon, 74f), ImGuiInputTextFlags.AllowTabInput))
         {
             setting.ValuesJson = valuesJson;
             MarkConfigLibDocumentDirty("Updated values JSON.");
@@ -1387,7 +1387,7 @@ public sealed partial class DebugWindowManager
         }
 
         bool changed = false;
-        if (ImGui.InputTextMultiline($"##configlib-json-buffer-{key}", ref buffer, 128 * 1024, new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput))
+        if (ImGui.InputTextMultiline($"##configlib-json-buffer-{key}", ref buffer, DevToolsImGuiTextBuffer.Capacity(buffer), new NVector2(-float.Epsilon, 96f), ImGuiInputTextFlags.AllowTabInput))
         {
             _configLibJsonBuffers[key] = buffer;
         }

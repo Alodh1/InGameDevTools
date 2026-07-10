@@ -671,6 +671,13 @@ public sealed partial class DebugWindowManager
     {
         if (!_modelPreviewDirty) return;
 
+        // Gizmo input mutates the document after this draw path has rendered the current mesh. Rebuilding
+        // here on every drag frame therefore stays one input frame behind while repeatedly serializing,
+        // parsing, tesselating, uploading and disposing the complete model. Keep the last solid mesh during
+        // the gesture; the live selection wireframe still reflects the edited bounds, and the dirty flag
+        // causes one coalesced rebuild on the first frame after the drag ends.
+        if (_modelGizmoDragging && _modelPreviewMesh != null) return;
+
         _modelPreviewDirty = false;
         _modelPreviewMesh?.Dispose();
         _modelPreviewMesh = null;

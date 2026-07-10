@@ -20,13 +20,13 @@ internal static class AnimationPatches
     public static FirstPersonAnimationsBehavior? FirstPersonAnimationBehavior { get; set; }
     public static long OwnerEntityId { get; set; }
     public static HashSet<long> ActiveEntities { get; } = new();
-    public static ObjectCache<ClientAnimator, EntityPlayer>? Animators { get; private set; }
+    public static ConditionalWeakTable<ClientAnimator, EntityPlayer>? Animators { get; private set; }
 
     private static readonly FieldInfo? AnimationManagerEntity = typeof(Vintagestory.API.Common.AnimationManager).GetField("entity", BindingFlags.NonPublic | BindingFlags.Instance);
 
     public static void Patch(string harmonyId, ICoreAPI api)
     {
-        Animators = new(api, "in-game devtools animators to players cache", 10000, 5 * 60 * 1000, threadSafe: true);
+        Animators = new();
         Harmony harmony = new(harmonyId);
 
         PatchIfFound(
@@ -58,7 +58,6 @@ internal static class AnimationPatches
         UnpatchIfFound(harmony, typeof(EntityPlayer).GetMethod(nameof(EntityPlayer.OnSelfBeforeRender), AccessTools.all), HarmonyPatchType.Postfix, harmonyId);
         UnpatchIfFound(harmony, typeof(Vintagestory.API.Common.AnimationManager).GetMethod("OnClientFrame", AccessTools.all), HarmonyPatchType.Postfix, harmonyId);
 
-        Animators?.Dispose();
         Animators = null;
         AnimationBehaviors.Clear();
         ActiveEntities.Clear();
@@ -88,21 +87,7 @@ internal static class AnimationPatches
     {
         if (DisableAllAnimations || animator == null) return;
 
-        EntityPlayer? entity = null;
-        if (pose is ExtendedElementPose { Player: not null } extendedPose)
-        {
-            entity = extendedPose.Player;
-        }
-        else if (Animators?.Get(animator, out EntityPlayer? cachedEntity) == true)
-        {
-            entity = cachedEntity;
-            if (pose is ExtendedElementPose extendedPoseWithoutPlayer)
-            {
-                extendedPoseWithoutPlayer.Player = cachedEntity;
-            }
-        }
-
-        if (entity == null) return;
+        if (Animators?.TryGetValue(animator, out EntityPlayer? entity) != true || entity == null) return;
 
         if (entity.EntityId == OwnerEntityId)
         {
@@ -134,6 +119,6 @@ internal static class AnimationPatches
         if (AnimationManagerEntity?.GetValue(__instance) is not EntityPlayer player) return;
         if (__instance.Animator is not ClientAnimator animator) return;
 
-        Animators?.Add(animator, player);
+        Animators?.GetValue(animator, _ => player);
     }
 }

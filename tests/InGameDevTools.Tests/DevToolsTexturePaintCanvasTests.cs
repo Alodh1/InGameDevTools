@@ -54,4 +54,35 @@ public sealed class DevToolsTexturePaintCanvasTests
         Assert.Equal(new DevToolsTexturePaintColor(0, 0, 255, 128), loaded.GetPixel(0, 1));
         Assert.Equal(new DevToolsTexturePaintColor(7, 8, 9, 10), loaded.GetPixel(1, 1));
     }
+
+    [Fact]
+    public void UploadRegion_TracksOnlyChangedPixelBounds()
+    {
+        DevToolsTexturePaintCanvas canvas = new(16, 12, new DevToolsTexturePaintColor(0, 0, 0, 0));
+        canvas.ClearUploadRegion();
+
+        canvas.SetPixel(3, 8, new DevToolsTexturePaintColor(1, 2, 3, 4));
+        canvas.SetPixel(9, 2, new DevToolsTexturePaintColor(5, 6, 7, 8));
+
+        Assert.True(canvas.TryGetUploadRegion(out int x, out int y, out int width, out int height));
+        Assert.Equal(3, x);
+        Assert.Equal(2, y);
+        Assert.Equal(7, width);
+        Assert.Equal(7, height);
+
+        canvas.ClearUploadRegion();
+        Assert.False(canvas.TryGetUploadRegion(out _, out _, out _, out _));
+    }
+
+    [Fact]
+    public void DirtyAssignmentForcesFullCanvasUpload()
+    {
+        DevToolsTexturePaintCanvas canvas = new(8, 6, new DevToolsTexturePaintColor(0, 0, 0, 0));
+        canvas.ClearUploadRegion();
+
+        canvas.Dirty = true;
+
+        Assert.True(canvas.TryGetUploadRegion(out int x, out int y, out int width, out int height));
+        Assert.Equal((0, 0, 8, 6), (x, y, width, height));
+    }
 }

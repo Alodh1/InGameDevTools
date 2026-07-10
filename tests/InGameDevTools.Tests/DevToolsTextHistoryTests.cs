@@ -119,6 +119,20 @@ public sealed class DevToolsTextHistoryTests
     }
 
     [Fact]
+    public void Record_CharacterBudgetDropsOldestLargeStates()
+    {
+        DevToolsTextHistory history = new(capacity: 10, maxRetainedCharacters: 10);
+        history.Reset("aaaa");
+        history.Record("bbbb", now: 10.0);
+        history.Record("cccc", now: 20.0);
+
+        Assert.Equal(8, history.RetainedCharacters);
+        Assert.True(history.TryUndo(out string text));
+        Assert.Equal("bbbb", text);
+        Assert.False(history.CanUndo);
+    }
+
+    [Fact]
     public void TryUndoRedo_AtBoundsReturnFalseAndKeepCurrent()
     {
         DevToolsTextHistory history = new();
@@ -128,6 +142,28 @@ public sealed class DevToolsTextHistoryTests
         Assert.Equal("a", text);
         Assert.False(history.TryRedo(out text));
         Assert.Equal("a", text);
+    }
+}
+
+public sealed class DevToolsImGuiTextBufferTests
+{
+    [Fact]
+    public void Capacity_UsesSmallMinimumForShortText()
+    {
+        Assert.Equal(4096u, DevToolsImGuiTextBuffer.Capacity("short", minimum: 4096, headroom: 128));
+    }
+
+    [Fact]
+    public void Capacity_GrowsWithTextAndHeadroom()
+    {
+        Assert.Equal(1257u, DevToolsImGuiTextBuffer.Capacity(new string('x', 1000), minimum: 64, headroom: 256));
+    }
+
+    [Fact]
+    public void Capacity_NeverFallsBelowExistingText()
+    {
+        string text = new('x', 10_000);
+        Assert.Equal(10_257u, DevToolsImGuiTextBuffer.Capacity(text, minimum: 64, headroom: 256, growthLimit: 1024));
     }
 }
 
