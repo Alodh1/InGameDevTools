@@ -4427,7 +4427,6 @@ public sealed partial class DebugWindowManager
 
         _modelDoc.Dirty = true;
         _modelPreviewDirty = true;
-        ModelInvalidateGeneratorPreviews();
         _modelJsonBufferStale = true;
         _modelLiveChangedAtMs = _api.World?.ElapsedMilliseconds ?? 0;
         _modelLiveDirty = true;

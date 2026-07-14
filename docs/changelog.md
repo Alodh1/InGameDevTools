@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed model-editor move, rotate, and resize gizmos so the solid preview updates throughout a drag again without rebuilding generator previews on every edit frame.
+
 - Reduced DevTools memory spikes and editor-frame allocation by making particle discovery and JSON indexes lazy, gating recovery/texture encoding, reusing preview buffers, bounding histories, and releasing cached/runtime resources on close and disposal.
 
 - Added an optional MeshLib model-editor mode with validated triangle/quad `noncuboid` authoring, component/topology/UV tools, cuboid conversion, true-mesh primitives, and reflective preview/live-apply integration.
