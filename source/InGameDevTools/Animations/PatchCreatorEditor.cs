@@ -1,4 +1,5 @@
 using ImGuiNET;
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -116,15 +117,21 @@ public sealed partial class DebugWindowManager
                 out float centerWidth,
                 out float rightWidth);
 
+            NVector2 leftTop = ImGui.GetCursorScreenPos();
             DrawPatchCreatorAssetBrowser(new NVector2(leftWidth, available.Y));
+            DevToolsTutorialAnchors.MarkRect("patches.left", leftTop, new NVector2(leftTop.X + leftWidth, leftTop.Y + available.Y));
             ImGui.SameLine(0, 0);
             ImGuiLayoutHelper.DrawVerticalSplitter("##patch-creator-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _patchCreatorLayout.LeftFraction, 260f * scale, Math.Max(260f * scale, panelAvailableWidth - rightWidth - 500f * scale));
             ImGui.SameLine(0, 0);
+            NVector2 centerTop = ImGui.GetCursorScreenPos();
             DrawPatchCreatorPathPanel(new NVector2(centerWidth, available.Y));
+            DevToolsTutorialAnchors.MarkRect("patches.center", centerTop, new NVector2(centerTop.X + centerWidth, centerTop.Y + available.Y));
             ImGui.SameLine(0, 0);
             ImGuiLayoutHelper.DrawVerticalSplitter("##patch-creator-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _patchCreatorLayout.RightFraction, 380f * scale, Math.Max(380f * scale, panelAvailableWidth - leftWidth - 500f * scale), invertDrag: true);
             ImGui.SameLine(0, 0);
+            NVector2 rightTop = ImGui.GetCursorScreenPos();
             DrawPatchCreatorOutputPanel(new NVector2(rightWidth, available.Y), showDiagnostics);
+            DevToolsTutorialAnchors.MarkRect("patches.right", rightTop, new NVector2(rightTop.X + rightWidth, rightTop.Y + available.Y));
             DrawPatchCreatorDiscardPopup();
         }
         catch (Exception exception)

@@ -1,5 +1,6 @@
 using System.Globalization;
 using ImGuiNET;
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -69,15 +70,21 @@ public sealed partial class DebugWindowManager
                 out float centerWidth,
                 out float rightWidth);
 
+            NVector2 leftTop = ImGui.GetCursorScreenPos();
             DrawConfigLibBrowser(new NVector2(leftWidth, available.Y));
+            DevToolsTutorialAnchors.MarkRect("configlib.left", leftTop, new NVector2(leftTop.X + leftWidth, leftTop.Y + available.Y));
             ImGui.SameLine(0, 0);
             ImGuiLayoutHelper.DrawVerticalSplitter("##configlib-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _configLibLayout.LeftFraction, 280f * scale, Math.Max(280f * scale, panelAvailableWidth - rightWidth - 460f * scale));
             ImGui.SameLine(0, 0);
+            NVector2 centerTop = ImGui.GetCursorScreenPos();
             DrawConfigLibDocumentPanel(new NVector2(centerWidth, available.Y));
+            DevToolsTutorialAnchors.MarkRect("configlib.center", centerTop, new NVector2(centerTop.X + centerWidth, centerTop.Y + available.Y));
             ImGui.SameLine(0, 0);
             ImGuiLayoutHelper.DrawVerticalSplitter("##configlib-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _configLibLayout.RightFraction, 380f * scale, Math.Max(380f * scale, panelAvailableWidth - leftWidth - 460f * scale), invertDrag: true);
             ImGui.SameLine(0, 0);
+            NVector2 rightTop = ImGui.GetCursorScreenPos();
             DrawConfigLibOutputPanel(new NVector2(rightWidth, available.Y), showDiagnostics);
+            DevToolsTutorialAnchors.MarkRect("configlib.right", rightTop, new NVector2(rightTop.X + rightWidth, rightTop.Y + available.Y));
         }
         catch (Exception exception)
         {

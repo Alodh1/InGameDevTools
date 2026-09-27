@@ -1,4 +1,5 @@
 using ImGuiNET;
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -105,15 +106,21 @@ public sealed partial class DebugWindowManager
                 out float centerWidth,
                 out float rightWidth);
 
+            NVector2 leftTop = ImGui.GetCursorScreenPos();
             DrawLootDropBrowser(new NVector2(leftWidth, available.Y));
+            DevToolsTutorialAnchors.MarkRect("loot.left", leftTop, new NVector2(leftTop.X + leftWidth, leftTop.Y + available.Y));
             ImGui.SameLine(0, 0);
             ImGuiLayoutHelper.DrawVerticalSplitter("##loot-drop-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _lootDropLayout.LeftFraction, 260f * scale, Math.Max(260f * scale, panelAvailableWidth - rightWidth - 440f * scale));
             ImGui.SameLine(0, 0);
+            NVector2 centerTop = ImGui.GetCursorScreenPos();
             DrawLootDropEditorPanel(new NVector2(centerWidth, available.Y));
+            DevToolsTutorialAnchors.MarkRect("loot.center", centerTop, new NVector2(centerTop.X + centerWidth, centerTop.Y + available.Y));
             ImGui.SameLine(0, 0);
             ImGuiLayoutHelper.DrawVerticalSplitter("##loot-drop-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _lootDropLayout.RightFraction, 340f * scale, Math.Max(340f * scale, panelAvailableWidth - leftWidth - 440f * scale), invertDrag: true);
             ImGui.SameLine(0, 0);
+            NVector2 rightTop = ImGui.GetCursorScreenPos();
             DrawLootDropInspector(new NVector2(rightWidth, available.Y), showDiagnostics);
+            DevToolsTutorialAnchors.MarkRect("loot.right", rightTop, new NVector2(rightTop.X + rightWidth, rightTop.Y + available.Y));
         }
         catch (Exception exception)
         {

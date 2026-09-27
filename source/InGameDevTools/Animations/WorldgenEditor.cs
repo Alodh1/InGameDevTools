@@ -1,4 +1,5 @@
 using ImGuiNET;
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -213,15 +214,21 @@ public sealed partial class DebugWindowManager
                 out float centerWidth,
                 out float rightWidth);
 
+            NVector2 leftTop = ImGui.GetCursorScreenPos();
             DrawWorldgenBrowser(new NVector2(leftWidth, available.Y));
+            DevToolsTutorialAnchors.MarkRect("worldgen.left", leftTop, new NVector2(leftTop.X + leftWidth, leftTop.Y + available.Y));
             ImGui.SameLine(0, 0);
             ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _worldgenLayout.LeftFraction, 240f * scale, Math.Max(240f * scale, panelAvailableWidth - rightWidth - 640f * scale));
             ImGui.SameLine(0, 0);
+            NVector2 centerTop = ImGui.GetCursorScreenPos();
             DrawWorldgenPreviewPanel(new NVector2(centerWidth, available.Y));
+            DevToolsTutorialAnchors.MarkRect("worldgen.center", centerTop, new NVector2(centerTop.X + centerWidth, centerTop.Y + available.Y));
             ImGui.SameLine(0, 0);
             ImGuiLayoutHelper.DrawVerticalSplitter("##worldgen-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _worldgenLayout.RightFraction, 380f * scale, Math.Max(380f * scale, panelAvailableWidth - leftWidth - 640f * scale), invertDrag: true);
             ImGui.SameLine(0, 0);
+            NVector2 rightTop = ImGui.GetCursorScreenPos();
             DrawWorldgenRightPanel(new NVector2(rightWidth, available.Y), showDiagnostics);
+            DevToolsTutorialAnchors.MarkRect("worldgen.right", rightTop, new NVector2(rightTop.X + rightWidth, rightTop.Y + available.Y));
             DrawWorldgenPoppedOutViewport();
         }
         catch (Exception exception)

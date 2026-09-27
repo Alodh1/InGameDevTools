@@ -1,3 +1,4 @@
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using ImGuiNET;
 using Newtonsoft.Json;
@@ -100,6 +101,7 @@ public sealed partial class DebugWindowManager
             _settingsStatus = DevToolsLang.Get("ui.settings.status.ready", SettingsStatusReadyFallback);
         }
 
+        NVector2 generalTop = ImGui.GetCursorScreenPos();
         ImGui.SeparatorText(DevToolsLang.Get("ui.settings.section.general", "General"));
         bool changed = false;
         bool languageChanged = DrawSettingsLanguageControl();
@@ -142,6 +144,8 @@ public sealed partial class DebugWindowManager
             _devToolsConfig.WriteLiveBackups = backups;
             changed = true;
         }
+        DevToolsTutorialAnchors.MarkRect("settings.general", generalTop,
+            new NVector2(generalTop.X + ImGui.GetContentRegionAvail().X, ImGui.GetCursorScreenPos().Y));
 
         ImGui.SeparatorText(DevToolsLang.Get("ui.settings.section.theme", "Theme"));
         int presetIndex = Array.FindIndex(SettingsThemePresets, preset => preset.Equals(_devToolsConfig.ThemePreset, StringComparison.OrdinalIgnoreCase));
@@ -186,6 +190,7 @@ public sealed partial class DebugWindowManager
         DrawSettingsSafetyBackupControls(ref changed);
         DrawSettingsAdvancedColors(ref changed);
         DrawSettingsImportExport(ref changed);
+        DrawTutorialSettingsSection(ref changed);
 
         ImGui.SeparatorText(DevToolsLang.Get("ui.settings.section.status", "Status"));
         ImGui.TextWrapped(_settingsStatus);

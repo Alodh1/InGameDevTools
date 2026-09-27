@@ -2,6 +2,7 @@ using InGameDevTools.Colliders;
 using InGameDevTools.Integration;
 using InGameDevTools.Integration.Transpilers;
 using InGameDevTools.MeleeSystems;
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using ImGuiNET;
 using Newtonsoft.Json.Linq;
@@ -1176,6 +1177,7 @@ public sealed partial class DebugWindowManager : IDisposable
         // the game in fullscreen.
         SetEditorViewportSuppression(true);
         UpdateDevToolsKeyboardState();
+        DevToolsTutorialAnchors.BeginFrame(_tutorialActive);
 
         NVector2 displaySize = ImGui.GetIO().DisplaySize;
         if (displaySize.X <= 0 || displaySize.Y <= 0)
@@ -1188,6 +1190,10 @@ public sealed partial class DebugWindowManager : IDisposable
         if (_devToolsCollapsed)
         {
             ModelEndViewportGizmoInteractions(commitTransforms: true);
+            if (_tutorialActive)
+            {
+                EndTutorial(false);
+            }
             RestoreExpandedEditorInputSuppression();
             ClearAiBehaviorLiveApplyState();
             RestoreWorldgenPreviewForEditorTeardown("devtools collapsed");
@@ -1214,7 +1220,11 @@ public sealed partial class DebugWindowManager : IDisposable
         if (windowVisible)
         {
             ImGui.SetWindowFontScale(1f);
+            NVector2 toolbarTop = ImGui.GetCursorScreenPos();
             DrawDevToolsToolbar();
+            DevToolsTutorialAnchors.MarkRect("global.toolbar", toolbarTop,
+                new NVector2(toolbarTop.X + ImGui.GetContentRegionAvail().X, ImGui.GetCursorScreenPos().Y));
+            DrawTutorialFirstOpenHint();
             DrawRecoveryBanner();
             HandleCommandPaletteShortcut();
             DrawCommandPalette();
@@ -1224,8 +1234,11 @@ public sealed partial class DebugWindowManager : IDisposable
                 _activeDevToolsTab = DevToolsTab.Animations;
             }
 
+            NVector2 tabsTop = ImGui.GetCursorScreenPos();
             if (ImGui.BeginTabBar($"##main_tab_bar"))
             {
+                DevToolsTutorialAnchors.MarkRect("global.tabs", tabsTop,
+                    new NVector2(tabsTop.X + ImGui.GetContentRegionAvail().X, tabsTop.Y + ImGui.GetFrameHeight()));
                 ImGuiTabItemFlags vanillaTabFlags = GetMainTabFlags(DevToolsTab.Animations);
                 bool vanillaTabOpen = true;
                 if (ImGui.BeginTabItem(DevToolsTabLabel(DevToolsTab.Animations), ref vanillaTabOpen, vanillaTabFlags))
@@ -1334,6 +1347,10 @@ public sealed partial class DebugWindowManager : IDisposable
 
         DrawVanillaPoppedOutViewport();
         DrawDevToolsGeneratorOverlays();
+        if (_tutorialActive)
+        {
+            DrawTutorialOverlay(displaySize);
+        }
 
         _detachedEditorCamera?.Update(deltaSeconds, _showAnimationEditor);
         UpdateDevToolsRecoveryAutosaves();
@@ -1627,6 +1644,16 @@ public sealed partial class DebugWindowManager : IDisposable
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(DevToolsLang.Get("ui.toolbar.diagnostics.tooltip", "Show detailed editor diagnostic messages for caught exceptions and skipped previews."));
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button(DevToolsLang.Label("ui.toolbar.help", "?", "devtools-help")))
+        {
+            StartTutorial(_activeDevToolsTab);
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(DevToolsLang.Get("ui.toolbar.help.tooltip", "Start the guided tutorial for this editor (Esc to exit)."));
         }
 
         ImGui.Separator();

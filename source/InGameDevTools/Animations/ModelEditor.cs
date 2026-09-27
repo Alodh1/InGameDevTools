@@ -1,4 +1,5 @@
 using ImGuiNET;
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -418,7 +419,10 @@ public sealed partial class DebugWindowManager
         EnsureModelShapeIndex();
         ModelHandleShortcuts();
 
+        NVector2 toolbarTop = ImGui.GetCursorScreenPos();
         DrawModelToolbar();
+        DevToolsTutorialAnchors.MarkRect("models.toolbar", toolbarTop,
+            new NVector2(toolbarTop.X + ImGui.GetContentRegionAvail().X, ImGui.GetCursorScreenPos().Y));
 
         NVector2 available = ImGui.GetContentRegionAvail();
         float height = Math.Max(280f, available.Y - 4f);
@@ -436,15 +440,21 @@ public sealed partial class DebugWindowManager
             out float centerWidth,
             out float rightWidth);
 
+        NVector2 leftTop = ImGui.GetCursorScreenPos();
         DrawModelLeftPanel(new NVector2(leftWidth, height));
+        DevToolsTutorialAnchors.MarkRect("models.left", leftTop, new NVector2(leftTop.X + leftWidth, leftTop.Y + height));
         ImGui.SameLine(0f, 0f);
         ImGuiLayoutHelper.DrawVerticalSplitter("##model-splitter-left", height, 8f, panelAvailableWidth, ref _modelLayout.LeftFraction, 220f, 520f);
         ImGui.SameLine(0f, 0f);
+        NVector2 centerTop = ImGui.GetCursorScreenPos();
         DrawModelCenterPanel(new NVector2(centerWidth, height));
+        DevToolsTutorialAnchors.MarkRect("models.center", centerTop, new NVector2(centerTop.X + centerWidth, centerTop.Y + height));
         ImGui.SameLine(0f, 0f);
         ImGuiLayoutHelper.DrawVerticalSplitter("##model-splitter-right", height, 8f, panelAvailableWidth, ref _modelLayout.RightFraction, 260f, 560f, invertDrag: true);
         ImGui.SameLine(0f, 0f);
+        NVector2 rightTop = ImGui.GetCursorScreenPos();
         DrawModelInspectorPanel(new NVector2(rightWidth, height));
+        DevToolsTutorialAnchors.MarkRect("models.right", rightTop, new NVector2(rightTop.X + rightWidth, rightTop.Y + height));
 
         DrawModelDiscardPopup();
         ModelMaybeAutoApplyLive(force: false);

@@ -1,6 +1,7 @@
 using ImGuiNET;
 using InGameDevTools.Animations;
 using InGameDevTools.Integration;
+using InGameDevTools.Tutorials;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using OpenTK.Mathematics;
@@ -613,6 +614,8 @@ public class ParticleEffectsManager : IDisposable
             out float centerWidth,
             out float rightWidth);
 
+        System.Numerics.Vector2 particlesLeftTop = ImGui.GetCursorScreenPos();
+        DevToolsTutorialAnchors.MarkRect("particles.left", particlesLeftTop, new System.Numerics.Vector2(particlesLeftTop.X + leftWidth, particlesLeftTop.Y + available.Y));
         ImGui.BeginChild($"##particles-browser-{id}", new System.Numerics.Vector2(leftWidth, available.Y), true);
         ImGui.SeparatorText("Particle sources");
         DrawParticleScanControls(id);
@@ -650,6 +653,8 @@ public class ParticleEffectsManager : IDisposable
 
         if (families.Count == 0 || selectedFamily == null || selectedVariant == null)
         {
+            System.Numerics.Vector2 particlesEmptyTop = ImGui.GetCursorScreenPos();
+            DevToolsTutorialAnchors.MarkRect("particles.center", particlesEmptyTop, new System.Numerics.Vector2(particlesEmptyTop.X + centerWidth, particlesEmptyTop.Y + available.Y));
             ImGui.BeginChild($"##particles-empty-{id}", new System.Numerics.Vector2(centerWidth, available.Y), true);
             ImGui.TextDisabled("No particle effects loaded.");
             ImGui.TextWrapped("Use Reload assets after a world is loaded. If this remains empty, enable Verbose scan log and reload.");
@@ -659,6 +664,8 @@ public class ParticleEffectsManager : IDisposable
 
         IReadOnlyList<ParticleEffectEntry> previewEmitters = selectedVariant.EmittersWithParticles;
         ParticleEffectEntry? selectedEmitter = selectedVariant.GetEmitter(_selectedParticleEmitterIndex);
+        System.Numerics.Vector2 particlesCenterTop = ImGui.GetCursorScreenPos();
+        DevToolsTutorialAnchors.MarkRect("particles.center", particlesCenterTop, new System.Numerics.Vector2(particlesCenterTop.X + centerWidth, particlesCenterTop.Y + available.Y));
         ImGui.BeginChild($"##particles-preview-{id}", new System.Numerics.Vector2(centerWidth, available.Y), true);
         DrawPreviewPanel(id, selectedVariant, previewEmitters, selectedEmitter?.Properties ?? previewEmitters.FirstOrDefault()?.Properties, deltaSeconds);
         ImGui.EndChild();
@@ -667,6 +674,8 @@ public class ParticleEffectsManager : IDisposable
         ImGuiLayoutHelper.DrawVerticalSplitter($"##particles-right-splitter-{id}", available.Y, splitterThickness, panelAvailableWidth, ref _layout.RightFraction, 360f * scale, Math.Max(360f * scale, panelAvailableWidth - leftWidth - 320f * scale), invertDrag: true);
         ImGui.SameLine(0, 0);
 
+        System.Numerics.Vector2 particlesRightTop = ImGui.GetCursorScreenPos();
+        DevToolsTutorialAnchors.MarkRect("particles.right", particlesRightTop, new System.Numerics.Vector2(particlesRightTop.X + rightWidth, particlesRightTop.Y + available.Y));
         ImGui.BeginChild($"##particles-properties-{id}", new System.Numerics.Vector2(rightWidth, available.Y), true, ImGuiWindowFlags.HorizontalScrollbar);
         ImGui.SeparatorText("Values");
         DrawParticleEditScopeControls(id, selectedFamily, selectedVariant);

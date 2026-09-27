@@ -279,6 +279,8 @@ public sealed class DevToolsConfig
     public float WindowRounding { get; set; } = -1f;
     public float HoverDelayNormal { get; set; } = -1f;
     public float HoverDelayShort { get; set; } = -1f;
+    public List<string> CompletedTutorials { get; set; } = new();
+    public bool ShowTutorialHintOnFirstOpen { get; set; } = true;
 
     public void Normalize()
     {
@@ -326,6 +328,13 @@ public sealed class DevToolsConfig
         WindowRounding = NormalizeOptional(WindowRounding, 0f, 16f);
         HoverDelayNormal = NormalizeOptional(HoverDelayNormal, 0f, 3f);
         HoverDelayShort = NormalizeOptional(HoverDelayShort, 0f, 3f);
+
+        CompletedTutorials ??= new();
+        CompletedTutorials = CompletedTutorials
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
     }
 
     private static float NormalizeOptional(float value, float min, float max)

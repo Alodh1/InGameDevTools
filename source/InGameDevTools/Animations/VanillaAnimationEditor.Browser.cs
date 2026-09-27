@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using InGameDevTools.Integration.Transpilers;
 using ImGuiNET;
@@ -153,31 +154,39 @@ public sealed partial class DebugWindowManager
         VanillaBrowserRow? selected = FindVanillaBrowserRow(_vanillaSelection.RowKey);
         HandleVanillaHistoryShortcuts(selected);
 
+        NVector2 leftTop = ImGui.GetCursorScreenPos();
         ImGui.BeginChild("##vanilla-animation-left-panel", new NVector2(leftWidth, topHeight), true);
         DrawVanillaBrowser(rows);
         ImGui.EndChild();
+        DevToolsTutorialAnchors.MarkRect("anim.left", leftTop, new NVector2(leftTop.X + leftWidth, leftTop.Y + topHeight));
 
         ImGui.SameLine(0, 0);
         ImGuiLayoutHelper.DrawVerticalSplitter("##vanilla-left-splitter", topHeight, splitterThickness, panelAvailableWidth, ref _vanillaLayout.LeftFraction, 210f * _devToolsUiScale, Math.Max(210f * _devToolsUiScale, panelAvailableWidth - rightWidth - minCenterWidth));
         ImGui.SameLine(0, 0);
 
+        NVector2 centerTop = ImGui.GetCursorScreenPos();
         ImGui.BeginChild("##vanilla-animation-center-panel", new NVector2(centerWidth, topHeight), true);
         DrawVanillaCenterPanel(selected, deltaSeconds);
         ImGui.EndChild();
+        DevToolsTutorialAnchors.MarkRect("anim.center", centerTop, new NVector2(centerTop.X + centerWidth, centerTop.Y + topHeight));
 
         ImGui.SameLine(0, 0);
         ImGuiLayoutHelper.DrawVerticalSplitter("##vanilla-right-splitter", topHeight, splitterThickness, panelAvailableWidth, ref _vanillaLayout.RightFraction, 260f * _devToolsUiScale, Math.Max(260f * _devToolsUiScale, panelAvailableWidth - leftWidth - minCenterWidth), invertDrag: true);
         ImGui.SameLine(0, 0);
 
+        NVector2 rightTop = ImGui.GetCursorScreenPos();
         ImGui.BeginChild("##vanilla-animation-right-panel", new NVector2(rightWidth, topHeight), true);
         DrawVanillaInspector(selected);
         ImGui.EndChild();
+        DevToolsTutorialAnchors.MarkRect("anim.right", rightTop, new NVector2(rightTop.X + rightWidth, rightTop.Y + topHeight));
 
         ImGuiLayoutHelper.DrawHorizontalSplitter("##vanilla-timeline-splitter", available.X, splitterThickness, topBottomAvailableHeight, ref _vanillaLayoutBottomFraction, bottomMin, bottomMax);
 
+        NVector2 timelineTop = ImGui.GetCursorScreenPos();
         ImGui.BeginChild("##vanilla-animation-bottom-panel", new NVector2(available.X, bottomHeight), true);
         DrawVanillaTimeline(selected);
         ImGui.EndChild();
+        DevToolsTutorialAnchors.MarkRect("anim.timeline", timelineTop, new NVector2(timelineTop.X + available.X, timelineTop.Y + bottomHeight));
     }
 
     private void ResetVanillaLayout()

@@ -1,4 +1,5 @@
 using ImGuiNET;
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -83,15 +84,21 @@ public sealed partial class DebugWindowManager
             out float centerWidth,
             out float rightWidth);
 
+        NVector2 leftTop = ImGui.GetCursorScreenPos();
         DrawBlockItemJsonBrowser(new NVector2(leftWidth, available.Y));
+        DevToolsTutorialAnchors.MarkRect("blockjson.left", leftTop, new NVector2(leftTop.X + leftWidth, leftTop.Y + available.Y));
         ImGui.SameLine(0, 0);
         ImGuiLayoutHelper.DrawVerticalSplitter("##block-json-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _blockItemJsonLayout.LeftFraction, 260f * scale, Math.Max(260f * scale, panelAvailableWidth - rightWidth - 420f * scale));
         ImGui.SameLine(0, 0);
+        NVector2 centerTop = ImGui.GetCursorScreenPos();
         DrawBlockItemJsonTextEditor(new NVector2(centerWidth, available.Y));
+        DevToolsTutorialAnchors.MarkRect("blockjson.center", centerTop, new NVector2(centerTop.X + centerWidth, centerTop.Y + available.Y));
         ImGui.SameLine(0, 0);
         ImGuiLayoutHelper.DrawVerticalSplitter("##block-json-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _blockItemJsonLayout.RightFraction, 320f * scale, Math.Max(320f * scale, panelAvailableWidth - leftWidth - 420f * scale), invertDrag: true);
         ImGui.SameLine(0, 0);
+        NVector2 rightTop = ImGui.GetCursorScreenPos();
         DrawBlockItemJsonInspector(new NVector2(rightWidth, available.Y), showDiagnostics);
+        DevToolsTutorialAnchors.MarkRect("blockjson.right", rightTop, new NVector2(rightTop.X + rightWidth, rightTop.Y + available.Y));
     }
 
     private void ResetBlockItemJsonLayout()

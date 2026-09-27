@@ -1,3 +1,4 @@
+using InGameDevTools.Tutorials;
 using InGameDevTools.Utils;
 using ImGuiNET;
 using Newtonsoft.Json;
@@ -203,15 +204,21 @@ public sealed partial class DebugWindowManager
                     out float centerWidth,
                     out float rightWidth);
 
+                NVector2 leftTop = ImGui.GetCursorScreenPos();
                 DrawRecipeBrowser(api, new NVector2(leftWidth, available.Y));
+                DevToolsTutorialAnchors.MarkRect("recipe.left", leftTop, new NVector2(leftTop.X + leftWidth, leftTop.Y + available.Y));
                 ImGui.SameLine(0, 0);
                 ImGuiLayoutHelper.DrawVerticalSplitter("##recipe-left-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _layout.LeftFraction, 250f * scale, Math.Max(250f * scale, panelAvailableWidth - rightWidth - 360f * scale));
                 ImGui.SameLine(0, 0);
+                NVector2 centerTop = ImGui.GetCursorScreenPos();
                 DrawRecipeCanvas(new NVector2(centerWidth, available.Y));
+                DevToolsTutorialAnchors.MarkRect("recipe.center", centerTop, new NVector2(centerTop.X + centerWidth, centerTop.Y + available.Y));
                 ImGui.SameLine(0, 0);
                 ImGuiLayoutHelper.DrawVerticalSplitter("##recipe-right-splitter", available.Y, splitterThickness, panelAvailableWidth, ref _layout.RightFraction, 320f * scale, Math.Max(320f * scale, panelAvailableWidth - leftWidth - 360f * scale), invertDrag: true);
                 ImGui.SameLine(0, 0);
+                NVector2 rightTop = ImGui.GetCursorScreenPos();
                 DrawRecipeInspector(new NVector2(rightWidth, available.Y));
+                DevToolsTutorialAnchors.MarkRect("recipe.right", rightTop, new NVector2(rightTop.X + rightWidth, rightTop.Y + available.Y));
             }
             catch (Exception exception)
             {
